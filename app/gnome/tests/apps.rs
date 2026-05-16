@@ -4,12 +4,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-fn write_desktop(dir: &Path, filename: &str, name: &str, exec: &str) {
+fn write_desktop(dir: &Path, filename: &str, name: &str, exec: &str, icon: &str) {
     fs::create_dir_all(dir).expect("create_dir_all should succeed for test fixture dir");
     let contents = format!(
-        "[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\n",
+        "[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\nIcon={icon}\n",
         name = name,
         exec = exec,
+        icon = icon,
     );
     let path = dir.join(filename);
     fs::write(&path, contents).expect("write should succeed for test fixture .desktop file");
@@ -26,9 +27,27 @@ fn gather_applications_lists_all_desktop_files_in_supplied_dirs() {
         .join("usr_share")
         .join("applications");
 
-    write_desktop(&data_home_apps, "alpha.desktop", "Alpha", "true");
-    write_desktop(&data_home_apps, "beta.desktop", "Beta", "true");
-    write_desktop(&usr_share_apps, "gamma.desktop", "Gamma", "true");
+    write_desktop(
+        &data_home_apps,
+        "alpha.desktop",
+        "Alpha",
+        "true",
+        "test-icon-alpha",
+    );
+    write_desktop(
+        &data_home_apps,
+        "beta.desktop",
+        "Beta",
+        "true",
+        "test-icon-beta",
+    );
+    write_desktop(
+        &usr_share_apps,
+        "gamma.desktop",
+        "Gamma",
+        "true",
+        "test-icon-gamma",
+    );
 
     // Non-.desktop file should be ignored.
     fs::write(data_home_apps.join("readme.txt"), "not a desktop file\n")
@@ -84,5 +103,16 @@ fn gather_applications_lists_all_desktop_files_in_supplied_dirs() {
     assert_eq!(
         stems, expected,
         "desktop_id stems should be alpha/beta/gamma; got {stems:?}"
+    );
+
+    let icons: Vec<Option<String>> = apps.iter().map(|a| a.icon.clone()).collect();
+    assert_eq!(
+        icons,
+        vec![
+            Some("test-icon-alpha".to_string()),
+            Some("test-icon-beta".to_string()),
+            Some("test-icon-gamma".to_string()),
+        ],
+        "icons sorted by desktop_id should match the fixtures; got {icons:?}"
     );
 }

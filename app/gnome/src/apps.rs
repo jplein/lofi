@@ -94,7 +94,17 @@ pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
                 continue;
             };
 
-            out.push(Application { name, desktop_id });
+            let icon: Option<String> = info
+                .icon()
+                .and_then(|i| IconExt::to_string(&i))
+                .map(|gs| gs.to_string())
+                .filter(|s| !s.trim().is_empty());
+
+            out.push(Application {
+                name,
+                desktop_id,
+                icon,
+            });
         }
     }
 

@@ -26,4 +26,12 @@ If a type or function needs a platform crate to exist, it does not belong here. 
 
 ## Current contents
 
-Just `Application` today. `Window`, `Workspace`, and `Command` will land here as their corresponding features are built out.
+Just `Application` today, with three fields:
+
+- `name` — the human-readable display string (e.g. `"Firefox"`).
+- `desktop_id` — the stable identifier used to launch the app or refer to it across runs (e.g. `"firefox.desktop"`).
+- `icon` — `Option<String>` carrying an icon **identifier**, not bytes. Typically a freedesktop themed-icon name like `"firefox"`, or, less commonly, an absolute filesystem path when the `.desktop` file's `Icon=` line points at a literal file. `None` means the `.desktop` file had no usable `Icon=` line.
+
+The identifier-not-bytes choice is deliberate: rendering happens in the UI layer where the icon theme, scale factor, and target pixel size are all known. Resolving icons here would force eager I/O at gather time and lock in answers that go stale the moment the user switches themes or moves a window between monitors with different scales.
+
+`Window`, `Workspace`, and `Command` will land here as their corresponding features are built out.

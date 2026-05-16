@@ -6,7 +6,7 @@ Code in this directory (outside of `gnome/` and the future `macos/`) is shared b
 
 ## Layout
 
-- `core/` — platform-agnostic shared crate (`lofi-core`). Currently holds the `Application` struct (`name`, `desktop_id`). No GTK/gio or other platform dependencies.
+- `core/` — platform-agnostic shared crate (`lofi-core`). Currently holds the `Application` struct (`name`, `desktop_id`, `icon`). No GTK/gio or other platform dependencies.
 - `gnome/` — Linux/GNOME-specific code: GTK4 UI, libadwaita, D-Bus clients for `org.gnome.Shell.Introspect` and the LoFi GNOME extension.
 - `macos/` — macOS-specific code (planned, not yet present). The macOS UI will be Swift on top of a Rust core exposed via a C ABI.
 
