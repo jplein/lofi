@@ -80,11 +80,25 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
         });
     }
 
-    // Wire key events on the search entry: Up/Down navigate, Enter activates,
-    // Escape closes.
-    let key_controller = gtk::EventControllerKey::new();
+    // Enter is handled via SearchEntry's `activate` signal because gtk::Entry's
+    // default key-pressed handler consumes Return in the target phase, so a
+    // bubble-phase EventControllerKey would never see it.
     {
         let state = state.clone();
+        let list_box = list_box.clone();
+        let window = window.clone();
+        search_entry.connect_activate(move |_| {
+            if let Some(entry) = selected_entry(&list_box, &state) {
+                launch::activate(&entry);
+                window.close();
+            }
+        });
+    }
+
+    // Up/Down navigate the list; Escape closes. Enter is intentionally absent
+    // here — see the connect_activate block above.
+    let key_controller = gtk::EventControllerKey::new();
+    {
         let list_box = list_box.clone();
         let window = window.clone();
         key_controller.connect_key_pressed(
@@ -95,13 +109,6 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
                 }
                 gtk::gdk::Key::Down => {
                     move_selection(&list_box, 1);
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
-                    if let Some(entry) = selected_entry(&list_box, &state) {
-                        launch::activate(&entry);
-                        window.close();
-                    }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
