@@ -23,6 +23,10 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
+        crateInfo = craneLib.crateNameFromCargoToml {
+          cargoToml = ./app/gnome/Cargo.toml;
+        };
+
         nativeBuildInputs = with pkgs; [
           pkg-config
           wrapGAppsHook4
@@ -37,6 +41,7 @@
         commonArgs = {
           src = craneLib.cleanCargoSource ./app;
           strictDeps = true;
+          inherit (crateInfo) pname version;
           inherit nativeBuildInputs buildInputs;
         };
 

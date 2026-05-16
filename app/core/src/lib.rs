@@ -1,3 +1,6 @@
+pub mod matcher;
+pub use matcher::search;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

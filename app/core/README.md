@@ -48,6 +48,24 @@ The identifier-not-bytes choice is deliberate: rendering happens in the UI layer
 
 `Entry` provides four match-dispatched accessors: `name()`, `icon()`, `kind()`, and `reference()`. They use exhaustive `match` (not `if let`) so that adding an `Entry` variant is a compile error until every accessor is updated.
 
+### `matcher::search`
+
+Signature:
+
+```rust
+pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry>
+```
+
+Behavior:
+
+- An empty or whitespace-only `query` is a passthrough: every entry is returned in input slice order. This makes the matcher safe to call unconditionally from the UI on every keystroke including the initial empty one.
+- A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics); per-token scores are summed.
+- Results sort by score **descending**, with ascending name as the tiebreaker. The tiebreaker keeps a stable visual order when two entries score the same; otherwise rerunning the same query could shuffle ties.
+
+The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. Future `Entry` variants force this function to be updated (no `_` arm).
+
+The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is the second direct dependency of this crate, alongside `serde`.
+
 ### Why two types for one concept
 
 Display fields drift between sessions: locale changes the display name, the user switches icon themes, an app gets renamed or its `.desktop` file moves. A history or MRU store that pickled the whole `Application` would either accumulate stale strings or have to re-key itself on every change.
@@ -58,6 +76,6 @@ Display fields drift between sessions: locale changes the display name, the user
 
 ### Dependencies
 
-`serde` (with `derive`) is a direct dependency solely for `EntryRef`'s tagged-enum representation. `serde_json` is a dev-dependency for the JSON round-trip test.
+`serde` (with `derive`) is a direct dependency solely for `EntryRef`'s tagged-enum representation. `fuzzy-matcher` is a direct dependency for `matcher::search` (Skim-style fuzzy scoring). `serde_json` is a dev-dependency for the JSON round-trip test.
 
 `Window`, `Workspace`, and `Command` will land here as their corresponding features are built out.

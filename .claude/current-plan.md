@@ -1,150 +1,216 @@
-# Entry abstraction + EntryRef persistence handle
+# Launcher UI: search, navigate, activate
 
 ## Summary
 
-Add a sum-type `Entry` enum to `lofi-core` that unifies launcher items behind a single runtime type. Add `EntryRef` — the serializable `{type, id}` handle — for future history/MRU storage. Add `EntryKind` discriminant and `resolve` lookup function. Normalize `Application::desktop_id` to canonical form (always `.desktop`-suffixed) so it can serve as a stable history key. Add `serde` (runtime) and `serde_json` (dev) to `lofi-core`.
+Add a keyboard-driven launcher window. `lofi-core` gains a `matcher` module (Skim fuzzy search). `lofi-gnome` gains `ui` (window + list + signals) and `launch` (activation via gio) modules. `main.rs` is rewritten to gather entries and hand them to `ui::build`. Matcher gets 6 unit tests; UI/launch are manually verified.
 
 ## File-by-file changes
 
 ### 1. `app/core/Cargo.toml` — modify
 
-```toml
-[package]
-name = "lofi-core"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-name = "lofi_core"
-path = "src/lib.rs"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-serde_json = "1"
-```
-
-Both already exist transitively in `Cargo.lock` at `1.0.228` / `1.0.149`; adding as direct deps pulls no new versions.
+Add to `[dependencies]`: `fuzzy-matcher = "0.3"`.
 
 ### 2. `app/core/src/lib.rs` — modify
 
-Top-of-file: `use serde::{Deserialize, Serialize};`
-
-**Types**:
-
-- **`Application`** — unchanged. Derives `Debug, Clone, PartialEq, Eq`. NO serde derives. Three fields: `name`, `desktop_id`, `icon`.
-
-- **`EntryKind`** — `pub enum`, derives `Debug, Clone, Copy, PartialEq, Eq, Hash`. One variant: `Application`. No serde derives.
-
-- **`Entry`** — `pub enum`, derives `Debug, Clone, PartialEq, Eq`. One variant: `Application(Application)`. NO serde derives.
-
-- **`EntryRef`** — `pub enum`, derives `Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize`. Container attr: `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. One variant: `Application(String)`.
-
-**`impl Entry`** — four match-dispatched accessors:
-- `pub fn name(&self) -> &str` → `app.name.as_str()`
-- `pub fn icon(&self) -> Option<&str>` → `app.icon.as_deref()`
-- `pub fn kind(&self) -> EntryKind` → `EntryKind::Application`
-- `pub fn reference(&self) -> EntryRef` → `EntryRef::Application(app.desktop_id.clone())`
-
-All four use exhaustive `match` (not `if let`).
-
-**`resolve`** — free function:
+Insert at the very top:
 ```rust
-pub fn resolve<'a>(entries: &'a [Entry], reference: &EntryRef) -> Option<&'a Entry> {
-    entries.iter().find(|e| &e.reference() == reference)
+pub mod matcher;
+pub use matcher::search;
+```
+Nothing else changes; existing types/tests untouched.
+
+### 3. `app/core/src/matcher.rs` — new
+
+Imports: `fuzzy_matcher::FuzzyMatcher`, `fuzzy_matcher::skim::SkimMatcherV2`, `crate::Entry`.
+
+**Private helper** `fn haystack(entry: &Entry) -> String` — exhaustive `match`. For `Entry::Application(app)` → `format!("{} {}", app.name, app.desktop_id)`. No `_` arm.
+
+**Public** `pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry>`:
+- Empty/whitespace query → return all entries in input order (refs).
+- Else: tokenize with `query.split_whitespace()`. Build `SkimMatcherV2::default().ignore_case()`. For each entry, compute haystack, fuzzy-match every token; if any token returns `None`, drop the entry; else sum scores into `i64`.
+- Sort `sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())))` — score desc, name asc tiebreaker.
+- Map sorted tuples → `Vec<&Entry>`.
+
+**Six unit tests** in `#[cfg(test)] mod tests`. Local helper: `fn app(name, desktop_id) -> Entry { Entry::Application(Application { name: name.into(), desktop_id: desktop_id.into(), icon: None }) }`.
+
+1. `empty_query_returns_all_entries_in_input_order` — empty and whitespace-only both return refs in slice order.
+2. `single_token_matches_name_case_insensitively` — `"FIRE"` against `["Firefox", "Files", "Chromium"]` → Firefox + Files (in some score order), no Chromium.
+3. `single_token_matches_desktop_id` — `"google"` against `("Chrome","com.google.Chrome.desktop")` + decoy → only Chrome.
+4. `multi_token_is_order_independent_and_intersects` — `"chr goo"` and `"goo chr"` both match `("Google Chrome", ...)` and not `("Google Earth", ...)` or `("Firefox", ...)`.
+5. `score_sort_descending_with_name_tiebreaker` — pin tiebreaker: two entries identical-haystack-shape so scores tie; assert lexicographically smaller name first.
+6. `non_matching_query_returns_empty` — `"qqqqq"` against three entries → `Vec::new()`. Also assert `search(&[], "anything")` is empty.
+
+### 4. `app/gnome/src/lib.rs` — modify
+
+Replace contents with:
+```rust
+pub mod apps;
+pub mod ui;
+pub mod launch;
+
+pub use apps::{application_directories, gather_applications};
+pub use lofi_core::Application;
+```
+
+### 5. `app/gnome/src/launch.rs` — new
+
+Imports:
+- `use gio_unix::DesktopAppInfo;`
+- `use gtk::gio::prelude::*;` (brings `AppInfoExt::launch`)
+- `use gtk::prelude::*;` (for `Display`)
+- `use lofi_core::Entry;`
+
+```rust
+pub fn activate(entry: &Entry)
+```
+
+Exhaustive `match` on `Entry::Application(app)`:
+1. `let info = match DesktopAppInfo::new(&app.desktop_id) { Some(i) => i, None => { eprintln!("lofi: no DesktopAppInfo for {}", app.desktop_id); return; } };`
+2. Build `context` from `gtk::gdk::Display::default()` → `.app_launch_context()`. If gtk4-rs 0.11 returns a `gdk::AppLaunchContext` that doesn't auto-upcast to `gio::AppLaunchContext`, call `.upcast::<gtk::gio::AppLaunchContext>()`. Coder verifies via `cargo check`.
+3. `if let Err(e) = info.launch(&[], context.as_ref()) { eprintln!("lofi: launch failed for {}: {e}", app.desktop_id); }`
+
+No `Result` return.
+
+### 6. `app/gnome/src/ui.rs` — new
+
+Constants: `WINDOW_WIDTH = 480`, `WINDOW_HEIGHT = 500`, `ICON_SIZE = 24`.
+
+Imports: `std::cell::RefCell`, `std::rc::Rc`, `adw::prelude::*`, `gtk::prelude::*`, `gtk::glib`, `lofi_core::{Entry, search}`, `crate::launch`. Plus `use gtk::pango;` for ellipsize mode.
+
+**Internal state**:
+```rust
+struct UiState {
+    entries: Vec<Entry>,
+    visible: Vec<usize>,  // indices into entries, display order
 }
 ```
 
-**Test module** `#[cfg(test)] mod tests { use super::*; ... }` at the bottom, five tests:
-
-1. **`entry_reference_round_trips_application`** — build `Application`, wrap in `Entry`, call `.reference()`, assert equality with `EntryRef::Application(desktop_id)`. Then call `resolve(&[entry.clone()], &entry.reference())` → `Some(&entry)`.
-
-2. **`resolve_finds_application_by_reference`** — three distinct entries with ids `alpha.desktop`, `beta.desktop`, `gamma.desktop`. `EntryRef::Application("beta.desktop".into())` → returns the `Beta` entry. Confirms linear scan picks the right element, not just the first.
-
-3. **`resolve_returns_none_for_missing_reference`** — same entries, ref `"missing.desktop"` → `None`. Also test empty-slice case.
-
-4. **`entry_ref_serializes_to_tagged_json`** — `serde_json::to_string(&EntryRef::Application("firefox.desktop".into()))` → `r#"{"type":"application","id":"firefox.desktop"}"#`. Round-trip via `from_str`.
-
-5. **`entry_methods_return_application_data`** — verify `.name()`, `.icon()`, `.kind()`. Include a second entry with `icon: None` to cover the `as_deref` branch.
-
-### 3. `app/gnome/src/apps.rs` — modify
-
-Single change: the desktop_id fallback branch (lines ~88-95). Current:
+**Public entry point**:
 ```rust
-} else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) {
-    stem
-}
+pub fn build(app: &adw::Application, entries: Vec<Entry>)
 ```
 
-Replacement: extract the stem, then if it doesn't already end in `.desktop`, append it. Defensive check before appending. Express as a single expression bound to `desktop_id`. No helper extraction; no other code touched.
-
-### 4. `app/gnome/tests/apps.rs` — modify
-
-1. **Remove dead import**: `use std::collections::BTreeSet;` is no longer used. Keep `use std::path::{Path, PathBuf};` — `Path` is still used by `write_desktop`.
-
-2. **Replace stems block** (lines ~82-106). New:
+Steps:
+1. Build `gtk::SearchEntry` with hexpand + margins.
+2. Build `gtk::ListBox` with `selection_mode=Single`, `activate_on_single_click=false`.
+3. Wrap list in `gtk::ScrolledWindow` (`hscrollbar=Never`, `vscrollbar=Automatic`, `vexpand=true`).
+4. Vertical `gtk::Box` containing search entry + scrolled window.
+5. Build window:
    ```rust
-   let desktop_ids: Vec<String> = apps.iter().map(|a| a.desktop_id.clone()).collect();
-   assert_eq!(
-       desktop_ids,
-       vec![
-           "alpha.desktop".to_string(),
-           "beta.desktop".to_string(),
-           "gamma.desktop".to_string(),
-       ],
-       "desktop_ids should be canonical .desktop-suffixed names sorted; got {desktop_ids:?}"
-   );
+   let window = adw::ApplicationWindow::builder()
+       .application(app)
+       .title("LoFi")
+       .default_width(WINDOW_WIDTH)
+       .default_height(WINDOW_HEIGHT)
+       .resizable(false)
+       .decorated(false)
+       .modal(true)
+       .build();
+   window.set_content(Some(&content));
    ```
+   Note: `adw::ApplicationWindow::set_content` (NOT `set_child`). Coder verifies.
+6. `let state = Rc::new(RefCell::new(UiState { entries, visible: Vec::new() }));`
 
-   `apps` is already sorted by `desktop_id` earlier (line ~66), so the vector is sorted by construction.
+**Helper `fn populate_list(list_box, state, query)`**:
+- Remove all existing rows: `while let Some(row) = list_box.first_child() { list_box.remove(&row); }`
+- If query is empty/whitespace: `visible = (0..entries.len()).collect()`. Else: run `search(&state.borrow().entries, query)`, map result refs back to indices via `std::ptr::eq`. Scope the read borrow before writing.
+- If `visible.is_empty() && !query.trim().is_empty()`: append one non-selectable `gtk::ListBoxRow` containing a centered `gtk::Label::new(Some("No matches"))` with CSS class `dim-label`; call `row.set_selectable(false)`.
+- Else: for each index in `visible`, call `build_row(&entries[idx])` and `list_box.append(&row)`. Select first row.
 
-3. Count/names/icons assertions stay unchanged. Alphabetical order of canonical ids matches the existing sort.
+**Helper `fn build_row(entry: &Entry) -> gtk::ListBoxRow`**:
+- Horizontal `gtk::Box` with 8px spacing + reasonable margins.
+- Image:
+  - `entry.icon()` is `Some(s)` starting with `/` → `Image::from_file(Path::new(s))`
+  - `Some(s)` otherwise → `Image::from_icon_name(s)`
+  - `None` → `Image::new()` (empty placeholder)
+  - In every branch: `image.set_pixel_size(ICON_SIZE)`. NOT `set_icon_size`.
+- Name label: `halign=Start`, `hexpand=true`, ellipsize End, single-line, `xalign=0.0`.
+- Kind label: `halign=End`, CSS class `dim-label`, text from `kind_to_str(entry.kind())`.
+- Wrap in `ListBoxRow::new()` via `row.set_child(Some(&hbox))`.
 
-### 5. `app/core/README.md` — modify
+**Helper `fn kind_to_str(kind: EntryKind) -> &'static str`**: exhaustive `match`. `EntryKind::Application => "Application"`.
 
-- Rewrite "Current contents" to describe `Application`, `Entry`, `EntryKind`, `EntryRef`, and `resolve`.
-- Add a "Why two types for one concept" note explaining the `Entry` (runtime) vs `EntryRef` (persistence handle) split. Reasoning: display fields drift between sessions (locale, theme, app rename).
-- State the canonical-`.desktop` invariant on `Application::desktop_id` — "always ends in `.desktop`; the platform gatherer normalizes."
-- Note `Application` and `Entry` are deliberately NOT `Serialize`/`Deserialize`; only `EntryRef` is. Document so a contributor doesn't "helpfully" add derives.
-- Mention the new `serde` dependency exists solely for `EntryRef`.
+**Wire `search_entry.connect_search_changed`**: clone Rc/widgets into the closure; body calls `populate_list(&list_box, &state, &entry.text())`.
 
-### 6. `app/gnome/README.md` — modify
+**Wire `EventControllerKey` on search_entry**:
+- Up/Down: read `list_box.selected_row().and_then(|r| r.index())`. If valid, `list_box.row_at_index(i ± 1)` and `list_box.select_row(Some(&r))`. Do NOT call `grab_focus` — focus stays on the search entry.
+- Enter (`Return` or `KP_Enter`): get selected index; look up in `state.borrow().visible[i]`; clone the entry out (drop borrow); call `launch::activate(&entry)`; call `window.close()`.
+- Escape: `window.close()`.
+- Default: propagate.
+- Return type may be `glib::Propagation::{Stop, Proceed}` or `bool`. Coder verifies; the plan uses Propagation names symbolically.
+- `search_entry.add_controller(key);`
 
-In the `apps` module bullet, add a sentence: `gather_applications` guarantees `Application::desktop_id` is canonical (always ends in `.desktop`). Enforced by the integration test. The canonicalization matters because `desktop_id` is the payload of `EntryRef::Application` and therefore the stable history key.
+7. Initial `populate_list(&list_box, &state, "")`.
+8. `window.present();`
 
-### Unchanged
+### 7. `app/gnome/src/main.rs` — replace
 
-- `app/Cargo.toml`, `app/gnome/Cargo.toml`, `app/gnome/src/lib.rs`, `app/gnome/src/main.rs`, `flake.nix`, `rust-toolchain.toml`.
-- The `lofi-gnome` re-exports in `lib.rs` continue to work; **do not** re-export the new `Entry`/`EntryRef`/`EntryKind`/`resolve` items yet — wait for the first consumer.
+```rust
+use adw::prelude::*;
+use gtk::glib;
+use lofi_core::Entry;
+use lofi_gnome::{apps, ui};
+
+const APP_ID: &str = "dev.jplein.LoFi";
+
+fn main() -> glib::ExitCode {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(on_activate);
+    app.run()
+}
+
+fn on_activate(app: &adw::Application) {
+    let dirs = apps::application_directories();
+    let applications = apps::gather_applications(&dirs);
+    let entries: Vec<Entry> = applications.into_iter().map(Entry::Application).collect();
+    ui::build(app, entries);
+}
+```
+
+### 8. `app/core/README.md` — modify
+
+In "Current contents", add a subsection for the matcher: signature, behavior summary (empty=passthrough, tokenize, score-sum, sort desc by score / asc by name). Note the haystack is per-variant by exhaustive match (so future variants force an update). Mention the new `fuzzy-matcher` dep.
+
+### 9. `app/gnome/README.md` — modify
+
+Add `ui` and `launch` bullets to Modules. Add a brief "Keyboard" subsection: Up/Down navigate, Enter activates + closes, Escape closes, all other keys go to the search entry. Note that the list is rebuilt on every `search-changed`.
 
 ## Implementation order
 
-1. `app/core/Cargo.toml` — add deps.
-2. `app/core/src/lib.rs` — add new types, methods, `resolve`, unit tests.
-3. `app/gnome/src/apps.rs` — canonicalize fallback.
-4. `app/gnome/tests/apps.rs` — drop `BTreeSet` import; swap stems assertion for canonical-id assertion. Steps 3 and 4 must land together — step 3 alone breaks the existing stems assertion.
-5. `app/core/README.md`.
-6. `app/gnome/README.md`.
+1. `app/core/Cargo.toml` — add `fuzzy-matcher`.
+2. `app/core/src/matcher.rs` — full body + tests.
+3. `app/core/src/lib.rs` — declare + re-export. `cargo test -p lofi-core` passes.
+4. `app/gnome/src/launch.rs` — full body.
+5. `app/gnome/src/ui.rs` — full body.
+6. `app/gnome/src/lib.rs` — declare new modules.
+7. `app/gnome/src/main.rs` — replace.
+8. READMEs.
 
-## Verification (from `/home/jplein/Git/jplein/lofi/app/`)
+## Verification (from `app/`)
 
 1. `cargo build --workspace`
-2. `cargo test -p lofi-core` — five unit tests pass.
-3. `cargo test -p lofi-gnome` — integration test passes with new canonical-id assertion.
-4. `cargo test --workspace` — both pass together.
-5. `cargo clippy --workspace --all-targets -- -D warnings`
-6. `cargo fmt --all -- --check`
+2. `cargo test --workspace`
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. `cargo fmt --all -- --check`
+5. **Manual**: `cargo run -p lofi-gnome --bin lofi`. Window opens; typing filters; Up/Down navigate; Enter launches + closes; Escape closes; empty filter shows "No matches".
+
+## Lint / style notes
+
+- Closures into signals must be `move` (signals require `'static`). Clone Rc/widgets into shadowing bindings before the closure.
+- Borrow discipline on `Rc<RefCell<UiState>>`: scope borrows tightly; never overlap `borrow` and `borrow_mut`. The Enter handler reads `visible[i]`, drops borrow, then clones the entry out.
+- `ListBoxRow::index()` returns `i32`; cast via `usize::try_from(i).ok()` or guard `i >= 0` to keep clippy quiet.
+- All `match`es on `Entry` and `EntryKind` are exhaustive (no `_` arm).
+- No `let _ = info.launch(...)`; bind and log the error.
+
+## gtk4-rs 0.11 API spots to verify with `cargo check`
+
+- `adw::ApplicationWindow::set_content` (not `set_child`).
+- `SearchEntry::connect_search_changed` (preferred over `connect_changed`).
+- `Image::set_pixel_size` (not `set_icon_size`).
+- `EventControllerKey::connect_key_pressed` return: `glib::Propagation` vs `bool`.
+- `gdk::Display::app_launch_context()`: may or may not require an explicit upcast to `gio::AppLaunchContext` at the `info.launch` call site.
+- `gtk::pango::EllipsizeMode::End`.
 
 ## Out of scope
 
-- History persistence (file format, SQLite, write paths)
-- MRU sorting logic
-- UI list view consuming `&[Entry]`
-- Launch wiring (`gio::DesktopAppInfo::new(...).launch()`)
-- `Exec=` parsing or storage
-- New `Entry`/`EntryRef` variants (Window, Workspace, Command)
-- `HashMap<EntryRef, usize>` index — `Hash` is derived but unused
-- Making `Application` / `Entry` serializable
-- Re-exporting new types from `lofi-gnome`
-- Cross-platform (macOS) work
+MRU/history ordering; Wayland centering; dismiss-on-focus-loss; CSS theming beyond `dim-label`; single-instance hotkey; new Entry variants; tests for `launch::activate`; localization / RTL / accessibility; async gather.
