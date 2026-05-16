@@ -12,7 +12,7 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
+    (flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -78,14 +78,65 @@
             patchShebangs build.sh
           '';
 
-          # buildNpmPackage's default installPhase wants to install
-          # node_modules into the output. We only want the .zip the build
-          # script produces.
+          # The .zip is what `nix run .#install-extension` hands to
+          # `gnome-extensions install --force`. The extracted tree under
+          # `share/gnome-shell/extensions/...` is what the home-manager
+          # module symlinks into the user's profile.
           installPhase = ''
             runHook preInstall
+
             mkdir -p $out
             cp lofi-shell@jplein.dev.shell-extension.zip $out/
+
+            mkdir -p $out/share/gnome-shell/extensions/lofi-shell@jplein.dev
+            cp -r dist/. $out/share/gnome-shell/extensions/lofi-shell@jplein.dev/
+
             runHook postInstall
+          '';
+        };
+
+        install-extension = pkgs.writeShellApplication {
+          name = "lofi-install-extension";
+          text = ''
+            if ! command -v gnome-extensions >/dev/null; then
+              echo "error: 'gnome-extensions' CLI not found on PATH." >&2
+              echo "Ensure GNOME Shell is installed (you're presumably on GNOME)." >&2
+              exit 1
+            fi
+
+            UUID="lofi-shell@jplein.dev"
+            ZIP="${extension}/lofi-shell@jplein.dev.shell-extension.zip"
+
+            echo "Installing $UUID..."
+            gnome-extensions install --force "$ZIP"
+
+            echo "Enabling $UUID..."
+            gnome-extensions enable "$UUID"
+
+            if [ "''${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+              echo
+              echo "On Wayland, GNOME Shell only loads newly-installed extensions on session start."
+              echo "Log out and log back in to load $UUID."
+            else
+              echo
+              echo "On X11, you can reload GNOME Shell with Alt+F2 then 'r'."
+            fi
+          '';
+        };
+
+        uninstall-extension = pkgs.writeShellApplication {
+          name = "lofi-uninstall-extension";
+          text = ''
+            if ! command -v gnome-extensions >/dev/null; then
+              echo "error: 'gnome-extensions' CLI not found on PATH." >&2
+              exit 1
+            fi
+
+            UUID="lofi-shell@jplein.dev"
+
+            gnome-extensions disable "$UUID" || true
+            gnome-extensions uninstall "$UUID" || true
+            echo "Removed $UUID."
           '';
         };
       in {
@@ -95,9 +146,23 @@
           extension = extension;
         };
 
+        apps = {
+          install-extension = {
+            type = "app";
+            program = "${install-extension}/bin/lofi-install-extension";
+          };
+          uninstall-extension = {
+            type = "app";
+            program = "${uninstall-extension}/bin/lofi-uninstall-extension";
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = nativeBuildInputs ++ [ rustToolchain pkgs.nodejs ];
           inherit buildInputs;
         };
-      });
+      })) // {
+        homeManagerModules.lofi = import ./nix/hm-module.nix { inherit self; };
+        homeManagerModules.default = self.homeManagerModules.lofi;
+      };
 }

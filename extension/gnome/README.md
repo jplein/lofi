@@ -191,14 +191,57 @@ paste the real hash that Nix prints back into `flake.nix`.
 
 ## Install / enable
 
+Three options, ordered from least to most declarative.
+
+### One-shot via `nix run`
+
+From a clone of the repo:
+
 ```
-gnome-extensions install --force ./lofi-shell@jplein.dev.shell-extension.zip
+nix run .#install-extension
+```
+
+This unpacks the freshly-built `.zip` into `~/.local/share/gnome-shell/extensions/lofi-shell@jplein.dev/` and adds the UUID to `org.gnome.shell.enabled-extensions` (via `gnome-extensions enable`). On Wayland you still need to log out and back in for the shell to load it the first time. A companion `nix run .#uninstall-extension` disables + uninstalls.
+
+### Manual
+
+```
+nix build .#extension   # or `npm run build`
+gnome-extensions install --force ./result/lofi-shell@jplein.dev.shell-extension.zip
 gnome-extensions enable lofi-shell@jplein.dev
 ```
 
-Then log out and back in (on Wayland) so the shell picks up the new
-extension. On Xorg you can also `Alt+F2` and run `r` to restart the shell
-in-place.
+Log out / back in on Wayland; on Xorg, `Alt+F2` and run `r` to restart the shell in-place.
+
+### Declaratively via home-manager
+
+The flake exposes `homeManagerModules.lofi`. In your home-manager flake:
+
+```nix
+{
+  inputs.lofi.url = "github:jplein/lofi";   # or path:/path/to/checkout
+
+  outputs = { self, nixpkgs, home-manager, lofi, ... }: {
+    homeConfigurations."you@host" = home-manager.lib.homeManagerConfiguration {
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      modules = [
+        lofi.homeManagerModules.lofi
+        {
+          programs.lofi.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+`programs.lofi.enable = true` installs the launcher binary, symlinks the extension into `~/.local/share/gnome-shell/extensions/lofi-shell@jplein.dev`, and adds the UUID to dconf. Knobs:
+
+- `programs.lofi.package` — override the launcher binary package.
+- `programs.lofi.extensionPackage` — override the extension package.
+- `programs.lofi.enableShellExtension = false` — install the binary only, skip the extension and dconf changes.
+
+Caveat: if your home-manager config sets `dconf.settings."org/gnome/shell".enabled-extensions` elsewhere, the merge will conflict. Either keep all your extensions in one place (`programs.lofi.enableShellExtension = false` and add the UUID to your existing list), or use `lib.mkForce` on a combined list.
 
 ## Smoke testing with gdbus
 
