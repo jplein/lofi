@@ -1,5 +1,6 @@
 use lofi_gnome::{Application, gather_applications};
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
@@ -98,5 +99,55 @@ fn gather_applications_lists_all_desktop_files_in_supplied_dirs() {
             Some("test-icon-gamma".to_string()),
         ],
         "icons sorted by desktop_id should match the fixtures; got {icons:?}"
+    );
+}
+
+#[test]
+fn gather_applications_follows_symlinks_to_desktop_files() {
+    let temp = tempdir().expect("tempdir should be creatable");
+    let temp_path = temp.path();
+
+    let targets_dir = temp_path.join("targets");
+    let links_dir = temp_path.join("links");
+    fs::create_dir_all(&links_dir).expect("create_dir_all should succeed for links dir");
+
+    // Real .desktop file in targets/, written via the existing helper.
+    write_desktop(
+        &targets_dir,
+        "linked.desktop",
+        "Linked App",
+        "true",
+        "test-icon-linked",
+    );
+
+    // Live symlink in links/ pointing at the real file (absolute target).
+    symlink(
+        targets_dir.join("linked.desktop"),
+        links_dir.join("linked.desktop"),
+    )
+    .expect("symlink to live target should succeed");
+
+    // Dangling symlink in the same scanned dir. The target need not exist.
+    symlink(
+        targets_dir.join("does_not_exist.desktop"),
+        links_dir.join("missing.desktop"),
+    )
+    .expect("symlink to missing target should still succeed");
+
+    // Scan ONLY the links dir. Excluding targets_dir is the key design
+    // choice: if the gatherer regresses to `DirEntry::file_type().is_file()`,
+    // the live symlink will be dropped and this test fails.
+    let dirs: Vec<PathBuf> = vec![links_dir.clone()];
+    let apps = gather_applications(&dirs);
+
+    assert_eq!(
+        apps.len(),
+        1,
+        "expected 1 app (live symlink should resolve; dangling symlink should be skipped); got {apps:?}"
+    );
+    assert_eq!(
+        apps[0].name, "Linked App",
+        "name should round-trip from symlinked target; got {:?}",
+        apps[0].name
     );
 }

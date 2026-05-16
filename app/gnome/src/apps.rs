@@ -57,15 +57,11 @@ pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
         };
 
         for entry in entries.flatten() {
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            if !file_type.is_file() {
+            let path = entry.path();
+            if !path.is_file() {
                 continue;
             }
 
-            let path = entry.path();
             let is_desktop = path
                 .file_name()
                 .and_then(|s| s.to_str())
