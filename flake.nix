@@ -110,16 +110,36 @@
             echo "Installing $UUID..."
             gnome-extensions install --force "$ZIP"
 
-            echo "Enabling $UUID..."
-            gnome-extensions enable "$UUID"
+            # GNOME Shell only scans the user extensions dir on session start.
+            # `gnome-extensions enable` asks the live shell to enable an
+            # extension it has already discovered — on first install it
+            # hasn't, so the call fails with "does not exist". Writing the
+            # dconf entry directly causes auto-enable on the next session
+            # start, which is what we want either way.
+            echo "Ensuring $UUID is in enabled-extensions..."
+            current=$(gsettings get org.gnome.shell enabled-extensions)
+            if echo "$current" | grep -qF "'$UUID'"; then
+              echo "  already present."
+            elif [ "$current" = "@as []" ]; then
+              gsettings set org.gnome.shell enabled-extensions "['$UUID']"
+              echo "  added (list was empty)."
+            else
+              new="''${current%]}, '$UUID']"
+              gsettings set org.gnome.shell enabled-extensions "$new"
+              echo "  appended."
+            fi
+
+            # If the shell happens to already know about the extension
+            # (re-install during the same session), poke it to enable now.
+            gnome-extensions enable "$UUID" >/dev/null 2>&1 || true
 
             if [ "''${XDG_SESSION_TYPE:-}" = "wayland" ]; then
               echo
               echo "On Wayland, GNOME Shell only loads newly-installed extensions on session start."
-              echo "Log out and log back in to load $UUID."
+              echo "Log out and log back in — $UUID will auto-enable from dconf."
             else
               echo
-              echo "On X11, you can reload GNOME Shell with Alt+F2 then 'r'."
+              echo "On X11, you can reload GNOME Shell with Alt+F2 then 'r' (then it'll auto-enable from dconf)."
             fi
           '';
         };
@@ -134,7 +154,22 @@
 
             UUID="lofi-shell@jplein.dev"
 
-            gnome-extensions disable "$UUID" || true
+            # Disable in running shell (no-op if it isn't loaded).
+            gnome-extensions disable "$UUID" >/dev/null 2>&1 || true
+
+            # Remove from dconf so it doesn't auto-enable on next session.
+            current=$(gsettings get org.gnome.shell enabled-extensions)
+            if echo "$current" | grep -qF "'$UUID'"; then
+              echo "Removing $UUID from enabled-extensions..."
+              # Three cases handled by the chained sed:
+              #   ['X', 'Y']   ->  ['Y']      (drop "'X', ")
+              #   ['Y', 'X']   ->  ['Y']      (drop ", 'X'")
+              #   ['X']        ->  @as []     (sole entry)
+              new=$(printf '%s' "$current" \
+                | sed "s/'$UUID', //;s/, '$UUID'//;s/\\['$UUID'\\]/@as []/")
+              gsettings set org.gnome.shell enabled-extensions "$new"
+            fi
+
             gnome-extensions uninstall "$UUID" || true
             echo "Removed $UUID."
           '';
