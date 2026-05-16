@@ -14,7 +14,7 @@ You will be given:
 
 ## Your output
 
-Review the READMEs related to the files which were just modified. Look for changes to the documentation which need to be made, and update the documentation based on the implementation.
+Review the READMEs related to the files which were just modified. Look for missing documentation or changes to the documentation which need to be made, and update the documentation based on the implementation.
 
 ## Rules
 

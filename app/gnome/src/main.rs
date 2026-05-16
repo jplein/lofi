@@ -4,9 +4,7 @@ use gtk::glib;
 const APP_ID: &str = "dev.jplein.LoFi";
 
 fn main() -> glib::ExitCode {
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
 }

@@ -3,6 +3,10 @@ name = "lofi-gnome"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "lofi_gnome"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lofi"
 path = "src/main.rs"
@@ -10,3 +14,8 @@ path = "src/main.rs"
 [dependencies]
 gtk = { version = "0.11", package = "gtk4" }
 adw = { version = "0.9", package = "libadwaita" }
+gio-unix = "0.22"
+lofi-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile = "3"
