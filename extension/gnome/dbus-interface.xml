@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node>
+  <interface name="dev.jplein.LoFi.Shell.WindowManager">
+
+    <!-- Reads -->
+    <method name="ListWindows">
+      <arg type="aa{sv}" name="windows" direction="out"/>
+    </method>
+
+    <method name="GetActiveWindow">
+      <arg type="a{sv}" name="window" direction="out"/>
+    </method>
+
+    <method name="ListWorkspaces">
+      <arg type="aa{sv}" name="workspaces" direction="out"/>
+    </method>
+
+    <method name="ListDisplays">
+      <arg type="aa{sv}" name="displays" direction="out"/>
+    </method>
+
+    <method name="GetActiveDisplay">
+      <arg type="a{sv}" name="display" direction="out"/>
+    </method>
+
+    <!-- Active-window actions -->
+    <method name="MoveActiveWindowToNextWorkspace"/>
+
+    <method name="MoveActiveWindowToPreviousWorkspace"/>
+
+    <method name="MoveResizeActiveWindow">
+      <arg type="i" name="x" direction="in"/>
+      <arg type="i" name="y" direction="in"/>
+      <arg type="i" name="width" direction="in"/>
+      <arg type="i" name="height" direction="in"/>
+    </method>
+
+    <method name="MaximizeActiveWindow"/>
+
+    <method name="UnmaximizeActiveWindow"/>
+
+    <!-- By-id actions -->
+    <method name="FocusWindow">
+      <arg type="t" name="id" direction="in"/>
+    </method>
+
+    <method name="MoveWindowToWorkspace">
+      <arg type="t" name="id" direction="in"/>
+      <arg type="i" name="target_index" direction="in"/>
+    </method>
+
+    <method name="MoveResizeWindow">
+      <arg type="t" name="id" direction="in"/>
+      <arg type="i" name="x" direction="in"/>
+      <arg type="i" name="y" direction="in"/>
+      <arg type="i" name="width" direction="in"/>
+      <arg type="i" name="height" direction="in"/>
+    </method>
+
+    <method name="CloseWindow">
+      <arg type="t" name="id" direction="in"/>
+    </method>
+
+    <!-- Workspace action -->
+    <method name="ActivateWorkspace">
+      <arg type="i" name="index" direction="in"/>
+    </method>
+
+  </interface>
+</node>

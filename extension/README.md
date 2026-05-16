@@ -12,7 +12,7 @@ This directory holds those extensions, one per desktop environment. They are shi
 
 The structure parallels `app/`: each subdirectory targets a single desktop environment.
 
-- `gnome/` — GNOME Shell extension exposing a thin D-Bus interface for window and workspace actions Mutter doesn't otherwise expose to regular apps.
+- `gnome/` — GNOME Shell extension exposing a D-Bus interface (`dev.jplein.LoFi.Shell.WindowManager`) for window, workspace, and display introspection and actions Mutter doesn't otherwise expose to regular apps.
 
 There is deliberately no `macos/` here. AppKit's accessibility APIs and Apple Events give a regular app equivalent capabilities, so the macOS launcher doesn't need a shell-side counterpart.
 
@@ -24,4 +24,4 @@ There is deliberately no `macos/` here. AppKit's accessibility APIs and Apple Ev
 ## What does not belong here
 
 - Launcher logic. Matching, ranking, UI, configuration, application enumeration via `.desktop` files — all of that is in `app/`. Extensions stay thin so they remain easy to keep working across desktop-environment updates.
-- Anything the launcher can already do through standard, non-privileged APIs (e.g. listing windows via `org.gnome.Shell.Introspect`).
+- Anything the launcher can already do through standard, non-privileged APIs (e.g. enumerating installed applications from `.desktop` files). The extension does expose its own window/workspace/display reads despite `org.gnome.Shell.Introspect` existing, because that built-in surface is read-only and too narrow (no workspace info, no per-window geometry, no monitor scale) to drive the launcher.

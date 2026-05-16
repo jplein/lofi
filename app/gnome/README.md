@@ -8,7 +8,7 @@ The Linux/GNOME implementation of LoFi.
 - GTK4 via [`gtk4-rs`](https://gtk-rs.org/gtk4-rs/)
 - libadwaita via [`libadwaita-rs`](https://gtk-rs.org/gtk4-rs/git/docs/libadwaita/) for the launcher window styling
 - [`gio-unix`](https://docs.rs/gio-unix) for `DesktopAppInfo` (Unix-only, not re-exported from the cross-platform `gtk::gio`)
-- [`zbus`](https://docs.rs/zbus) for talking to GNOME Shell over D-Bus
+- [`zbus`](https://docs.rs/zbus) for talking to GNOME Shell over D-Bus (planned; the client code is not yet wired up — see "Sources of window/workspace data" below)
 
 This crate is built as both a library (`lofi_gnome`) and a binary (`lofi`) so integration tests can link against the library.
 
@@ -33,12 +33,11 @@ Integration tests live in `tests/` and build their own `.desktop` fixtures insid
 
 ## Sources of window/workspace data
 
-LoFi gets information about windows and workspaces from two D-Bus interfaces:
+Window, workspace, and display data will come from the LoFi GNOME extension (see `extension/gnome/`), which exposes `dev.jplein.LoFi.Shell.WindowManager` on the session bus. The extension covers both reads (list windows / workspaces / displays, get active window, get active display) and actions (focus, close, move-to-workspace, move/resize, maximize, activate workspace).
 
-1. `org.gnome.Shell.Introspect` — built into GNOME Shell. Used for read-only listing of running applications and windows where it's sufficient.
-2. The LoFi GNOME extension (see `extension/gnome/`) — used for actions that aren't available through `Introspect`: focusing a window, switching workspaces, moving windows between workspaces, resizing the active window, and closing windows.
+The extension is required because Wayland clients can't enumerate or manipulate other apps' windows directly, and Mutter doesn't implement `wlr-foreign-toplevel-management`. `org.gnome.Shell.Introspect` exists and is read-only, but its schema is too narrow (no workspace assignment, no per-window geometry, no monitor scale) to drive the launcher, so the extension publishes its own listing surface rather than the Rust side splitting reads across two D-Bus endpoints.
 
-The extension is required because Wayland clients can't enumerate or manipulate other apps' windows directly, and Mutter doesn't implement `wlr-foreign-toplevel-management`.
+The Rust D-Bus client that calls into the extension has not landed yet; it arrives in a later iteration along with the window / workspace `Entry` variants in `lofi-core`.
 
 ## GNOME version support
 
