@@ -39,7 +39,7 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
 
     let list_box = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
-        .activate_on_single_click(false)
+        .activate_on_single_click(true)
         .build();
 
     let scroller = gtk::ScrolledWindow::builder()
@@ -99,6 +99,31 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
                 launch::activate(&entry);
                 window.close();
             }
+        });
+    }
+
+    // Clicking a row activates the underlying entry. The row passed to the
+    // signal — not list_box.selected_row() — is the authoritative source, and
+    // guards against a stale selection or the non-selectable "No matches" row.
+    {
+        let state = state.clone();
+        let window = window.clone();
+        list_box.connect_row_activated(move |_lb, row| {
+            let Ok(row_idx) = usize::try_from(row.index()) else {
+                return;
+            };
+            let entry = {
+                let s = state.borrow();
+                let Some(&entry_idx) = s.visible.get(row_idx) else {
+                    return;
+                };
+                let Some(entry) = s.entries.get(entry_idx) else {
+                    return;
+                };
+                entry.clone()
+            };
+            launch::activate(&entry);
+            window.close();
         });
     }
 
