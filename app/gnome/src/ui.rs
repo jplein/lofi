@@ -11,6 +11,7 @@ use crate::launch;
 
 const WINDOW_WIDTH: i32 = 480;
 const WINDOW_HEIGHT: i32 = 500;
+const WINDOW_PADDING: i32 = 12;
 const ICON_SIZE: i32 = 24;
 const LIST_MARGIN: i32 = 4;
 const ROW_SPACING: i32 = 8;
@@ -50,17 +51,23 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
+        .margin_top(WINDOW_PADDING)
+        .margin_bottom(WINDOW_PADDING)
+        .margin_start(WINDOW_PADDING)
+        .margin_end(WINDOW_PADDING)
         .build();
     content.append(&search_entry);
     content.append(&scroller);
 
+    // No `decorated(false)`: keep client-side decorations so we get the GTK
+    // drop shadow and rounded-corner clipping. AdwApplicationWindow has no
+    // titlebar by default, so we don't get one even with decorations on.
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("LoFi")
         .default_width(WINDOW_WIDTH)
         .default_height(WINDOW_HEIGHT)
         .resizable(false)
-        .decorated(false)
         .modal(true)
         .build();
     window.set_content(Some(&content));
