@@ -24,3 +24,12 @@ What it can do:
 - Anything that can be defined as a command:
     - Power management
     - Locking the screen
+
+## System requirements: macOS
+
+- macOS Tahoe
+
+## System requirements: Linux
+
+- NixOS
+- GNOME
