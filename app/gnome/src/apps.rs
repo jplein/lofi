@@ -89,7 +89,11 @@ pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
                 id.to_string()
             } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
             {
-                stem
+                if stem.ends_with(".desktop") {
+                    stem
+                } else {
+                    format!("{stem}.desktop")
+                }
             } else {
                 continue;
             };

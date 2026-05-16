@@ -1,5 +1,4 @@
 use lofi_gnome::{Application, gather_applications};
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -79,30 +78,15 @@ fn gather_applications_lists_all_desktop_files_in_supplied_dirs() {
         "names sorted by desktop_id should be Alpha, Beta, Gamma; got {names:?}"
     );
 
-    // `gio::DesktopAppInfo::id()` may return None for tempdir paths, in which case
-    // the fallback yields the bare file stem. Strip any trailing `.desktop` and any
-    // leading directory components before comparing.
-    let stems: BTreeSet<String> = apps
-        .iter()
-        .map(|a| {
-            let id = a.desktop_id.as_str();
-            let no_ext = id.strip_suffix(".desktop").unwrap_or(id);
-            let base = Path::new(no_ext)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(no_ext);
-            base.to_string()
-        })
-        .collect();
-
-    let expected: BTreeSet<String> = ["alpha", "beta", "gamma"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-
+    let desktop_ids: Vec<String> = apps.iter().map(|a| a.desktop_id.clone()).collect();
     assert_eq!(
-        stems, expected,
-        "desktop_id stems should be alpha/beta/gamma; got {stems:?}"
+        desktop_ids,
+        vec![
+            "alpha.desktop".to_string(),
+            "beta.desktop".to_string(),
+            "gamma.desktop".to_string(),
+        ],
+        "desktop_ids should be canonical .desktop-suffixed names sorted; got {desktop_ids:?}"
     );
 
     let icons: Vec<Option<String>> = apps.iter().map(|a| a.icon.clone()).collect();

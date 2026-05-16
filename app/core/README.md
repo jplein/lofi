@@ -26,12 +26,38 @@ If a type or function needs a platform crate to exist, it does not belong here. 
 
 ## Current contents
 
-Just `Application` today, with three fields:
+### `Application`
+
+A struct with three fields:
 
 - `name` — the human-readable display string (e.g. `"Firefox"`).
-- `desktop_id` — the stable identifier used to launch the app or refer to it across runs (e.g. `"firefox.desktop"`).
+- `desktop_id` — the stable identifier used to launch the app or refer to it across runs (e.g. `"firefox.desktop"`). **Invariant**: always ends in `.desktop`. The platform gatherer is responsible for normalizing this — see `app/gnome/src/apps.rs`.
 - `icon` — `Option<String>` carrying an icon **identifier**, not bytes. Typically a freedesktop themed-icon name like `"firefox"`, or, less commonly, an absolute filesystem path when the `.desktop` file's `Icon=` line points at a literal file. `None` means the `.desktop` file had no usable `Icon=` line.
 
 The identifier-not-bytes choice is deliberate: rendering happens in the UI layer where the icon theme, scale factor, and target pixel size are all known. Resolving icons here would force eager I/O at gather time and lock in answers that go stale the moment the user switches themes or moves a window between monitors with different scales.
+
+### `Entry`, `EntryKind`, `EntryRef`, and `resolve`
+
+`Entry` is the runtime sum type the UI consumes — currently `Entry::Application(Application)`. As `Window`, `Workspace`, and `Command` land they become additional variants.
+
+`EntryKind` is the matching unit discriminant (`Copy`/`Hash`), useful for grouping or filtering without holding the payload.
+
+`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has one variant — `EntryRef::Application(String)` carrying a canonical `desktop_id`.
+
+`resolve(&[Entry], &EntryRef) -> Option<&Entry>` is a linear scan that pairs `EntryRef`s back to the live `Entry`s from a gather.
+
+`Entry` provides four match-dispatched accessors: `name()`, `icon()`, `kind()`, and `reference()`. They use exhaustive `match` (not `if let`) so that adding an `Entry` variant is a compile error until every accessor is updated.
+
+### Why two types for one concept
+
+Display fields drift between sessions: locale changes the display name, the user switches icon themes, an app gets renamed or its `.desktop` file moves. A history or MRU store that pickled the whole `Application` would either accumulate stale strings or have to re-key itself on every change.
+
+`EntryRef` is the minimum information needed to point at "the same thing" across runs. Persistence layers serialize `EntryRef`. The UI receives `&[Entry]` from a fresh gather, and `resolve` rebuilds the link.
+
+`Application` and `Entry` are **deliberately not** `Serialize`/`Deserialize`. Only `EntryRef` is. Do not "helpfully" add serde derives to the other types — that would invite callers to persist values that are guaranteed to go stale.
+
+### Dependencies
+
+`serde` (with `derive`) is a direct dependency solely for `EntryRef`'s tagged-enum representation. `serde_json` is a dev-dependency for the JSON round-trip test.
 
 `Window`, `Workspace`, and `Command` will land here as their corresponding features are built out.
