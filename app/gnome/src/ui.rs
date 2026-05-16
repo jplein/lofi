@@ -132,15 +132,16 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
     let key_controller = gtk::EventControllerKey::new();
     {
         let list_box = list_box.clone();
+        let scroller = scroller.clone();
         let window = window.clone();
         key_controller.connect_key_pressed(
             move |_ctrl, keyval, _keycode, _modifiers| match keyval {
                 gtk::gdk::Key::Up => {
-                    move_selection(&list_box, -1);
+                    move_selection(&list_box, &scroller, -1);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Down => {
-                    move_selection(&list_box, 1);
+                    move_selection(&list_box, &scroller, 1);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
@@ -160,7 +161,7 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
 
 /// Move the list selection by `delta` (typically +/-1). No-op when no row is
 /// selected or the new index is out of range. Focus stays on the search entry.
-fn move_selection(list_box: &gtk::ListBox, delta: i32) {
+fn move_selection(list_box: &gtk::ListBox, scroller: &gtk::ScrolledWindow, delta: i32) {
     let current = match list_box.selected_row().map(|r| r.index()) {
         Some(i) if i >= 0 => i,
         _ => return,
@@ -171,6 +172,30 @@ fn move_selection(list_box: &gtk::ListBox, delta: i32) {
     }
     if let Some(row) = list_box.row_at_index(target) {
         list_box.select_row(Some(&row));
+        scroll_row_into_view(list_box, scroller, &row);
+    }
+}
+
+/// Scroll `scroller` so `row` is fully visible. GTK only auto-scrolls on focus
+/// changes; we move selection programmatically without shifting focus from the
+/// SearchEntry, so we have to nudge the adjustment.
+fn scroll_row_into_view(
+    list_box: &gtk::ListBox,
+    scroller: &gtk::ScrolledWindow,
+    row: &gtk::ListBoxRow,
+) {
+    let Some(bounds) = row.compute_bounds(list_box) else {
+        return;
+    };
+    let vadj = scroller.vadjustment();
+    let row_top = f64::from(bounds.y());
+    let row_bottom = row_top + f64::from(bounds.height());
+    let visible_top = vadj.value();
+    let visible_bottom = visible_top + vadj.page_size();
+    if row_top < visible_top {
+        vadj.set_value(row_top);
+    } else if row_bottom > visible_bottom {
+        vadj.set_value(row_bottom - vadj.page_size());
     }
 }
 
