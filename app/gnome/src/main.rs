@@ -17,6 +17,19 @@ fn main() -> glib::ExitCode {
 }
 
 fn on_activate(app: &adw::Application) {
+    // Toggle: a second `lofi` invocation is routed here via GApplication's
+    // single-instance D-Bus dispatch (`application_id` makes the second
+    // process a remote that pings the primary's `activate` and exits). If
+    // a window is already up, close it and bail — `adw::Application` quits
+    // when its last window closes, so the toggle is a clean open ↔ closed.
+    let existing: Vec<gtk::Window> = app.windows().into_iter().collect();
+    if !existing.is_empty() {
+        for w in existing {
+            w.close();
+        }
+        return;
+    }
+
     let dirs = apps::application_directories();
     let mut applications = apps::gather_applications(&dirs);
     let windows = windows::gather_windows();
