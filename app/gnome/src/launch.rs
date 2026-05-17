@@ -3,6 +3,8 @@ use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use lofi_core::Entry;
 
+use crate::windows;
+
 /// Launch the application backing `entry` via gio. Errors are logged to stderr
 /// and swallowed because there is no meaningful caller-side recovery from
 /// "the desktop file vanished between gather and click".
@@ -23,6 +25,9 @@ pub fn activate(entry: &Entry) {
             if let Err(e) = launch_result {
                 eprintln!("lofi: launch failed for {}: {e}", app.desktop_id);
             }
+        }
+        Entry::Window(w) => {
+            windows::focus_window(w.id);
         }
     }
 }

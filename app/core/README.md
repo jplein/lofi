@@ -36,13 +36,25 @@ A struct with three fields:
 
 The identifier-not-bytes choice is deliberate: rendering happens in the UI layer where the icon theme, scale factor, and target pixel size are all known. Resolving icons here would force eager I/O at gather time and lock in answers that go stale the moment the user switches themes or moves a window between monitors with different scales.
 
+### `Window`
+
+A struct describing an open window. Five fields:
+
+- `id` — `u64`, the Mutter window id. Session-stable but not persistent: window ids do not survive a shell restart, so they are appropriate as the payload of `EntryRef::Window` only for the lifetime of a session.
+- `title` — `String`, the window title as reported by Mutter. May be empty.
+- `app_name` — `Option<String>`, the human-readable name of the owning application (e.g. `"Firefox"`).
+- `icon` — `Option<String>`, an icon **identifier** in the same shape as `Application::icon` (a freedesktop themed-icon name, or occasionally an absolute path). The identifier-not-bytes rationale from `Application` applies unchanged.
+- `workspace` — `i32`, the workspace index. **`-1` means the window is sticky / on all workspaces**, matching the convention the extension uses on the wire.
+
+`app_name` and `icon` are `Option` because the extension may emit empty strings when `Shell.WindowTracker` cannot resolve an owning app for the window (typically system surfaces and override-redirect windows). The `lofi-gnome` D-Bus client coerces those empty strings to `None` when it builds the `Window`, so consumers see only fully-populated values or `None` — never `Some("")`.
+
 ### `Entry`, `EntryKind`, `EntryRef`, and `resolve`
 
-`Entry` is the runtime sum type the UI consumes — currently `Entry::Application(Application)`. As `Window`, `Workspace`, and `Command` land they become additional variants.
+`Entry` is the runtime sum type the UI consumes. Today its variants are `Entry::Application(Application)` and `Entry::Window(Window)`. `Workspace` and `Command` become additional variants as those features land.
 
 `EntryKind` is the matching unit discriminant (`Copy`/`Hash`), useful for grouping or filtering without holding the payload.
 
-`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has one variant — `EntryRef::Application(String)` carrying a canonical `desktop_id`.
+`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has two variants — `EntryRef::Application(String)` carrying a canonical `desktop_id`, and `EntryRef::Window(u64)` carrying a Mutter window id. The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here.
 
 `resolve(&[Entry], &EntryRef) -> Option<&Entry>` is a linear scan that pairs `EntryRef`s back to the live `Entry`s from a gather.
 
@@ -62,7 +74,7 @@ Behavior:
 - A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics); per-token scores are summed.
 - Results sort by score **descending**, with ascending name as the tiebreaker. The tiebreaker keeps a stable visual order when two entries score the same; otherwise rerunning the same query could shuffle ties.
 
-The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. Future `Entry` variants force this function to be updated (no `_` arm).
+The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. Future `Entry` variants force this function to be updated (no `_` arm).
 
 The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is the second direct dependency of this crate, alongside `serde`.
 
@@ -78,4 +90,4 @@ Display fields drift between sessions: locale changes the display name, the user
 
 `serde` (with `derive`) is a direct dependency solely for `EntryRef`'s tagged-enum representation. `fuzzy-matcher` is a direct dependency for `matcher::search` (Skim-style fuzzy scoring). `serde_json` is a dev-dependency for the JSON round-trip test.
 
-`Window`, `Workspace`, and `Command` will land here as their corresponding features are built out.
+`Workspace` and `Command` will land here as their corresponding features are built out.

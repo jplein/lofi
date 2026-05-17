@@ -7,6 +7,10 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 fn haystack(entry: &Entry) -> String {
     match entry {
         Entry::Application(app) => format!("{} {}", app.name, app.desktop_id),
+        Entry::Window(w) => match &w.app_name {
+            Some(app) => format!("{} {}", w.title, app),
+            None => w.title.clone(),
+        },
     }
 }
 
@@ -49,7 +53,7 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Entry};
+    use crate::{Application, Entry, Window};
     use std::collections::HashSet;
 
     /// Test helper: build an `Entry::Application` with the given name/desktop_id
@@ -59,6 +63,18 @@ mod tests {
             name: name.into(),
             desktop_id: desktop_id.into(),
             icon: None,
+        })
+    }
+
+    /// Test helper: build an `Entry::Window` with the given id/title/app_name and
+    /// no icon on workspace 0. Mirrors `app(...)` for window fixtures.
+    fn win(id: u64, title: &str, app_name: Option<&str>) -> Entry {
+        Entry::Window(Window {
+            id,
+            title: title.into(),
+            app_name: app_name.map(str::to_string),
+            icon: None,
+            workspace: 0,
         })
     }
 
@@ -278,6 +294,78 @@ mod tests {
             empty_result.is_empty(),
             "searching an empty slice should return an empty result; got {} entries",
             empty_result.len()
+        );
+    }
+
+    #[test]
+    fn matcher_finds_window_by_title() {
+        let entries = vec![
+            app("Settings", "settings.desktop"),
+            win(1, "GitHub — Pull Requests", Some("Firefox")),
+        ];
+
+        let result = search(&entries, "pull");
+
+        assert!(
+            result.iter().any(|e| matches!(
+                e,
+                Entry::Window(w) if w.title == "GitHub — Pull Requests"
+            )),
+            "query \"pull\" should match the GitHub Pull Requests window; got names {:?}",
+            names(&result)
+        );
+        assert!(
+            !result
+                .iter()
+                .any(|e| matches!(e, Entry::Application(a) if a.name == "Settings")),
+            "query \"pull\" should not match the Settings application; got names {:?}",
+            names(&result)
+        );
+    }
+
+    #[test]
+    fn matcher_finds_window_by_app_name() {
+        let entries = vec![
+            win(1, "Home", Some("Firefox")),
+            win(2, "Inbox", Some("Thunderbird")),
+        ];
+
+        let result = search(&entries, "firefox");
+
+        assert!(
+            result
+                .iter()
+                .any(|e| matches!(e, Entry::Window(w) if w.title == "Home")),
+            "query \"firefox\" should match the Firefox window titled \"Home\"; got names {:?}",
+            names(&result)
+        );
+        assert!(
+            !result
+                .iter()
+                .any(|e| matches!(e, Entry::Window(w) if w.title == "Inbox")),
+            "query \"firefox\" should not match the Thunderbird window titled \"Inbox\"; got names {:?}",
+            names(&result)
+        );
+    }
+
+    #[test]
+    fn matcher_window_with_no_app_name_matches_title_only() {
+        // Exercises the `None` arm of the haystack match in matcher.rs;
+        // must not panic and must match the title alone.
+        let entries = vec![win(1, "Untitled", None)];
+
+        let title_hit = search(&entries, "untitled");
+        assert!(
+            !title_hit.is_empty(),
+            "query \"untitled\" should match a Window whose title is \"Untitled\" even with no app_name; got names {:?}",
+            names(&title_hit)
+        );
+
+        let miss = search(&entries, "firefox");
+        assert!(
+            miss.is_empty(),
+            "query \"firefox\" should not match a Window with no app_name and an unrelated title; got names {:?}",
+            names(&miss)
         );
     }
 }

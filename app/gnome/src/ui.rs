@@ -312,5 +312,6 @@ fn build_row(entry: &Entry) -> gtk::ListBoxRow {
 fn kind_to_str(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Application => "Application",
+        EntryKind::Window => "Window",
     }
 }

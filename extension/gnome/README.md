@@ -44,6 +44,8 @@ fields can be added without breaking the wire format.
 | `id`                | `t`  | Mutter window id (session-stable, unsigned 64).    |
 | `title`             | `s`  | Empty string if Mutter returns null.               |
 | `app_id`            | `s`  | From `Shell.WindowTracker`; empty if not resolved. |
+| `app_name`          | `s`  | Human-readable app name from `Shell.WindowTracker`; empty if unresolved. |
+| `icon`              | `s`  | Freedesktop icon identifier (themed name or absolute path) from the tracked `Shell.App.get_icon()`; empty if unresolved. |
 | `workspace`         | `i`  | Workspace index, `-1` if sticky / on-all.          |
 | `monitor`           | `i`  | Monitor index.                                     |
 | `x`, `y`            | `i`  | Frame origin in logical pixels (global coords).    |
@@ -53,6 +55,8 @@ fields can be added without breaking the wire format.
 | `maximized`         | `b`  | True iff horizontally AND vertically maximized.    |
 | `fullscreen`        | `b`  |                                                    |
 | `on_all_workspaces` | `b`  | "Sticky" in mutter parlance.                       |
+
+`app_name` and `icon` are derived from the same `Shell.WindowTracker.get_window_app(win)` lookup that produces `app_id` — the canonical app-to-window mapping GNOME's own overview uses — so all three fields are populated or empty together. The launcher consumes both to render window rows that visually match their owning application without re-doing the lookup on the Rust side.
 
 ### Workspace dict (`a{sv}`)
 

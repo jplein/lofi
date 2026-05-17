@@ -6,8 +6,8 @@ Code in this directory (outside of `gnome/` and the future `macos/`) is shared b
 
 ## Layout
 
-- `core/` — platform-agnostic shared crate (`lofi-core`). Holds the cross-platform data model (`Application`, `Entry`, `EntryKind`, `EntryRef`), the `resolve` helper that pairs persisted references back to live entries, and `matcher::search` (Skim-style fuzzy ranking over `&[Entry]`). See `core/README.md` for the split between runtime and persistence types. No GTK/gio or other platform dependencies.
-- `gnome/` — Linux/GNOME-specific code: the GTK4 + libadwaita launcher window (`ui`), `.desktop` enumeration (`apps`), and activation via `gio_unix::DesktopAppInfo` (`launch`). The Rust D-Bus client that talks to the LoFi GNOME extension lands here as window/workspace features come online; the extension surface itself lives in `extension/gnome/`.
+- `core/` — platform-agnostic shared crate (`lofi-core`). Holds the cross-platform data model (`Application`, `Window`, `Entry`, `EntryKind`, `EntryRef`), the `resolve` helper that pairs persisted references back to live entries, and `matcher::search` (Skim-style fuzzy ranking over `&[Entry]`). See `core/README.md` for the split between runtime and persistence types. No GTK/gio or other platform dependencies.
+- `gnome/` — Linux/GNOME-specific code: the GTK4 + libadwaita launcher window (`ui`), `.desktop` enumeration (`apps`), activation via `gio_unix::DesktopAppInfo` and the extension proxy (`launch`), and the `windows` module — a blocking `zbus` client to the LoFi GNOME extension for window enumeration and focus/activation. The extension surface itself lives in `extension/gnome/`.
 - `macos/` — macOS-specific code (planned, not yet present). The macOS UI will be Swift on top of a Rust core exposed via a C ABI.
 
 ## Shared concerns

@@ -32,6 +32,30 @@ function appIdFor(win: Meta.Window): string {
     return id ?? '';
 }
 
+interface AppInfo {
+    name: string;
+    icon: string;
+}
+
+/**
+ * Look up the Shell.App backing `win` and return its display name + icon.
+ * Falls back to empty strings (which the Rust side coerces to `None`) when
+ * Shell.WindowTracker has no app for the window — same defensive pattern as
+ * `appIdFor`.
+ */
+function resolveAppInfo(win: Meta.Window): AppInfo {
+    const tracker = Shell.WindowTracker.get_default();
+    const app = tracker.get_window_app(win);
+    const maybeApp = app as Shell.App | null;
+    if (maybeApp === null) {
+        return { name: '', icon: '' };
+    }
+    const name = maybeApp.get_name() ?? '';
+    const gicon = maybeApp.get_icon();
+    const icon = gicon === null ? '' : gicon.to_string() ?? '';
+    return { name, icon };
+}
+
 function workspaceIndex(win: Meta.Window): number {
     if (win.is_on_all_workspaces()) {
         return -1;
@@ -48,10 +72,13 @@ export function serialize(win: Meta.Window): WindowDict {
     const focused = win === global.display.focus_window;
     const maximized =
         win.maximized_horizontally && win.maximized_vertically;
+    const info = resolveAppInfo(win);
     const dict: WindowDict = {
         id: GLib.Variant.new_uint64(win.get_id()),
         title: GLib.Variant.new_string(win.get_title() ?? ''),
         app_id: GLib.Variant.new_string(appIdFor(win)),
+        app_name: GLib.Variant.new_string(info.name),
+        icon: GLib.Variant.new_string(info.icon),
         workspace: GLib.Variant.new_int32(workspaceIndex(win)),
         monitor: GLib.Variant.new_int32(win.get_monitor()),
         x: GLib.Variant.new_int32(rect.x),
