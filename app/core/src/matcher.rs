@@ -510,6 +510,7 @@ mod tests {
         // check that it doesn't displace the Lock PowerCommand.
         let entries = vec![
             power(PowerCommandKind::LockSession),
+            power(PowerCommandKind::Logout),
             power(PowerCommandKind::Suspend),
             power(PowerCommandKind::Restart),
             power(PowerCommandKind::Shutdown),
@@ -557,6 +558,28 @@ mod tests {
             !power_kinds_suspend.contains(&PowerCommandKind::Shutdown),
             "query \"suspend\" should NOT match PowerCommand::Shutdown; got {power_kinds_suspend:?}"
         );
+        assert!(
+            !power_kinds_suspend.contains(&PowerCommandKind::Logout),
+            "query \"suspend\" should NOT match PowerCommand::Logout; got {power_kinds_suspend:?}"
+        );
+
+        // Query "log" should match both LockSession and Logout among
+        // PowerCommands ("log" is a subsequence of "Log Out", and the
+        // fuzzy matcher accepts "lo...c...k" against "Lock" → "ock"
+        // sequence). The point of this case is the positive Logout
+        // match — the LockSession side-match is incidental.
+        let result_log = search(&entries, "log");
+        let power_kinds_log: HashSet<PowerCommandKind> = result_log
+            .iter()
+            .filter_map(|e| match e {
+                Entry::PowerCommand(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            power_kinds_log.contains(&PowerCommandKind::Logout),
+            "query \"log\" should match PowerCommand::Logout; got {power_kinds_log:?}"
+        );
 
         // Query "restart" should match Restart only among PowerCommands.
         let result_restart = search(&entries, "restart");
@@ -582,6 +605,10 @@ mod tests {
         assert!(
             !power_kinds_restart.contains(&PowerCommandKind::Shutdown),
             "query \"restart\" should NOT match PowerCommand::Shutdown; got {power_kinds_restart:?}"
+        );
+        assert!(
+            !power_kinds_restart.contains(&PowerCommandKind::Logout),
+            "query \"restart\" should NOT match PowerCommand::Logout; got {power_kinds_restart:?}"
         );
     }
 }

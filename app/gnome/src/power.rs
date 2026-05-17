@@ -1,22 +1,24 @@
-//! System-level power commands: Lock, Suspend, Restart, Shutdown.
+//! System-level power commands: Lock, Log Out, Suspend, Restart, Shutdown.
 //!
 //! Each command is a one-shot D-Bus method call against an existing GNOME
-//! or systemd-logind service. Lock/Restart/Shutdown route through the
-//! session bus (GNOME's `ScreenSaver` and `SessionManager`); Suspend goes
-//! to the SYSTEM bus's `org.freedesktop.login1.Manager` because there's no
-//! GNOME-level Suspend wrapper.
+//! or systemd-logind service. Lock/Logout/Restart/Shutdown route through
+//! the session bus (GNOME's `ScreenSaver` and `SessionManager`); Suspend
+//! goes to the SYSTEM bus's `org.freedesktop.login1.Manager` because
+//! there's no GNOME-level Suspend wrapper.
 //!
-//! Restart and Shutdown go through `org.gnome.SessionManager.Reboot()` and
-//! `Shutdown()` (rather than logind's direct equivalents) on purpose: those
-//! methods raise GNOME's standard 60-second confirmation dialog, matching
-//! the system-menu behaviour and protecting against accidental triggers.
-//! Lock uses `org.gnome.ScreenSaver.Lock`. Suspend uses logind's
+//! Logout, Restart and Shutdown go through `org.gnome.SessionManager`'s
+//! `Logout(mode=0)`, `Reboot()` and `Shutdown()` (rather than logind's
+//! direct equivalents) on purpose: those methods raise GNOME's standard
+//! 60-second confirmation dialog, matching the system-menu behaviour and
+//! protecting against accidental triggers. `Logout(0)` is the
+//! with-confirmation mode (1 = no confirmation, 2 = force); we want the
+//! dialog. Lock uses `org.gnome.ScreenSaver.Lock`. Suspend uses logind's
 //! `Suspend(false)` (the bool is `interactive`; `false` skips the polkit
 //! prompt — suspend is almost always allowed for active users).
 //!
 //! We use the lower-level `zbus::blocking::Proxy::call_method` rather than
-//! generating four `#[zbus::proxy]` traits — each call is one line and a
-//! generated trait would be more noise than signal here.
+//! generating per-service `#[zbus::proxy]` traits — each call is one line
+//! and a generated trait would be more noise than signal here.
 
 use lofi_core::{PowerCommand, PowerCommandKind};
 use zbus::blocking::{Connection, Proxy};
@@ -27,6 +29,7 @@ use zbus::blocking::{Connection, Proxy};
 /// would be backwards.
 const ALL_KINDS: &[PowerCommandKind] = &[
     PowerCommandKind::LockSession,
+    PowerCommandKind::Logout,
     PowerCommandKind::Suspend,
     PowerCommandKind::Restart,
     PowerCommandKind::Shutdown,
@@ -48,6 +51,7 @@ pub fn gather_power_commands() -> Vec<PowerCommand> {
 pub fn activate(kind: PowerCommandKind) {
     let result = match kind {
         PowerCommandKind::LockSession => lock_session(),
+        PowerCommandKind::Logout => logout(),
         PowerCommandKind::Suspend => suspend(),
         PowerCommandKind::Restart => restart(),
         PowerCommandKind::Shutdown => shutdown(),
@@ -80,6 +84,23 @@ fn suspend() -> zbus::Result<()> {
         "org.freedesktop.login1.Manager",
     )?;
     proxy.call_method("Suspend", &(false,))?;
+    Ok(())
+}
+
+fn logout() -> zbus::Result<()> {
+    // Routed through GNOME's SessionManager so the standard logout
+    // confirmation dialog fires — same rationale as `restart`/`shutdown`.
+    // `mode` is the u32 argument: 0 = normal (with confirmation), 1 = no
+    // confirmation, 2 = force (no inhibition, no confirmation). We want
+    // the dialog, so pass 0u32.
+    let conn = Connection::session()?;
+    let proxy = Proxy::new(
+        &conn,
+        "org.gnome.SessionManager",
+        "/org/gnome/SessionManager",
+        "org.gnome.SessionManager",
+    )?;
+    proxy.call_method("Logout", &(0u32,))?;
     Ok(())
 }
 

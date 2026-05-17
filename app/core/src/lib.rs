@@ -151,6 +151,7 @@ impl CommandKind {
 #[serde(rename_all = "snake_case")]
 pub enum PowerCommandKind {
     LockSession,
+    Logout,
     Suspend,
     Restart,
     Shutdown,
@@ -165,6 +166,7 @@ impl PowerCommandKind {
     pub fn as_id(&self) -> &'static str {
         match self {
             PowerCommandKind::LockSession => "lock_session",
+            PowerCommandKind::Logout => "logout",
             PowerCommandKind::Suspend => "suspend",
             PowerCommandKind::Restart => "restart",
             PowerCommandKind::Shutdown => "shutdown",
@@ -177,6 +179,7 @@ impl PowerCommandKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             PowerCommandKind::LockSession => "Lock",
+            PowerCommandKind::Logout => "Log Out",
             PowerCommandKind::Suspend => "Suspend",
             PowerCommandKind::Restart => "Restart",
             PowerCommandKind::Shutdown => "Shutdown",
@@ -185,11 +188,12 @@ impl PowerCommandKind {
 
     /// Symbolic icon name (Adwaita / freedesktop-symbolic) shown beside the
     /// command in the launcher. Picked to convey the action: a padlock for
-    /// Lock, a moon for Suspend, a reboot arrow for Restart, a power symbol
-    /// for Shutdown.
+    /// Lock, a door/arrow for Log Out, a moon for Suspend, a reboot arrow
+    /// for Restart, a power symbol for Shutdown.
     pub fn icon_name(&self) -> &'static str {
         match self {
             PowerCommandKind::LockSession => "system-lock-screen-symbolic",
+            PowerCommandKind::Logout => "system-log-out-symbolic",
             PowerCommandKind::Suspend => "weather-clear-night-symbolic",
             PowerCommandKind::Restart => "system-reboot-symbolic",
             PowerCommandKind::Shutdown => "system-shutdown-symbolic",
@@ -203,6 +207,7 @@ impl PowerCommandKind {
     pub fn from_id(id: &str) -> Option<PowerCommandKind> {
         match id {
             "lock_session" => Some(PowerCommandKind::LockSession),
+            "logout" => Some(PowerCommandKind::Logout),
             "suspend" => Some(PowerCommandKind::Suspend),
             "restart" => Some(PowerCommandKind::Restart),
             "shutdown" => Some(PowerCommandKind::Shutdown),
@@ -1069,6 +1074,7 @@ mod tests {
     /// maintainer extends it. Mirrors `ALL_COMMAND_KINDS`.
     const ALL_POWER_COMMAND_KINDS: &[PowerCommandKind] = &[
         PowerCommandKind::LockSession,
+        PowerCommandKind::Logout,
         PowerCommandKind::Suspend,
         PowerCommandKind::Restart,
         PowerCommandKind::Shutdown,

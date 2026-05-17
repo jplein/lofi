@@ -99,27 +99,28 @@ An enum naming the nine static window-action commands surfaced by the launcher:
 
 ### `PowerCommand`
 
-A struct representing a launcher entry for a system-level power action (Lock, Suspend, Restart, Shutdown). One field:
+A struct representing a launcher entry for a system-level power action (Lock, Log Out, Suspend, Restart, Shutdown). One field:
 
 - `kind` — `PowerCommandKind`, the discriminant. See `PowerCommandKind` below for the variant list and accessor methods.
 
 The wrapping struct (rather than a bare `PowerCommandKind` on `Entry`) is deliberate. It parallels `Application`/`Window`/`Workspace`/`Command` so future per-instance state (a custom display name override, a feature flag, a config-driven enable bit) can be added without renaming the `Entry` variant or breaking the `EntryRef` shape. Today `kind` is the only field, but the wrapper costs nothing and removes a future migration.
 
-Unlike `Command` (window actions), `PowerCommand` does **not** carry a target window id, work area, or captured frame. These are system-level actions that always apply, regardless of focus state or even whether any user window is open. The gatherer (`app/gnome/src/power.rs::gather_power_commands`) returns the same four entries unconditionally on every launcher invocation — no focused-window guard, no display dependency, no D-Bus call at gather time.
+Unlike `Command` (window actions), `PowerCommand` does **not** carry a target window id, work area, or captured frame. These are system-level actions that always apply, regardless of focus state or even whether any user window is open. The gatherer (`app/gnome/src/power.rs::gather_power_commands`) returns the same five entries unconditionally on every launcher invocation — no focused-window guard, no display dependency, no D-Bus call at gather time.
 
 ### `PowerCommandKind`
 
-An enum naming the four power commands surfaced by the launcher:
+An enum naming the five power commands surfaced by the launcher, ordered to mirror GNOME's system menu (Lock → Log Out → Suspend → Restart → Shut Down):
 
 - `LockSession` — lock the session via `org.gnome.ScreenSaver.Lock`. Display name `"Lock"`, icon `system-lock-screen-symbolic`.
+- `Logout` — log out via `org.gnome.SessionManager.Logout(0)` (mode 0 = with confirmation, matching the system-menu UX). Display name `"Log Out"`, icon `system-log-out-symbolic`.
 - `Suspend` — suspend the system via `org.freedesktop.login1.Manager.Suspend`. Display name `"Suspend"`, icon `weather-clear-night-symbolic`.
 - `Restart` — restart via `org.gnome.SessionManager.Reboot` (so GNOME's standard 60-second confirmation dialog fires). Display name `"Restart"`, icon `system-reboot-symbolic`.
 - `Shutdown` — shut down via `org.gnome.SessionManager.Shutdown` (same confirmation rationale as Restart). Display name `"Shutdown"`, icon `system-shutdown-symbolic`.
 
 `PowerCommandKind` is `Copy + Hash + Serialize + Deserialize` with `#[serde(rename_all = "snake_case")]`. Four accessor methods, in the same shape as `CommandKind`:
 
-- `as_id(&self) -> &'static str` — stable snake_case identifier (`"lock_session"`, `"suspend"`, `"restart"`, `"shutdown"`). Used as the payload of `EntryRef::PowerCommand(String)` and therefore the persistent MRU key, so it must remain backwards-compatible across releases.
-- `display_name(&self) -> &'static str` — short verb-like label matching the GNOME system menu (`"Lock"`, `"Suspend"`, `"Restart"`, `"Shutdown"`). Shown in the UI **and** used as the matcher haystack — typing `"lock"` matches `LockSession`, typing `"suspend"` matches `Suspend`.
+- `as_id(&self) -> &'static str` — stable snake_case identifier (`"lock_session"`, `"logout"`, `"suspend"`, `"restart"`, `"shutdown"`). Used as the payload of `EntryRef::PowerCommand(String)` and therefore the persistent MRU key, so it must remain backwards-compatible across releases.
+- `display_name(&self) -> &'static str` — short verb-like label matching the GNOME system menu (`"Lock"`, `"Log Out"`, `"Suspend"`, `"Restart"`, `"Shutdown"`). Shown in the UI **and** used as the matcher haystack — typing `"lock"` matches `LockSession`, typing `"log"` matches `Logout`, typing `"suspend"` matches `Suspend`.
 - `icon_name(&self) -> &'static str` — Adwaita/freedesktop-symbolic icon name per the table above.
 - `from_id(id: &str) -> Option<PowerCommandKind>` — inverse of `as_id`. Returns `None` for unknown ids so stale `EntryRef::PowerCommand` rows in MRU silently fall off rather than panic. Mirrors `CommandKind::from_id`.
 
@@ -129,7 +130,7 @@ An enum naming the four power commands surfaced by the launcher:
 
 `EntryKind` is the matching unit discriminant (`Copy`/`Hash`), useful for grouping or filtering without holding the payload.
 
-`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Its five variants are `EntryRef::Application(String)` carrying a canonical `desktop_id`, `EntryRef::Window(u64)` carrying a Mutter window id, `EntryRef::Workspace(i32)` carrying a workspace index, `EntryRef::Command(String)` carrying a snake_case `CommandKind` id (`"center"`, `"center_half"`, etc. — exactly what `CommandKind::as_id()` returns), and `EntryRef::PowerCommand(String)` carrying a snake_case `PowerCommandKind` id (`"lock_session"`, `"suspend"`, `"restart"`, `"shutdown"` — exactly what `PowerCommandKind::as_id()` returns; serialized JSON is `{"type":"power_command","id":"suspend"}`). The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here. The workspace index has the weaker session-stable-but-can-shift property described in the `Workspace` section above — same dead-weight tolerance applies. The Command and PowerCommand ids are durable across sessions because both `CommandKind` and `PowerCommandKind` are closed enums with stable snake_case mappings; the set of valid ids only grows. The Command and PowerCommand id spaces are **distinct EntryRef variants** — `EntryRef::Command("suspend")` and `EntryRef::PowerCommand("suspend")` are different rows that resolve to different entries (and the former is not even a valid `CommandKind` id today).
+`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Its five variants are `EntryRef::Application(String)` carrying a canonical `desktop_id`, `EntryRef::Window(u64)` carrying a Mutter window id, `EntryRef::Workspace(i32)` carrying a workspace index, `EntryRef::Command(String)` carrying a snake_case `CommandKind` id (`"center"`, `"center_half"`, etc. — exactly what `CommandKind::as_id()` returns), and `EntryRef::PowerCommand(String)` carrying a snake_case `PowerCommandKind` id (`"lock_session"`, `"logout"`, `"suspend"`, `"restart"`, `"shutdown"` — exactly what `PowerCommandKind::as_id()` returns; serialized JSON is `{"type":"power_command","id":"suspend"}`). The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here. The workspace index has the weaker session-stable-but-can-shift property described in the `Workspace` section above — same dead-weight tolerance applies. The Command and PowerCommand ids are durable across sessions because both `CommandKind` and `PowerCommandKind` are closed enums with stable snake_case mappings; the set of valid ids only grows. The Command and PowerCommand id spaces are **distinct EntryRef variants** — `EntryRef::Command("suspend")` and `EntryRef::PowerCommand("suspend")` are different rows that resolve to different entries (and the former is not even a valid `CommandKind` id today).
 
 `resolve(&[Entry], &EntryRef) -> Option<&Entry>` is a linear scan that pairs `EntryRef`s back to the live `Entry`s from a gather.
 
