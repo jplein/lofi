@@ -4,7 +4,7 @@ The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app
 
 ## Status
 
-Implemented but not yet end-to-end verified. The Rust FFI surface and its integration tests pass on Linux and macOS; the Swift sources, `project.yml`, and `build.sh` are in place; but the Xcode-driven build (`xcodegen generate` + `xcodebuild`) has not been run yet in this environment because the toolchain is not available here. Manual verification — run `./build.sh` on a Mac with Xcode / Command Line Tools and confirm `./run.sh` floats a panel — is the next step.
+Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `./build.sh` produces `LoFi.app`; `./run.sh` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The slice is intentionally a static list — no global hotkey, no search, no launching, no MRU yet (see *Out of scope* below).
 
 ## Why a separate frontend
 
@@ -55,13 +55,27 @@ Resources/
 
 `build.sh --rust-only` is what the Xcode pre-build phase invokes; `build.sh --no-rust` skips the Rust stage for fast incremental Swift iteration when the staticlib hasn't changed.
 
-## NSPanel design — three things that bite
+## Gotchas worth calling out
 
-These cost real time to figure out and are worth calling out:
+Each cost real time to figure out the first time; each is permanent in the code or build setup with a comment pointing back here. If something in this list starts looking redundant, double-check it really is — the cell-rendering bug below was three separate issues stacked, and stripping any one of them brings the blank panel back.
+
+### AppKit
 
 1. **`canBecomeKey` returns `false` for borderless `NSPanel` by default.** Without overriding, the panel renders but never receives keyboard input — typing into what looks like a focused launcher just goes to whatever app was previously frontmost. `LoFiPanel: NSPanel` overrides this to `true` (see `PanelController.swift`).
 2. **`LSUIElement=YES` launches the process in the background.** No Dock icon, no menu bar — but also, the panel never becomes key on its own. `AppDelegate` must call `NSApp.activate(ignoringOtherApps: true)` before showing the panel; without that step the borderless window appears but stays inert.
-3. **Xcode Run Script Phases run with a stripped-down PATH** that doesn't include `$HOME/.nix-profile/bin`. `build.sh` explicitly prepends Nix and Homebrew paths so cargo / cbindgen / xcodegen all resolve regardless of how the script is invoked.
+3. **`LSUIElement=YES` also suppresses the system Application menu, so Cmd-Q has no handler.** `AppDelegate.installHiddenMenu()` installs a minimal `NSMenu` containing only a `Quit` item with `keyEquivalent: "q"`. The menu never becomes visible (still LSUIElement), but its key equivalent fires.
+4. **`NSScrollView` does not auto-resize its `documentView`.** A bare `NSTableView()` set as `documentView` sits at 0×0 inside the scroll view and never asks for cell views — the table is alive (clicks select rows, the scroll wheel "scrolls") but draws nothing. `AppListController` constructs the table with an explicit non-zero `frame` and pairs it with `columnAutoresizingStyle = .uniformColumnAutoresizingStyle`.
+5. **`NSTableView.dataSource` and `.delegate` are weak.** If the only strong reference to the list controller is a local variable inside `applicationDidFinishLaunching`, the controller deallocates when that method returns and the table silently stops calling `viewFor:row:` — rows scroll and select normally because `numberOfRows` is cached, but cells render blank. `AppDelegate` keeps a strong `listController` property; do not "simplify" it away.
+6. **`?? `does not fall through empty strings, only `nil`.** Some apps set `CFBundleDisplayName` to `""` rather than omitting the key, which a naive `(displayName as? String) ?? (bundleName as? String) ?? basename` accepts as a valid empty string. `AppDiscovery.discover()` uses a `nonEmpty()` helper to coerce empty-string Info.plist values to `nil` so the fallback chain works.
+
+### Build / toolchain
+
+7. **Xcode Run Script Phases run with a stripped-down `PATH`** that doesn't include `$HOME/.nix-profile/bin`. `build.sh` explicitly prepends Nix and Homebrew paths so cargo / cbindgen / xcodegen all resolve regardless of how the script is invoked.
+8. **Xcode 26 / MacOSX26.5 SDK invokes `ld` directly with clang-driver flags it does not understand** (`-Xlinker`, `-isysroot`, `-dynamiclib`, `-rdynamic`, `-fobjc-link-runtime`), and the link fails. `project.yml` pins `LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang` so clang is the link driver, which translates those flags before invoking the actual linker. Related: `ENABLE_DEBUG_DYLIB: "NO"` opts out of the Xcode 15.3+ debug-dylib split-binary flow that triggered the same family of breakage on first contact.
+
+### Temporary for this slice
+
+9. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
 
 ## Out of scope this slice
 
