@@ -87,25 +87,23 @@ Reads:
 - `ListWindows() -> aa{sv}` — filters out `is_override_redirect()` windows. Order is `global.get_window_actors()` order (Mutter's stacking order).
 - `ListWindowsMRU() -> aa{sv}` — same dict shape and override-redirect filter as `ListWindows`, but sorted most-recently-focused first (the order Alt+Tab cycles through). Backed by `global.display.get_tab_list(Meta.TabList.NORMAL_ALL, null)`, which is Mutter's canonical MRU source. The Rust launcher consumes this method exclusively today (see `app/gnome/src/windows.rs`); `ListWindows` is kept alongside it because the stacking-order list is a useful read for ad-hoc `gdbus` probing and any future caller that wants z-order rather than focus order.
 - `GetActiveWindow() -> a{sv}` — empty dict if no focused window.
+- `GetWindowWorkArea(t id) -> a{sv}` — work area of the monitor that owns the window with `id`, as `{x, y, width, height}` of `i` (int32) variants. The work area is the monitor rectangle minus panel/dock struts — the bounding box every geometry command computes against. Throws `WindowNotFound` if the id doesn't resolve.
+- `GetWindowFrame(t id) -> a{sv}` — current frame rectangle of the window with `id`, same `{x, y, width, height}` int32 dict shape as `GetWindowWorkArea`. Only the `Center` window-action command reads this (it keeps the window's current size and recenters); the other geometry commands compute purely from the work area. Throws `WindowNotFound` if the id doesn't resolve.
 - `ListWorkspaces() -> aa{sv}`
 - `ListDisplays() -> aa{sv}`
 - `GetActiveDisplay() -> a{sv}`
-
-Active-window actions (operate on `display.focus_window`; throw
-`NoActiveWindow` if none):
-
-- `MoveActiveWindowToNextWorkspace()`
-- `MoveActiveWindowToPreviousWorkspace()`
-- `MoveResizeActiveWindow(i x, i y, i width, i height)`
-- `MaximizeActiveWindow()`
-- `UnmaximizeActiveWindow()`
 
 By-id actions (throw `WindowNotFound` if the id doesn't resolve):
 
 - `FocusWindow(t id)`
 - `MoveWindowToWorkspace(t id, i target_index)`
-- `MoveResizeWindow(t id, i x, i y, i width, i height)`
+- `MoveResizeWindow(t id, i x, i y, i width, i height)` — unmaximizes (and unfullscreens if needed) before calling `move_resize_frame`. Mutter ignores `move_resize_frame` on a maximized or fullscreen window, and every caller of this method is a geometry command (center, half-width, etc.) that conceptually replaces the window's state with a precise rectangle — so the unmaximize/unfullscreen prefix is what every caller wants. Matches the behaviour of the user's original `window-commands` set.
+- `MinimizeWindow(t id)` — minimize the window.
+- `ToggleMaximizeWindow(t id)` — flip the maximized state. The toggle is resolved in the extension (reads `is_maximized()` and dispatches to `maximize()` or `unmaximize()`) because Mutter holds the live state; a Rust-side capture-then-act would race against external changes and cost an extra round-trip.
+- `ToggleFullscreenWindow(t id)` — flip the fullscreen state. Same rationale as `ToggleMaximizeWindow` for resolving on the extension side.
 - `CloseWindow(t id)`
+
+Every window action is by-id rather than active-window. LoFi itself takes focus when its window opens, so any `*ActiveWindow` action invoked from inside the launcher would operate on LoFi's own window. The Rust caller (`app/gnome/src/commands.rs::gather_commands`) captures the previously-focused user window's id at gather time — by walking the MRU list and skipping `dev.jplein.LoFi.desktop` — and every by-id method addresses that captured id explicitly. This is also why the earlier `MoveActiveWindowToNextWorkspace`, `MoveActiveWindowToPreviousWorkspace`, `MoveResizeActiveWindow`, `MaximizeActiveWindow`, and `UnmaximizeActiveWindow` methods were removed: no Rust caller could use them safely.
 
 Workspace action:
 
@@ -116,27 +114,20 @@ Workspace action:
 All errors are `GLib.Error` instances in the namespace
 `dev.jplein.LoFi.Shell.Error.*`:
 
-- `NoActiveWindow`
 - `WindowNotFound`
 - `WorkspaceOutOfRange`
 
 ## Workspace boundary semantics
 
-The relative active-window movers (`MoveActiveWindowToNext/Previous-Workspace`)
-match GNOME's built-in `move-to-workspace-next/prev` keybindings: the user's
-view follows the window to the target workspace (`follow = true`).
-`MoveWindowToWorkspace` (explicit target) does **not** follow — the caller
-asked to move a specific window to a specific workspace, not to navigate.
+`MoveWindowToWorkspace` (explicit target) does **not** follow the window to
+its destination — the caller asked to move a specific window to a specific
+workspace, not to navigate.
 
-- `MoveActiveWindowToNextWorkspace` at the last workspace:
-  - If `org.gnome.mutter dynamic-workspaces` is true, the extension calls
-    `wm.append_new_workspace(false, current_time)` to grow the count, then
-    moves the window.
-  - If dynamic workspaces are off (static count), the call is a silent no-op.
-- `MoveActiveWindowToPreviousWorkspace` at workspace 0 is a silent no-op.
 - `MoveWindowToWorkspace(id, -1)` raises `WorkspaceOutOfRange`.
-- `MoveWindowToWorkspace(id, n_workspaces)` with dynamic workspaces appends
-  and moves; with static workspaces it raises `WorkspaceOutOfRange`.
+- `MoveWindowToWorkspace(id, n_workspaces)` with dynamic workspaces
+  (`org.gnome.mutter dynamic-workspaces = true`) calls
+  `wm.append_new_workspace(false, current_time)` to grow the count, then
+  moves the window. With static workspaces it raises `WorkspaceOutOfRange`.
 - Any move-to-workspace operation on a sticky window calls `win.unstick()`
   first, then performs the move.
 
@@ -264,13 +255,14 @@ gdbus call --session \
 gdbus call --session \
   --dest dev.jplein.LoFi.Shell \
   --object-path /dev/jplein/LoFi/Shell \
-  --method dev.jplein.LoFi.Shell.WindowManager.MoveActiveWindowToNextWorkspace
+  --method dev.jplein.LoFi.Shell.WindowManager.GetActiveWindow
 
+# Replace 12345 with a real window id from ListWindows / GetActiveWindow.
 gdbus call --session \
   --dest dev.jplein.LoFi.Shell \
   --object-path /dev/jplein/LoFi/Shell \
-  --method dev.jplein.LoFi.Shell.WindowManager.MoveResizeActiveWindow \
-  0 0 960 1080
+  --method dev.jplein.LoFi.Shell.WindowManager.MoveResizeWindow \
+  12345 0 0 960 1080
 ```
 
 ## Scope (deliberately small)
@@ -279,9 +271,11 @@ In:
 
 - One D-Bus interface, one object, exported in `enable()` and torn down in
   `disable()`.
-- Window / workspace / display reads.
-- Window focus / close / move / resize / maximize.
-- Move window to specific workspace, plus relative next/prev movers.
+- Window / workspace / display reads, plus per-window work-area and current-frame
+  reads (used by the launcher's window-action commands).
+- Window focus / close / minimize / move / resize / toggle-maximize /
+  toggle-fullscreen.
+- Move window to specific workspace.
 - Activate workspace.
 
 Out (later iterations):
@@ -290,5 +284,5 @@ Out (later iterations):
 - Multi-GNOME-version compatibility.
 - Tile-snapping (callers compute geometry and call `MoveResizeWindow`).
 - Real monitor connector/product names (synthesized as `Monitor N+1`).
-- Minimize / always-on-top / above / below.
+- Always-on-top / above / below.
 - Per-monitor workspace edge cases (`workspaces-only-on-primary`).

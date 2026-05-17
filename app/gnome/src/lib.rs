@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod commands;
 pub mod launch;
 pub mod ui;
 pub mod windows;

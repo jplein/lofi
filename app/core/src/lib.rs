@@ -1,5 +1,7 @@
+pub mod commands;
 pub mod matcher;
 pub mod mru;
+pub use commands::compute_geometry;
 pub use matcher::search;
 pub use mru::{MruError, MruStore};
 
@@ -48,11 +50,133 @@ pub struct Workspace {
     pub name: String,
 }
 
+/// Identifier for the launcher's static window-action commands. Each variant
+/// maps to a stable snake_case id (`CommandKind::as_id`) that round-trips into
+/// `EntryRef::Command(String)` so the persistent MRU store stays valid across
+/// sessions even if the runtime command list is regenerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    Center,
+    CenterHalf,
+    CenterTwoThirds,
+    LeftHalf,
+    RightHalf,
+    StandardSize,
+    Minimize,
+    ToggleMaximize,
+    ToggleFullscreen,
+}
+
+impl CommandKind {
+    /// Stable snake_case identifier for this kind. Used as the payload of
+    /// `EntryRef::Command(String)` (and therefore the persistent MRU key), so
+    /// it must remain backwards-compatible across releases — adding a variant
+    /// is fine, renaming an existing one would invalidate stored history.
+    pub fn as_id(&self) -> &'static str {
+        match self {
+            CommandKind::Center => "center",
+            CommandKind::CenterHalf => "center_half",
+            CommandKind::CenterTwoThirds => "center_two_thirds",
+            CommandKind::LeftHalf => "left_half",
+            CommandKind::RightHalf => "right_half",
+            CommandKind::StandardSize => "standard_size",
+            CommandKind::Minimize => "minimize",
+            CommandKind::ToggleMaximize => "toggle_maximize",
+            CommandKind::ToggleFullscreen => "toggle_fullscreen",
+        }
+    }
+
+    /// Human-readable label shown in the launcher list and used as the
+    /// matcher haystack. Singular and lowercase-after-the-first-word so it
+    /// reads naturally next to the existing entries.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            CommandKind::Center => "Center",
+            CommandKind::CenterHalf => "Center half",
+            CommandKind::CenterTwoThirds => "Center two-thirds",
+            CommandKind::LeftHalf => "Left half",
+            CommandKind::RightHalf => "Right half",
+            CommandKind::StandardSize => "Standard size",
+            CommandKind::Minimize => "Minimize",
+            CommandKind::ToggleMaximize => "Toggle maximize",
+            CommandKind::ToggleFullscreen => "Toggle fullscreen",
+        }
+    }
+
+    /// Symbolic icon name (Adwaita / freedesktop-symbolic) shown beside the
+    /// command in the launcher. Picked to communicate the geometry shape
+    /// (`view-dual-symbolic` for halves) or the action (`window-minimize-…`).
+    pub fn icon_name(&self) -> &'static str {
+        match self {
+            CommandKind::Center => "focus-windows-symbolic",
+            CommandKind::CenterHalf => "view-dual-symbolic",
+            CommandKind::CenterTwoThirds => "sidebar-show-symbolic",
+            CommandKind::LeftHalf => "view-dual-symbolic",
+            CommandKind::RightHalf => "view-dual-symbolic",
+            CommandKind::StandardSize => "focus-windows-symbolic",
+            CommandKind::Minimize => "window-minimize-symbolic",
+            CommandKind::ToggleMaximize => "window-maximize-symbolic",
+            CommandKind::ToggleFullscreen => "view-fullscreen-symbolic",
+        }
+    }
+
+    /// Inverse of `as_id`: parse a snake_case id back to a `CommandKind`.
+    /// Used at MRU-rehydrate time when we re-materialize stored
+    /// `EntryRef::Command(id)` entries. Returns `None` for unknown ids so
+    /// stale rows in MRU silently fall off rather than panic.
+    pub fn from_id(id: &str) -> Option<CommandKind> {
+        match id {
+            "center" => Some(CommandKind::Center),
+            "center_half" => Some(CommandKind::CenterHalf),
+            "center_two_thirds" => Some(CommandKind::CenterTwoThirds),
+            "left_half" => Some(CommandKind::LeftHalf),
+            "right_half" => Some(CommandKind::RightHalf),
+            "standard_size" => Some(CommandKind::StandardSize),
+            "minimize" => Some(CommandKind::Minimize),
+            "toggle_maximize" => Some(CommandKind::ToggleMaximize),
+            "toggle_fullscreen" => Some(CommandKind::ToggleFullscreen),
+            _ => None,
+        }
+    }
+}
+
+/// Mutter work area (the monitor rectangle minus panel/dock struts) for a
+/// specific window's monitor. Used as the bounding box for every geometry
+/// command. Captured at gather time from `GetWindowWorkArea(id)` so the
+/// computed geometry stays correct even when LoFi itself is on a different
+/// monitor than the target window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkArea {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// A launcher entry representing a window-action command (e.g. "Center half",
+/// "Minimize"). Every command targets the previously-focused user window
+/// captured at gather time — see `app/gnome/src/commands.rs::gather_commands`
+/// for the LoFi-filter rationale. `work_area` and `current_frame` are also
+/// captured at gather time so activation is a single D-Bus round-trip with no
+/// further reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command {
+    pub kind: CommandKind,
+    pub target_window_id: u64,
+    pub work_area: WorkArea,
+    /// `(x, y, width, height)` of the target window's frame at gather time.
+    /// Only `CommandKind::Center` actually reads this (it keeps the current
+    /// size and recenters); other kinds ignore it.
+    pub current_frame: (i32, i32, i32, i32),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     Application,
     Window,
     Workspace,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +184,7 @@ pub enum Entry {
     Application(Application),
     Window(Window),
     Workspace(Workspace),
+    Command(Command),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,6 +193,7 @@ pub enum EntryRef {
     Application(String),
     Window(u64),
     Workspace(i32),
+    Command(String),
 }
 
 /// Icon name used for every `Entry::Workspace`. Hardcoded because workspaces
@@ -82,6 +208,7 @@ impl Entry {
             Entry::Application(app) => app.name.as_str(),
             Entry::Window(w) => w.title.as_str(),
             Entry::Workspace(w) => w.name.as_str(),
+            Entry::Command(c) => c.kind.display_name(),
         }
     }
 
@@ -90,6 +217,7 @@ impl Entry {
             Entry::Application(app) => app.icon.as_deref(),
             Entry::Window(w) => w.icon.as_deref(),
             Entry::Workspace(_) => Some(WORKSPACE_ICON),
+            Entry::Command(c) => Some(c.kind.icon_name()),
         }
     }
 
@@ -98,6 +226,7 @@ impl Entry {
             Entry::Application(_) => EntryKind::Application,
             Entry::Window(_) => EntryKind::Window,
             Entry::Workspace(_) => EntryKind::Workspace,
+            Entry::Command(_) => EntryKind::Command,
         }
     }
 
@@ -106,6 +235,7 @@ impl Entry {
             Entry::Application(app) => EntryRef::Application(app.desktop_id.clone()),
             Entry::Window(w) => EntryRef::Window(w.id),
             Entry::Workspace(w) => EntryRef::Workspace(w.index),
+            Entry::Command(c) => EntryRef::Command(c.kind.as_id().to_string()),
         }
     }
 }
@@ -156,6 +286,24 @@ mod tests {
         Workspace {
             index,
             name: name.to_string(),
+        }
+    }
+
+    /// Test helper: build a `Command` with a fixed work area and current frame.
+    /// Used by the Command-variant Entry tests below. The numbers are
+    /// deliberately non-zero so any field that's silently dropped surfaces as a
+    /// mismatch in round-trip / resolve assertions.
+    fn make_command(kind: CommandKind) -> Command {
+        Command {
+            kind,
+            target_window_id: 42,
+            work_area: WorkArea {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            current_frame: (100, 100, 800, 600),
         }
     }
 
@@ -621,6 +769,201 @@ mod tests {
             entry.kind(),
             EntryKind::Workspace,
             "Entry::Workspace::kind should return EntryKind::Workspace"
+        );
+    }
+
+    /// Exhaustive list of all `CommandKind` variants, kept in one place so the
+    /// round-trip tests below stay synchronized. If a variant is added, this
+    /// list must grow — and the tests will fail loudly until the maintainer
+    /// extends it.
+    const ALL_COMMAND_KINDS: &[CommandKind] = &[
+        CommandKind::Center,
+        CommandKind::CenterHalf,
+        CommandKind::CenterTwoThirds,
+        CommandKind::LeftHalf,
+        CommandKind::RightHalf,
+        CommandKind::StandardSize,
+        CommandKind::Minimize,
+        CommandKind::ToggleMaximize,
+        CommandKind::ToggleFullscreen,
+    ];
+
+    #[test]
+    fn entry_command_reference_round_trips() {
+        for &kind in ALL_COMMAND_KINDS {
+            let entry = Entry::Command(make_command(kind));
+            let reference = entry.reference();
+            let expected_ref = EntryRef::Command(kind.as_id().into());
+            assert_eq!(
+                reference, expected_ref,
+                "Entry::Command({kind:?}).reference() should be EntryRef::Command(kind.as_id()); got {reference:?}, want {expected_ref:?}"
+            );
+
+            let entries = vec![entry.clone()];
+            let resolved = resolve(&entries, &entry.reference());
+            assert!(
+                matches!(resolved, Some(r) if r == &entry),
+                "resolve should return Some(&entry) for the Command reference of kind {kind:?}; got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_finds_command_by_reference() {
+        let entries = vec![
+            Entry::Application(make_application("Center", "center.desktop", None)),
+            Entry::Window(make_window(7, "A Window", Some("Firefox"), None)),
+            Entry::Workspace(make_workspace(0, "Workspace 1")),
+            Entry::Command(make_command(CommandKind::Center)),
+            Entry::Command(make_command(CommandKind::CenterHalf)),
+            Entry::Command(make_command(CommandKind::Minimize)),
+        ];
+
+        let reference = EntryRef::Command(CommandKind::CenterHalf.as_id().into());
+        let resolved = resolve(&entries, &reference);
+        let found = resolved.expect("resolve should find a Command for center_half");
+        assert_eq!(
+            found.kind(),
+            EntryKind::Command,
+            "resolve(EntryRef::Command(\"center_half\")) must return a Command entry; got kind {:?}",
+            found.kind()
+        );
+        match found {
+            Entry::Command(c) => assert_eq!(
+                c.kind,
+                CommandKind::CenterHalf,
+                "resolved Command must have kind CenterHalf; got {:?}",
+                c.kind
+            ),
+            other => panic!("expected Entry::Command, got {other:?}"),
+        }
+
+        // Cross-variant guard: an Application reference for "center" must NOT
+        // resolve to the Command::Center entry (different EntryRef variant).
+        let app_ref = EntryRef::Application("center".into());
+        let resolved_as_app = resolve(&entries, &app_ref);
+        // It may match the actual Application named "Center" (desktop_id
+        // "center.desktop") — that doesn't match "center" either. We assert
+        // that whatever resolves is NOT the Command::Center entry.
+        if let Some(found) = resolved_as_app {
+            assert_ne!(
+                found.kind(),
+                EntryKind::Command,
+                "EntryRef::Application(\"center\") must NOT resolve to a Command entry; got kind {:?}",
+                found.kind()
+            );
+        }
+
+        // Cross-variant guard (other direction): EntryRef::Command("center")
+        // must NOT resolve to the Application whose desktop_id is "center".
+        let cmd_ref_center = EntryRef::Command("center".into());
+        let resolved_as_cmd = resolve(&entries, &cmd_ref_center)
+            .expect("resolve should find a Command for \"center\"");
+        assert_eq!(
+            resolved_as_cmd.kind(),
+            EntryKind::Command,
+            "EntryRef::Command(\"center\") must resolve to a Command, not an Application; got kind {:?}",
+            resolved_as_cmd.kind()
+        );
+
+        // Missing command id returns None.
+        let missing = EntryRef::Command("not-a-command".into());
+        assert_eq!(
+            resolve(&entries, &missing),
+            None,
+            "resolve should return None for a Command id not in the slice"
+        );
+    }
+
+    #[test]
+    fn entry_ref_command_serializes_to_tagged_json() {
+        let r = EntryRef::Command("center_half".into());
+
+        let serialized = serde_json::to_string(&r).expect("EntryRef::Command should serialize");
+        assert_eq!(
+            serialized, r#"{"type":"command","id":"center_half"}"#,
+            "EntryRef::Command should serialize with tag=type/content=id and snake_case variant; got {serialized}"
+        );
+
+        let round_tripped: EntryRef =
+            serde_json::from_str(&serialized).expect("EntryRef::Command should deserialize");
+        assert_eq!(
+            round_tripped, r,
+            "EntryRef::Command should round-trip via serde_json; got {round_tripped:?}"
+        );
+    }
+
+    #[test]
+    fn entry_command_methods_return_command_data() {
+        // Center — display name "Center", icon "focus-windows-symbolic".
+        let center = Entry::Command(make_command(CommandKind::Center));
+        assert_eq!(
+            center.name(),
+            "Center",
+            "Entry::Command(Center)::name should return the display name \"Center\"; got {:?}",
+            center.name()
+        );
+        assert_eq!(
+            center.icon(),
+            Some("focus-windows-symbolic"),
+            "Entry::Command(Center)::icon should return Some(\"focus-windows-symbolic\"); got {:?}",
+            center.icon()
+        );
+        assert_eq!(
+            center.kind(),
+            EntryKind::Command,
+            "Entry::Command(Center)::kind should return EntryKind::Command; got {:?}",
+            center.kind()
+        );
+
+        // ToggleMaximize — display name "Toggle maximize", icon
+        // "window-maximize-symbolic".
+        let toggle_max = Entry::Command(make_command(CommandKind::ToggleMaximize));
+        assert_eq!(
+            toggle_max.name(),
+            "Toggle maximize",
+            "Entry::Command(ToggleMaximize)::name should be \"Toggle maximize\"; got {:?}",
+            toggle_max.name()
+        );
+        assert_eq!(
+            toggle_max.icon(),
+            Some("window-maximize-symbolic"),
+            "Entry::Command(ToggleMaximize)::icon should be Some(\"window-maximize-symbolic\"); got {:?}",
+            toggle_max.icon()
+        );
+
+        // LeftHalf — display name "Left half", icon "view-dual-symbolic".
+        let left_half = Entry::Command(make_command(CommandKind::LeftHalf));
+        assert_eq!(
+            left_half.name(),
+            "Left half",
+            "Entry::Command(LeftHalf)::name should be \"Left half\"; got {:?}",
+            left_half.name()
+        );
+        assert_eq!(
+            left_half.icon(),
+            Some("view-dual-symbolic"),
+            "Entry::Command(LeftHalf)::icon should be Some(\"view-dual-symbolic\"); got {:?}",
+            left_half.icon()
+        );
+    }
+
+    #[test]
+    fn command_kind_id_round_trips_through_from_id() {
+        for &kind in ALL_COMMAND_KINDS {
+            let id = kind.as_id();
+            let parsed = CommandKind::from_id(id);
+            assert_eq!(
+                parsed,
+                Some(kind),
+                "CommandKind::from_id({id:?}) should round-trip to Some({kind:?}); got {parsed:?}"
+            );
+        }
+
+        let unknown = CommandKind::from_id("not-a-command");
+        assert_eq!(
+            unknown, None,
+            "CommandKind::from_id(\"not-a-command\") should be None; got {unknown:?}"
         );
     }
 }

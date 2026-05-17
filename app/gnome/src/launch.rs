@@ -1,7 +1,7 @@
 use gio_unix::DesktopAppInfo;
 use gtk::gio::prelude::*;
 use gtk::prelude::*;
-use lofi_core::Entry;
+use lofi_core::{CommandKind, Entry, compute_geometry};
 
 use crate::{windows, workspaces};
 
@@ -40,6 +40,21 @@ pub fn activate(entry: &Entry) {
         }
         Entry::Workspace(w) => {
             workspaces::activate_workspace(w.index);
+        }
+        Entry::Command(cmd) => {
+            let id = cmd.target_window_id;
+            match cmd.kind {
+                CommandKind::Minimize => windows::minimize_window(id),
+                CommandKind::ToggleMaximize => windows::toggle_maximize_window(id),
+                CommandKind::ToggleFullscreen => windows::toggle_fullscreen_window(id),
+                kind => {
+                    if let Some((x, y, w, h)) =
+                        compute_geometry(kind, &cmd.work_area, cmd.current_frame)
+                    {
+                        windows::move_resize_window(id, x, y, w, h);
+                    }
+                }
+            }
         }
     }
 }

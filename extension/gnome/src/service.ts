@@ -7,7 +7,6 @@ import * as windows from './windows.js';
 import * as workspaces from './workspaces.js';
 import * as displays from './displays.js';
 import {
-    noActiveWindow,
     windowNotFound,
     workspaceOutOfRange,
 } from './errors.js';
@@ -26,32 +25,12 @@ function dynamicWorkspacesEnabled(): boolean {
     }
 }
 
-function focusWindow(): Meta.Window {
-    const win = global.display.focus_window;
-    if (win === null) {
-        throw noActiveWindow();
-    }
-    return win;
-}
-
 function lookupWindow(id: bigint | number): Meta.Window {
     const win = windows.byId(id);
     if (win === null) {
         throw windowNotFound(id);
     }
     return win;
-}
-
-function currentWorkspaceIndexFor(win: Meta.Window): number {
-    const wm = global.workspace_manager;
-    if (win.is_on_all_workspaces()) {
-        return wm.get_active_workspace_index();
-    }
-    const ws = win.get_workspace();
-    if (ws === null) {
-        return wm.get_active_workspace_index();
-    }
-    return ws.index();
 }
 
 function moveWindowToWorkspaceIndex(
@@ -111,6 +90,28 @@ export class WindowManagerService {
         return windows.active() ?? {};
     }
 
+    GetWindowWorkArea(id: bigint): Record<string, GLib.Variant> {
+        const win = lookupWindow(id);
+        const rect = win.get_work_area_current_monitor();
+        return {
+            x: GLib.Variant.new_int32(rect.x),
+            y: GLib.Variant.new_int32(rect.y),
+            width: GLib.Variant.new_int32(rect.width),
+            height: GLib.Variant.new_int32(rect.height),
+        };
+    }
+
+    GetWindowFrame(id: bigint): Record<string, GLib.Variant> {
+        const win = lookupWindow(id);
+        const rect = win.get_frame_rect();
+        return {
+            x: GLib.Variant.new_int32(rect.x),
+            y: GLib.Variant.new_int32(rect.y),
+            width: GLib.Variant.new_int32(rect.width),
+            height: GLib.Variant.new_int32(rect.height),
+        };
+    }
+
     ListWorkspaces(): Record<string, GLib.Variant>[] {
         return workspaces.list();
     }
@@ -121,52 +122,6 @@ export class WindowManagerService {
 
     GetActiveDisplay(): Record<string, GLib.Variant> {
         return displays.active();
-    }
-
-    // ---- active-window actions ----
-
-    MoveActiveWindowToNextWorkspace(): void {
-        const win = focusWindow();
-        const wm = global.workspace_manager;
-        const current = currentWorkspaceIndexFor(win);
-        const target = current + 1;
-        if (target >= wm.n_workspaces) {
-            if (!dynamicWorkspacesEnabled()) {
-                return;
-            }
-            wm.append_new_workspace(false, global.display.get_current_time_roundtrip());
-        }
-        moveWindowToWorkspaceIndex(win, target, true);
-    }
-
-    MoveActiveWindowToPreviousWorkspace(): void {
-        const win = focusWindow();
-        const current = currentWorkspaceIndexFor(win);
-        const target = current - 1;
-        if (target < 0) {
-            return;
-        }
-        moveWindowToWorkspaceIndex(win, target, true);
-    }
-
-    MoveResizeActiveWindow(
-        x: number,
-        y: number,
-        width: number,
-        height: number,
-    ): void {
-        const win = focusWindow();
-        win.move_resize_frame(true, x, y, width, height);
-    }
-
-    MaximizeActiveWindow(): void {
-        const win = focusWindow();
-        win.maximize();
-    }
-
-    UnmaximizeActiveWindow(): void {
-        const win = focusWindow();
-        win.unmaximize();
     }
 
     // ---- by-id actions ----
@@ -207,7 +162,40 @@ export class WindowManagerService {
         height: number,
     ): void {
         const win = lookupWindow(id);
+        // Every caller of MoveResizeWindow is a geometry command (center,
+        // half-width, etc.) that conceptually replaces the window's current
+        // state with a precise rectangle. Mutter ignores `move_resize_frame`
+        // on a maximized or fullscreen window, so we unmaximize/unfullscreen
+        // first to make the call effective in those states. Matches the
+        // original window-commands set, which did the same thing.
+        if (win.is_fullscreen()) {
+            win.unmake_fullscreen();
+        }
+        win.unmaximize();
         win.move_resize_frame(true, x, y, width, height);
+    }
+
+    MinimizeWindow(id: bigint): void {
+        const win = lookupWindow(id);
+        win.minimize();
+    }
+
+    ToggleMaximizeWindow(id: bigint): void {
+        const win = lookupWindow(id);
+        if (win.is_maximized()) {
+            win.unmaximize();
+        } else {
+            win.maximize();
+        }
+    }
+
+    ToggleFullscreenWindow(id: bigint): void {
+        const win = lookupWindow(id);
+        if (win.is_fullscreen()) {
+            win.unmake_fullscreen();
+        } else {
+            win.make_fullscreen();
+        }
     }
 
     CloseWindow(id: bigint): void {

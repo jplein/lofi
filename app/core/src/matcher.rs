@@ -12,6 +12,7 @@ fn haystack(entry: &Entry) -> String {
             None => w.title.clone(),
         },
         Entry::Workspace(w) => w.name.clone(),
+        Entry::Command(c) => c.kind.display_name().to_string(),
     }
 }
 
@@ -42,7 +43,7 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Entry, Window, Workspace};
+    use crate::{Application, Command, CommandKind, Entry, Window, WorkArea, Workspace};
     use std::collections::HashSet;
 
     /// Test helper: build an `Entry::Application` with the given name/desktop_id
@@ -75,6 +76,23 @@ mod tests {
         Entry::Workspace(Workspace {
             index,
             name: name.into(),
+        })
+    }
+
+    /// Test helper: build an `Entry::Command` with the given kind. The
+    /// matcher reads only the `kind.display_name()`, so the rest of the fields
+    /// are filled with placeholder values.
+    fn cmd(kind: CommandKind) -> Entry {
+        Entry::Command(Command {
+            kind,
+            target_window_id: 1,
+            work_area: WorkArea {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            current_frame: (0, 0, 0, 0),
         })
     }
 
@@ -400,6 +418,74 @@ mod tests {
             !names_two.contains("Workspace 1"),
             "query \"2\" should not match \"Workspace 1\"; got names {:?}",
             names_two
+        );
+    }
+
+    #[test]
+    fn matcher_finds_command_by_name() {
+        // The matcher's haystack for Entry::Command is the kind's display
+        // name. Tests assert about the set of Command entries matched per
+        // query — Applications in the mix may or may not also match, but
+        // they should never shadow the expected Command matches.
+        let entries = vec![
+            cmd(CommandKind::Center),
+            cmd(CommandKind::CenterHalf),
+            cmd(CommandKind::LeftHalf),
+            cmd(CommandKind::ToggleMaximize),
+            cmd(CommandKind::ToggleFullscreen),
+            app("Left Hand Inc", "left-hand.desktop"),
+        ];
+
+        // Query "center" should match Center and CenterHalf (both display
+        // names contain "Center"). CenterTwoThirds isn't in this fixture.
+        let result_center = search(&entries, "center");
+        let command_kinds_center: HashSet<CommandKind> = result_center
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Command(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            command_kinds_center.contains(&CommandKind::Center),
+            "query \"center\" should match Command::Center; got {command_kinds_center:?}"
+        );
+        assert!(
+            command_kinds_center.contains(&CommandKind::CenterHalf),
+            "query \"center\" should match Command::CenterHalf; got {command_kinds_center:?}"
+        );
+
+        // Query "left" should match LeftHalf. The "Left Hand Inc" application
+        // may also match — that's fine; we only assert about the command set.
+        let result_left = search(&entries, "left");
+        let command_kinds_left: HashSet<CommandKind> = result_left
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Command(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            command_kinds_left.contains(&CommandKind::LeftHalf),
+            "query \"left\" should match Command::LeftHalf; got {command_kinds_left:?}"
+        );
+
+        // Query "toggle" should match both ToggleMaximize and ToggleFullscreen.
+        let result_toggle = search(&entries, "toggle");
+        let command_kinds_toggle: HashSet<CommandKind> = result_toggle
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Command(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            command_kinds_toggle.contains(&CommandKind::ToggleMaximize),
+            "query \"toggle\" should match Command::ToggleMaximize; got {command_kinds_toggle:?}"
+        );
+        assert!(
+            command_kinds_toggle.contains(&CommandKind::ToggleFullscreen),
+            "query \"toggle\" should match Command::ToggleFullscreen; got {command_kinds_toggle:?}"
         );
     }
 }

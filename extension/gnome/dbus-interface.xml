@@ -15,6 +15,16 @@
       <arg type="a{sv}" name="window" direction="out"/>
     </method>
 
+    <method name="GetWindowWorkArea">
+      <arg type="t" name="id" direction="in"/>
+      <arg type="a{sv}" name="work_area" direction="out"/>
+    </method>
+
+    <method name="GetWindowFrame">
+      <arg type="t" name="id" direction="in"/>
+      <arg type="a{sv}" name="frame" direction="out"/>
+    </method>
+
     <method name="ListWorkspaces">
       <arg type="aa{sv}" name="workspaces" direction="out"/>
     </method>
@@ -26,22 +36,6 @@
     <method name="GetActiveDisplay">
       <arg type="a{sv}" name="display" direction="out"/>
     </method>
-
-    <!-- Active-window actions -->
-    <method name="MoveActiveWindowToNextWorkspace"/>
-
-    <method name="MoveActiveWindowToPreviousWorkspace"/>
-
-    <method name="MoveResizeActiveWindow">
-      <arg type="i" name="x" direction="in"/>
-      <arg type="i" name="y" direction="in"/>
-      <arg type="i" name="width" direction="in"/>
-      <arg type="i" name="height" direction="in"/>
-    </method>
-
-    <method name="MaximizeActiveWindow"/>
-
-    <method name="UnmaximizeActiveWindow"/>
 
     <!-- By-id actions -->
     <method name="FocusWindow">
@@ -59,6 +53,18 @@
       <arg type="i" name="y" direction="in"/>
       <arg type="i" name="width" direction="in"/>
       <arg type="i" name="height" direction="in"/>
+    </method>
+
+    <method name="MinimizeWindow">
+      <arg type="t" name="id" direction="in"/>
+    </method>
+
+    <method name="ToggleMaximizeWindow">
+      <arg type="t" name="id" direction="in"/>
+    </method>
+
+    <method name="ToggleFullscreenWindow">
+      <arg type="t" name="id" direction="in"/>
     </method>
 
     <method name="CloseWindow">

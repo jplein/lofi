@@ -63,13 +63,47 @@ There is deliberately no `icon` field. Workspaces don't have per-instance icons 
 
 The wire dict produced by the extension also carries `active` and `n_windows`, but those are dropped on decode (zvariant's dict decoder ignores keys not declared on the target struct). Adding either back later is a one-line change in the platform layer; we drop them today because nothing in `core` or the UI uses them yet.
 
+### `Command`
+
+A struct representing a launcher entry that runs a window action (center, half-width tile, minimize, toggle fullscreen, etc.). Four fields:
+
+- `kind` — `CommandKind`, the discriminant. See the `CommandKind` subsection below for the variant list and accessor methods.
+- `target_window_id` — `u64`, the Mutter id of the window the command acts on. Captured at **gather time** (the previously-focused user window — the first non-LoFi entry of `ListWindowsMRU`) so the command runs on the right window regardless of focus state at activation time. By the time the user presses Enter, LoFi itself is the focused window, so reading `display.focus_window` in the extension would target the launcher; capturing the id up front sidesteps the race.
+- `work_area` — `WorkArea`, the work area of the monitor that owns the target window. Also captured at gather time via the extension's `GetWindowWorkArea(id)`. Storing it on the struct (rather than re-reading at activation) makes the activation path race-free and lets `compute_geometry` stay a pure function.
+- `current_frame` — `(i32, i32, i32, i32)`, the target window's `(x, y, width, height)` frame at gather time. Captured via the extension's `GetWindowFrame(id)`. Only `CommandKind::Center` reads it (Center keeps the current size and recenters); the other geometry commands compute purely from the work area. It's still captured unconditionally because the platform layer doesn't branch on kind — one `gather_commands` call builds all nine `Command` entries with the same target / work area / frame.
+
+`Command` is the only entry kind that has different runtime data per launcher invocation. `Window` has a stable id for the lifetime of a session; `Application` has a stable `desktop_id` across sessions; `Workspace` has a stable index for the session — but `Command` captures fresh target state every gather, because the "previously-focused user window" answer changes every time the launcher opens.
+
+### `WorkArea`
+
+A struct with four `i32` fields — `x`, `y`, `width`, `height` — describing the work area of a monitor (the monitor rectangle minus panel/dock struts). Used as the bounding box for every geometry command. The platform layer fills it from the extension's `GetWindowWorkArea(id)` and bakes it into every `Command` at gather time, so `compute_geometry` is a pure function over `(CommandKind, &WorkArea, current_frame)` with no D-Bus dependency.
+
+### `CommandKind`
+
+An enum naming the nine static window-action commands surfaced by the launcher:
+
+- `Center` — keep size, recenter in work area.
+- `CenterHalf` — width/2 × full height, centered.
+- `CenterTwoThirds` — width*2/3 × full height, centered.
+- `LeftHalf` — width/2 × full height, flush left.
+- `RightHalf` — width/2 × full height, flush right.
+- `StandardSize` — width*2/3 × height*2/3, centered.
+- `Minimize`, `ToggleMaximize`, `ToggleFullscreen` — state-toggle commands; no geometry.
+
+`CommandKind` is `Copy + Hash + Serialize + Deserialize` with `#[serde(rename_all = "snake_case")]`. Four accessor methods:
+
+- `as_id(&self) -> &'static str` — stable snake_case identifier (`"center"`, `"center_half"`, ...). Used as the payload of `EntryRef::Command(String)` and therefore the persistent MRU key, so it must remain backwards-compatible across releases; adding a variant is fine, renaming an existing one would invalidate stored history.
+- `display_name(&self) -> &'static str` — human-readable label (`"Center"`, `"Center half"`, ...). Shown in the UI **and** used as the matcher haystack — typing `"center"` matches both `Center` and `CenterHalf`, typing `"toggle"` matches both toggles.
+- `icon_name(&self) -> &'static str` — Adwaita symbolic icon name picked to communicate either the geometry shape (`view-dual-symbolic` for the halves) or the action (`window-minimize-symbolic` for Minimize).
+- `from_id(id: &str) -> Option<CommandKind>` — inverse of `as_id`. Used at MRU-rehydrate time to re-materialize stored `EntryRef::Command(id)` rows. Returns `None` for unknown ids so stale rows in MRU silently fall off rather than panic.
+
 ### `Entry`, `EntryKind`, `EntryRef`, and `resolve`
 
-`Entry` is the runtime sum type the UI consumes. Today its variants are `Entry::Application(Application)`, `Entry::Window(Window)`, and `Entry::Workspace(Workspace)`. `Command` becomes an additional variant as that feature lands.
+`Entry` is the runtime sum type the UI consumes. Its variants are `Entry::Application(Application)`, `Entry::Window(Window)`, `Entry::Workspace(Workspace)`, and `Entry::Command(Command)`.
 
 `EntryKind` is the matching unit discriminant (`Copy`/`Hash`), useful for grouping or filtering without holding the payload.
 
-`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has three variants — `EntryRef::Application(String)` carrying a canonical `desktop_id`, `EntryRef::Window(u64)` carrying a Mutter window id, and `EntryRef::Workspace(i32)` carrying a workspace index. The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here. The workspace index has the weaker session-stable-but-can-shift property described in the `Workspace` section above — same dead-weight tolerance applies.
+`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Its four variants are `EntryRef::Application(String)` carrying a canonical `desktop_id`, `EntryRef::Window(u64)` carrying a Mutter window id, `EntryRef::Workspace(i32)` carrying a workspace index, and `EntryRef::Command(String)` carrying a snake_case `CommandKind` id (`"center"`, `"center_half"`, etc. — exactly what `CommandKind::as_id()` returns). The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here. The workspace index has the weaker session-stable-but-can-shift property described in the `Workspace` section above — same dead-weight tolerance applies. The Command id is durable across sessions because `CommandKind` is a closed enum with a stable snake_case mapping; the set of valid ids only grows.
 
 `resolve(&[Entry], &EntryRef) -> Option<&Entry>` is a linear scan that pairs `EntryRef`s back to the live `Entry`s from a gather.
 
@@ -89,9 +123,28 @@ Behavior:
 - A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics).
 - `search` is **filter-only**: matching entries are returned in input order. The matcher does not rank or score — once the MRU store exists (see `mru` below), ordering is the caller's job, and combining two ordering policies in this function would only obscure which one is winning. This is a deliberate split so the launcher can apply MRU (or any other order) without the fuzzy score fighting it. The classic Raycast-style "selection shifts mid-keystroke" is what filter-only + caller-sorted prevents: typing "Foo", "Foob", "Foobar" can change which rows are visible but not their order relative to each other.
 
-The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. For `Entry::Workspace` the haystack is `name` alone — no second field worth concatenating, and the default `"Workspace N"` label already makes `"work"`, `"2"`, and `"workspace 2"` all match the right row; a custom workspace-naming extension flows its label through unchanged. Future `Entry` variants force this function to be updated (no `_` arm).
+The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. For `Entry::Workspace` the haystack is `name` alone — no second field worth concatenating, and the default `"Workspace N"` label already makes `"work"`, `"2"`, and `"workspace 2"` all match the right row; a custom workspace-naming extension flows its label through unchanged. For `Entry::Command` the haystack is `kind.display_name()` alone — the kind id (e.g. `"center_half"`) is a persistence detail, not a user-visible string, and matching on it would let typos in old MRU rows surface as ghost matches. Future `Entry` variants force this function to be updated (no `_` arm).
 
 The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is one direct dependency of this crate, alongside `serde`, `serde_json`, and `rusqlite`.
+
+### `commands::compute_geometry`
+
+Signature:
+
+```rust
+pub fn compute_geometry(
+    kind: CommandKind,
+    work_area: &WorkArea,
+    current_frame: (i32, i32, i32, i32),
+) -> Option<(i32, i32, i32, i32)>
+```
+
+Pure geometry math for the window-action commands — no D-Bus, no GTK, no I/O. Re-exported at the crate root (`lofi_core::compute_geometry`).
+
+- Returns `Some((x, y, w, h))` for the six geometry kinds (`Center`, `CenterHalf`, `CenterTwoThirds`, `LeftHalf`, `RightHalf`, `StandardSize`) — the rectangle the platform layer then feeds to the extension's `MoveResizeWindow`.
+- Returns `None` for the three state-toggle kinds (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`). The platform layer dispatches those to dedicated D-Bus methods (`MinimizeWindow`, `ToggleMaximizeWindow`, `ToggleFullscreenWindow`) instead of `MoveResizeWindow`, so there's no rectangle to compute.
+
+`current_frame` is `(x, y, width, height)` of the target window at gather time. Only `Center` reads it (Center keeps the current size and recenters within the work area); the other kinds ignore the frame and compute from `work_area` alone. Pushing the frame into the signature — rather than having `Center` special-case a live D-Bus read — keeps this function pure and trivially unit-testable, which is the whole point of doing the math here instead of in the extension.
 
 ### `mru::MruStore`
 
@@ -148,5 +201,3 @@ Display fields drift between sessions: locale changes the display name, the user
 - `serde_json` — runtime dependency now (not dev-only): the `mru` module serializes and deserializes `EntryRef` to/from the SQLite `entry_ref TEXT` column.
 - `fuzzy-matcher` — `matcher::search` (Skim-style fuzzy scoring).
 - `rusqlite` with the `bundled` feature — the `mru` module's SQLite connection. `bundled` ships SQLite as C sources inside the crate so we don't need a system `libsqlite` and `nix build` stays self-contained.
-
-`Command` will land here as its corresponding feature is built out.
