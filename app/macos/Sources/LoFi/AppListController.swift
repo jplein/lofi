@@ -3,6 +3,18 @@
 // field's delegate; every keystroke flows through to
 // `entries.setQuery(...)` and then triggers a `tableView.reloadData()`).
 //
+// Interaction model (Spotlight-style):
+//   - The search field stays first responder the whole time. Typing
+//     filters the list; arrow keys move the table's selection without
+//     ever taking focus away from the field.
+//   - Row 0 is auto-selected after every reload so the user can hit
+//     Enter immediately on the most-likely match. The system blue
+//     highlight makes the selected row visible (NSTableRowView's
+//     default behavior; we don't draw it ourselves).
+//   - Enter or a single click launches the highlighted app via
+//     `NSWorkspace.open(_:)` and quits LoFi.
+//   - Esc quits LoFi without launching anything.
+//
 // The view hierarchy is built programmatically rather than via a NIB so
 // the project has no .xib artifact to keep in sync.
 //
@@ -86,11 +98,16 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         field.delegate = self
         table.dataSource = self
         table.delegate = self
+        // Single-click on a row launches; double-click would do the
+        // same so there's no need to wire `doubleAction` separately.
+        table.target = self
+        table.action = #selector(rowClicked)
         // Setting dataSource normally triggers a reload, but the table
         // isn't in a window yet at this point, so deferred reload
         // behavior varies. An explicit call here is cheap and removes
         // a class of "blank table" bugs.
         table.reloadData()
+        selectFirstRowIfAny()
     }
 
     // MARK: - NSTableViewDataSource
@@ -121,6 +138,81 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         // `name(at:)`, ...) reads through that filter automatically.
         entries.setQuery(searchField.stringValue)
         tableView.reloadData()
+        // After a filter change the previously selected row is almost
+        // never the one the user wants; default to the top match.
+        selectFirstRowIfAny()
+    }
+
+    /// The search field is always first responder, so the four
+    /// navigation/activation keys (↓ ↑ ⏎ ⎋) reach the field editor
+    /// first. We intercept them here, dispatch to the table or app,
+    /// and return `true` to keep the field editor from doing its own
+    /// thing (which for ⎋ would be "revert text", and for ⏎ would be
+    /// "commit text" — neither is what we want).
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.moveDown(_:)):
+            moveSelection(by: +1)
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            moveSelection(by: -1)
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            launchRow(tableView.selectedRow)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            NSApp.terminate(nil)
+            return true
+        default:
+            return false
+        }
+    }
+
+    // MARK: - Selection + activation
+
+    /// Click handler wired up in `init` via `table.action`. Single
+    /// click on a row launches; clicks on empty space leave
+    /// `clickedRow == -1` and fall through harmlessly.
+    @objc private func rowClicked() {
+        launchRow(tableView.clickedRow)
+    }
+
+    private func selectFirstRowIfAny() {
+        guard entries.count > 0 else { return }
+        tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        tableView.scrollRowToVisible(0)
+    }
+
+    private func moveSelection(by delta: Int) {
+        let n = entries.count
+        guard n > 0 else { return }
+        // Treat "no selection" as one-before-the-first so ↓ goes to
+        // row 0 and ↑ does nothing.
+        let current = tableView.selectedRow
+        let base = current < 0 ? -1 : current
+        let next = max(0, min(n - 1, base + delta))
+        guard next != current else { return }
+        tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tableView.scrollRowToVisible(next)
+    }
+
+    /// Open the `.app` at the given filtered row and quit LoFi. Out-of-
+    /// bounds rows (incl. the `-1` "no clicked row" sentinel) are
+    /// silently ignored — the user's mouse landed somewhere that didn't
+    /// resolve to an entry; bailing without any visible response is
+    /// the right thing.
+    private func launchRow(_ row: Int) {
+        guard row >= 0, row < entries.count else { return }
+        // `entries.icon(at:)` returns the bundle path on macOS — see
+        // the `DiscoveredApp.bundlePath` comment in `AppDiscovery.swift`
+        // for why the icon field carries the path identifier.
+        guard let path = entries.icon(at: row) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        NSApp.terminate(nil)
     }
 }
 
