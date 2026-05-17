@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::env;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use lofi_core::Entry;
+use lofi_core::{Entry, EntryRef, MruStore};
 use lofi_gnome::{apps, ui, windows};
 
 const APP_ID: &str = "dev.jplein.LoFi";
@@ -41,5 +44,51 @@ fn on_activate(app: &adw::Application) {
     let mut entries: Vec<Entry> = Vec::with_capacity(applications.len() + windows.len());
     entries.extend(applications.into_iter().map(Entry::Application));
     entries.extend(windows.into_iter().map(Entry::Window));
-    ui::build(app, entries);
+
+    // Open the persistent MRU store and snapshot the recency index. Both are
+    // best-effort: any failure (no XDG_STATE_HOME + no HOME, permission
+    // denied, corrupt DB) logs and leaves the launcher with an empty index
+    // so first-run / broken-environment users still get a working list.
+    let mru_store = mru_state_path().and_then(|p| {
+        MruStore::open(&p)
+            .map_err(|e| eprintln!("mru: open failed at {}: {e}", p.display()))
+            .ok()
+    });
+    let mru_index: Vec<EntryRef> = mru_store
+        .as_ref()
+        .and_then(|s| {
+            s.read_all()
+                .map_err(|e| eprintln!("mru: read failed: {e}"))
+                .ok()
+        })
+        .unwrap_or_default();
+
+    // Wrap in Rc so the activate/click closures in ui.rs can each hold a
+    // clone without moving the original.
+    let mru_store = mru_store.map(Rc::new);
+
+    ui::build(app, entries, mru_store, mru_index);
+}
+
+/// Resolve the on-disk path for the MRU SQLite file. Mirrors the manual XDG
+/// pattern used in `apps::application_directories`: prefer `$XDG_STATE_HOME`,
+/// fall back to `$HOME/.local/state`, return `None` if neither resolves so
+/// the launcher proceeds with no persistent history rather than crashing.
+fn mru_state_path() -> Option<PathBuf> {
+    let state_home: PathBuf = match env::var("XDG_STATE_HOME") {
+        Ok(value) if !value.is_empty() => PathBuf::from(value),
+        _ => match env::var("HOME") {
+            Ok(home) if !home.is_empty() => {
+                let mut p = PathBuf::from(home);
+                p.push(".local");
+                p.push("state");
+                p
+            }
+            _ => return None,
+        },
+    };
+    let mut path = state_home;
+    path.push("lofi");
+    path.push("mru.sqlite");
+    Some(path)
 }

@@ -75,12 +75,53 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry>
 Behavior:
 
 - An empty or whitespace-only `query` is a passthrough: every entry is returned in input slice order. This makes the matcher safe to call unconditionally from the UI on every keystroke including the initial empty one.
-- A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics); per-token scores are summed.
-- Results sort by score **descending**, with ascending name as the tiebreaker. The tiebreaker keeps a stable visual order when two entries score the same; otherwise rerunning the same query could shuffle ties.
+- A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics).
+- `search` is **filter-only**: matching entries are returned in input order. The matcher does not rank or score — once the MRU store exists (see `mru` below), ordering is the caller's job, and combining two ordering policies in this function would only obscure which one is winning. This is a deliberate split so the launcher can apply MRU (or any other order) without the fuzzy score fighting it. The classic Raycast-style "selection shifts mid-keystroke" is what filter-only + caller-sorted prevents: typing "Foo", "Foob", "Foobar" can change which rows are visible but not their order relative to each other.
 
 The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. Future `Entry` variants force this function to be updated (no `_` arm).
 
-The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is the second direct dependency of this crate, alongside `serde`.
+The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is one direct dependency of this crate, alongside `serde`, `serde_json`, and `rusqlite`.
+
+### `mru::MruStore`
+
+SQLite-backed activation history. The store is the launcher's persistent record of which `EntryRef`s the user has activated, with a recency timestamp per ref. The launcher reads it once at startup, uses the result as the sole sort key for the displayed list, and writes back synchronously on every activation.
+
+Public surface:
+
+- `MruStore::open(path: &Path) -> Result<Self, MruError>` — open or create the SQLite file at `path`, create any missing parent directories, apply pragmas (WAL + 5s `busy_timeout`), and run the idempotent migration. Safe to call against a file written by a prior process.
+- `MruStore::read_all(&self) -> Result<Vec<EntryRef>, MruError>` — return every row, most-recent-first.
+- `MruStore::bump(&self, r: &EntryRef) -> Result<(), MruError>` — UPSERT the row with `last_used = now()` in Unix epoch milliseconds. Repeat bumps on the same ref update the timestamp in place rather than inserting a duplicate.
+
+Schema (one table, applied on `open`):
+
+```sql
+CREATE TABLE IF NOT EXISTS mru (
+    entry_ref TEXT NOT NULL PRIMARY KEY,
+    last_used INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_mru_last_used ON mru(last_used DESC);
+```
+
+`entry_ref` is the JSON serialization of an `EntryRef` (e.g. `{"type":"application","id":"firefox.desktop"}` or `{"type":"window","id":12345}`). The PRIMARY KEY is what enforces dedup; the write is `INSERT ... ON CONFLICT(entry_ref) DO UPDATE SET last_used = excluded.last_used`. The descending index on `last_used` keeps `read_all`'s `ORDER BY last_used DESC` cheap as the table grows.
+
+#### Why SQLite
+
+- Cross-process safe via OS file locks — two LoFi launchers on the same machine writing to the same `mru.sqlite` serialize cleanly without a PID lockfile or any custom locking layer.
+- WAL journal mode + a 5s `busy_timeout` applied on every `open` is enough for that serialization: concurrent writers wait out the brief contention rather than surfacing `SQLITE_BUSY` to the caller.
+- `rusqlite`'s `bundled` feature builds SQLite from source inside the crate, so there is no system `libsqlite` dependency to declare. `nix build` stays simple: the Nix sandbox doesn't need a `pkgs.sqlite` add.
+
+#### Why one table for all `EntryRef` variants
+
+The schema is generic over the tagged-enum serialization of `EntryRef`. `EntryRef::Application(String)` and `EntryRef::Window(u64)` share the same row shape today; `EntryRef::Workspace`, `EntryRef::Command`, etc. plug in with no migration because the discriminant lives inside the JSON `type` field, not in the SQL column structure. Future entry kinds inherit the dedup, recency ordering, and write path automatically.
+
+#### Bad-row tolerance
+
+`read_all` skips rows whose `entry_ref` text does not parse as `EntryRef`, logs via `eprintln!`, and continues. A corrupt row — written by a future version, hand-edited, or otherwise out of shape — must not prevent the rest of the history from loading. The launcher's invariant is that stale or malformed history is never fatal: degraded mode is "we forget what you used recently", not "we crash".
+
+#### Errors
+
+`MruError` is an enum wrapping `io::Error`, `rusqlite::Error`, and `serde_json::Error` with `From` impls and a `Display` for logging. Nothing in this module panics; callers (the GNOME launcher, in particular) log and continue on `Err`. The store deliberately surfaces typed errors rather than silently swallowing them so the platform layer can decide the logging shape — `eprintln!` with file path context belongs at the call site, not inside `MruStore`.
 
 ### Why two types for one concept
 
@@ -92,6 +133,9 @@ Display fields drift between sessions: locale changes the display name, the user
 
 ### Dependencies
 
-`serde` (with `derive`) is a direct dependency solely for `EntryRef`'s tagged-enum representation. `fuzzy-matcher` is a direct dependency for `matcher::search` (Skim-style fuzzy scoring). `serde_json` is a dev-dependency for the JSON round-trip test.
+- `serde` (with `derive`) — `EntryRef`'s tagged-enum representation.
+- `serde_json` — runtime dependency now (not dev-only): the `mru` module serializes and deserializes `EntryRef` to/from the SQLite `entry_ref TEXT` column.
+- `fuzzy-matcher` — `matcher::search` (Skim-style fuzzy scoring).
+- `rusqlite` with the `bundled` feature — the `mru` module's SQLite connection. `bundled` ships SQLite as C sources inside the crate so we don't need a system `libsqlite` and `nix build` stays self-contained.
 
 `Workspace` and `Command` will land here as their corresponding features are built out.

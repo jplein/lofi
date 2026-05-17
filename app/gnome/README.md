@@ -29,7 +29,9 @@ This crate is built as both a library (`lofi_gnome`) and a binary (`lofi`) so in
   The proxy trait declares **both** `list_windows` and `list_windows_mru` for completeness, but only the MRU path is currently consumed. `list_windows_mru` carries an explicit `#[zbus(name = "ListWindowsMRU")]` attribute: zbus uses `heck` to map Rust `snake_case` method names to PascalCase wire names, and heck would otherwise produce `ListWindowsMru` (treating `MRU` as a regular word), which the extension does not export. The other methods don't need an explicit name because their snake_case names round-trip cleanly through heck.
 
   The current implementation opens a fresh blocking session connection per call; reusing a single connection is a deliberate non-goal until profiling shows it matters. No `unwrap`/`expect` in this module — error paths are all `match` / `if let` / `?` with `eprintln!` early returns.
-- `ui` — the launcher window. Public entry point `ui::build(app, entries)` constructs an `adw::ApplicationWindow` containing a `SearchEntry` over a scrolled `ListBox` and presents it. Internally holds the full gathered set in an `Rc<RefCell<UiState>>` alongside a `visible: Vec<usize>` of indices into that set. On every `search-changed` the list is fully torn down (`while let Some(child) = list_box.first_child()`) and rebuilt — simpler than diffing and fast enough at the scale of an application gather. An empty/whitespace query passes through; otherwise `lofi_core::search` ranks and filters. If the result is empty the list shows a single non-selectable "No matches" row.
+- `ui` — the launcher window. Public entry point `ui::build(app, entries, mru_store, mru_index)` constructs an `adw::ApplicationWindow` containing a `SearchEntry` over a scrolled `ListBox` and presents it. Internally holds the full gathered set in an `Rc<RefCell<UiState>>` alongside a `visible: Vec<usize>` of indices into that set and a `mru_position: HashMap<EntryRef, usize>` (rank 0 = most recent) built from `mru_index` at construction time. On every `search-changed` the list is fully torn down (`while let Some(child) = list_box.first_child()`) and rebuilt — simpler than diffing and fast enough at the scale of an application gather. An empty/whitespace query passes through; otherwise `lofi_core::search` filters (no scoring — see `app/core/README.md`'s matcher section). The resulting index list is then **stable-sorted by MRU rank**, with `usize::MAX` as the fallback for entries absent from the persisted index, so in-MRU entries rise in most-recent-first order and the rest sink to the bottom in input order. If the result is empty the list shows a single non-selectable "No matches" row.
+
+  MRU is the **sole** sort key — not "tiebreak after fuzzy score". This is what keeps the selected row stable while the user types: with the matcher reduced to a filter, narrowing the query can shrink the visible set but never reorder it, so "Foo" → "Foob" → "Foobar" never moves the row under the cursor.
 
   Each row's icon column is a vertical `gtk::Box` containing the `gtk::Image` plus a small CSS-styled `gtk::Box` for the running-indicator dot (6x6, circular via `border-radius: 9999px`, coloured `alpha(@theme_fg_color, 0.8)` so it adapts to light/dark themes). The dot widget is always added but hidden via `set_visible(false)` for entries other than running Applications — keeping it in the layout regardless means rows never shift horizontally when a single row's running state changes. CSS for the dot is registered once per process via `install_styles()`, gated by an `OnceLock<()>` latch (`STYLES_INSTALLED`) because `build()` runs on every `connect_activate` firing and re-registering the same provider would stack identical priority entries. `install_styles` is a silent no-op when there is no default `gdk::Display` (headless tests, broken environment); the dot falls back to whatever GTK renders for an unstyled empty `gtk::Box` in that case.
 
@@ -61,6 +63,34 @@ The Rust client for the window slice of that surface lives in the `windows` modu
 3. For each `Application`, set `app.recent_window_id = mru.get(&app.desktop_id).copied()`.
 
 This needs to live in `main` rather than in either gatherer module because the two `Vec`s are otherwise independent — `apps::gather_applications` is platform-agnostic enough that it shouldn't know about `Shell.WindowTracker`, and `windows::gather_windows` doesn't have the application list to annotate. The combine step is the cheapest possible glue: one map allocation and one linear pass per `Vec`.
+
+## MRU activation history
+
+The launcher persists an MRU (most-recently-used) record of activations and uses that recency as the only sort key for the displayed list. The store itself — schema, write/read API, locking strategy — lives in `lofi-core::mru` (see `app/core/README.md`); this section covers only what the GNOME platform layer does with it.
+
+### Path resolution
+
+`main::mru_state_path` returns `$XDG_STATE_HOME/lofi/mru.sqlite` when `$XDG_STATE_HOME` is set and non-empty, otherwise `$HOME/.local/state/lofi/mru.sqlite`, otherwise `None`. The shape mirrors `apps::application_directories` deliberately — the launcher already does manual XDG resolution there, so a second crate (`xdg`, `directories`) would be the bigger dependency than the duplicated logic. Returning `None` instead of panicking is the same policy as everywhere else in this binary: a missing-`HOME` environment is degraded but not fatal.
+
+### Open and read once per invocation
+
+`main::on_activate` opens the `MruStore` immediately after gathering applications and windows. Both the `open` and the subsequent `read_all` are wrapped in `.map_err(|e| eprintln!(...)).ok()`, so any failure (no resolvable path, permission denied on the parent dir, corrupt SQLite header, disk full) downgrades to logging and leaves the UI with `None` for the store and an empty `Vec<EntryRef>` for the index. The launcher never refuses to come up because the history is broken; the worst case is "first run after a corrupt DB shows no recency order this session".
+
+The read is a snapshot: if another LoFi process bumps the DB concurrently, this process's UI does not see the change until its next session. That's fine — concurrent launches are rare, and re-reading on every keystroke would be solving a problem we don't have.
+
+### Sorting and bumping in `ui::build`
+
+`ui::build` accepts `Option<Rc<MruStore>>` and `Vec<EntryRef>` alongside `entries`. It converts the index into a `HashMap<EntryRef, usize>` keyed on rank (0 = most recent) and stores it on `UiState`. `populate_list` then stable-sorts the visible index list by `mru_position.get(entry.reference()).copied().unwrap_or(usize::MAX)`. The matcher decides what's visible; MRU decides the order.
+
+On both Enter (`SearchEntry::connect_activate`) and click (`ListBox::connect_row_activated`) the helper `bump_mru` runs **synchronously, immediately before `launch::activate`**. The UPSERT is microseconds — the user never notices — and synchronous is simpler than fire-and-forget when the connection lives in a closure that's about to be dropped as the window closes. If the bump fails (disk full, the DB went away between open and click) we `eprintln!` and proceed with the launch; surfacing a "could not record history" error to the user would be obnoxious for something this peripheral.
+
+### Window vs. Application bumping
+
+A `Entry::Window` activation only bumps that Window's row. It does **not** also bump the underlying Application: the two are independent rows in the same table, and the launcher treats "picked the Chrome — github.com window" as evidence that window is recent, not as evidence Chrome-the-app is recent. The opposite (bumping an app while also bumping its most recent window) was rejected for the same reason: coupling would muddle the recency signal the user gives us per row.
+
+### Persistence note: stale window rows
+
+Window rows from prior shell sessions are dead weight. Mutter window ids are session-ephemeral (see `Window::id` in `app/core/README.md`), so a `EntryRef::Window(12345)` written yesterday will never resolve against today's gather. The launcher tolerates this — `resolve` simply returns `None` for those refs and the UI ignores them — and the rows just accumulate in the table. Periodic cleanup (delete oldest N when the table exceeds 2N rows, or drop unresolved Window refs at startup) is a future pass; we don't yet have enough sense of the steady-state size to commit to a policy.
 
 ## GNOME version support
 

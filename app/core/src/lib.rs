@@ -1,5 +1,7 @@
 pub mod matcher;
+pub mod mru;
 pub use matcher::search;
+pub use mru::{MruError, MruStore};
 
 use serde::{Deserialize, Serialize};
 

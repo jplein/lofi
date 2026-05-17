@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -6,7 +7,7 @@ use std::sync::OnceLock;
 use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
-use lofi_core::{Entry, EntryKind, search};
+use lofi_core::{Entry, EntryKind, EntryRef, MruStore, search};
 
 use crate::launch;
 
@@ -69,15 +70,26 @@ fn install_styles() {
 
 /// Internal launcher state. `entries` is the full gathered set; `visible`
 /// holds indices into `entries` in the order currently shown in the list.
+/// `mru_position` maps each known `EntryRef` to its rank in the persisted
+/// recency index (0 = most recent); entries absent from the map fall to the
+/// bottom of the displayed list in input order.
 struct UiState {
     entries: Vec<Entry>,
     visible: Vec<usize>,
+    mru_position: HashMap<EntryRef, usize>,
 }
 
 /// Build and present the launcher window. Takes ownership of `entries`; the
-/// caller hands us a fresh gather and we do not refresh it during the window's
-/// lifetime.
-pub fn build(app: &adw::Application, entries: Vec<Entry>) {
+/// caller hands us a fresh gather and we do not refresh it during the
+/// window's lifetime. `mru_store` is `None` when the store could not be
+/// opened (e.g. no XDG_STATE_HOME and no HOME) — sorting still happens
+/// against `mru_index`, only the on-activation bump is skipped.
+pub fn build(
+    app: &adw::Application,
+    entries: Vec<Entry>,
+    mru_store: Option<Rc<MruStore>>,
+    mru_index: Vec<EntryRef>,
+) {
     install_styles();
 
     let search_entry = gtk::SearchEntry::builder()
@@ -123,9 +135,18 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
         .build();
     window.set_content(Some(&content));
 
+    // Build the MRU-rank lookup once. The persisted index is already in
+    // most-recent-first order, so its enumerated position is the rank.
+    let mru_position: HashMap<EntryRef, usize> = mru_index
+        .into_iter()
+        .enumerate()
+        .map(|(rank, r)| (r, rank))
+        .collect();
+
     let state = Rc::new(RefCell::new(UiState {
         entries,
         visible: Vec::new(),
+        mru_position,
     }));
 
     // Wire search-changed: rebuild list from the current query.
@@ -145,8 +166,10 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
         let state = state.clone();
         let list_box = list_box.clone();
         let window = window.clone();
+        let mru_store = mru_store.clone();
         search_entry.connect_activate(move |_| {
             if let Some(entry) = selected_entry(&list_box, &state) {
+                bump_mru(mru_store.as_deref(), &entry);
                 launch::activate(&entry);
                 window.close();
             }
@@ -159,6 +182,7 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
     {
         let state = state.clone();
         let window = window.clone();
+        let mru_store = mru_store.clone();
         list_box.connect_row_activated(move |_lb, row| {
             let Ok(row_idx) = usize::try_from(row.index()) else {
                 return;
@@ -173,6 +197,7 @@ pub fn build(app: &adw::Application, entries: Vec<Entry>) {
                 };
                 entry.clone()
             };
+            bump_mru(mru_store.as_deref(), &entry);
             launch::activate(&entry);
             window.close();
         });
@@ -263,28 +288,47 @@ fn selected_entry(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>) -> Opti
 }
 
 /// Rebuild the list rows from `query`. Empty/whitespace queries pass through
-/// the full set; otherwise we run the fuzzy matcher and translate result refs
-/// back into indices via pointer equality against the owning vec.
+/// the full set; otherwise we run the fuzzy matcher (filter-only) and translate
+/// result refs back into indices via pointer equality against the owning vec.
+/// The resulting index list is then stably sorted by MRU rank — entries in the
+/// persisted recency index rise to the top in most-recent-first order; entries
+/// absent from the index fall to the bottom in input order. Stable selection
+/// during typing is the whole point: see the MRU plan for context.
 fn populate_list(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>, query: &str) {
     while let Some(child) = list_box.first_child() {
         list_box.remove(&child);
     }
 
-    let new_visible: Vec<usize> = if query.trim().is_empty() {
+    let new_visible: Vec<usize> = {
         let s = state.borrow();
-        (0..s.entries.len()).collect()
-    } else {
-        let s = state.borrow();
-        let matched = search(&s.entries, query);
-        let mut indices = Vec::with_capacity(matched.len());
-        for m in matched {
-            for (i, e) in s.entries.iter().enumerate() {
-                if std::ptr::eq(e, m) {
-                    indices.push(i);
-                    break;
+        let mut indices: Vec<usize> = if query.trim().is_empty() {
+            (0..s.entries.len()).collect()
+        } else {
+            let matched = search(&s.entries, query);
+            let mut idxs = Vec::with_capacity(matched.len());
+            for m in matched {
+                for (i, e) in s.entries.iter().enumerate() {
+                    if std::ptr::eq(e, m) {
+                        idxs.push(i);
+                        break;
+                    }
                 }
             }
-        }
+            idxs
+        };
+        // Stable sort: in-MRU entries rise in MRU order; non-MRU entries (rank
+        // usize::MAX) keep their relative input order at the bottom.
+        indices.sort_by_key(|i| {
+            s.entries
+                .get(*i)
+                .map(|e| {
+                    s.mru_position
+                        .get(&e.reference())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                })
+                .unwrap_or(usize::MAX)
+        });
         indices
     };
 
@@ -387,5 +431,18 @@ fn kind_to_str(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Application => "Application",
         EntryKind::Window => "Window",
+    }
+}
+
+/// Best-effort: bump `entry`'s ref in the persistent MRU store. Called from
+/// both activation paths (Enter and click) right before `launch::activate`.
+/// `store` is `None` when the SQLite file could not be opened; bump errors
+/// log via `eprintln!` and are otherwise swallowed because there is no
+/// useful caller-side recovery — the launch still happens.
+fn bump_mru(store: Option<&MruStore>, entry: &Entry) {
+    if let Some(store) = store
+        && let Err(e) = store.bump(&entry.reference())
+    {
+        eprintln!("mru: bump failed for {}: {e}", entry.name());
     }
 }

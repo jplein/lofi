@@ -14,11 +14,11 @@ fn haystack(entry: &Entry) -> String {
     }
 }
 
-/// Fuzzy-search `entries` by `query`. An empty or whitespace-only query is a
-/// passthrough that preserves input order. Otherwise the query is tokenized on
-/// whitespace, every token must match the entry's haystack (intersection
-/// semantics), and per-token scores are summed. Results are sorted by score
-/// descending, with ascending name as the tiebreaker.
+/// Fuzzy-filter `entries` by `query`. An empty or whitespace-only query is a
+/// passthrough that returns every entry. Otherwise the query is tokenized on
+/// whitespace and every token must match the entry's haystack (intersection
+/// semantics). Results preserve the input order — `search` is filter-only;
+/// ordering is the caller's responsibility (the launcher uses the MRU index).
 pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
     if query.trim().is_empty() {
         return entries.iter().collect();
@@ -27,27 +27,15 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
     let tokens: Vec<&str> = query.split_whitespace().collect();
     let matcher = SkimMatcherV2::default().ignore_case();
 
-    let mut scored: Vec<(&Entry, i64)> = Vec::new();
-    for entry in entries {
-        let hay = haystack(entry);
-        let mut total: i64 = 0;
-        let mut all_matched = true;
-        for token in &tokens {
-            match matcher.fuzzy_match(&hay, token) {
-                Some(score) => total += score,
-                None => {
-                    all_matched = false;
-                    break;
-                }
-            }
-        }
-        if all_matched {
-            scored.push((entry, total));
-        }
-    }
-
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
-    scored.into_iter().map(|(e, _)| e).collect()
+    entries
+        .iter()
+        .filter(|entry| {
+            let hay = haystack(entry);
+            tokens
+                .iter()
+                .all(|token| matcher.fuzzy_match(&hay, token).is_some())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -167,11 +155,10 @@ mod tests {
             "query \"google\" should match exactly one entry by desktop_id; got names {:?}",
             names(&result)
         );
-        assert_eq!(
-            result[0].name(),
-            "Chrome",
-            "query \"google\" should match the Chrome entry (com.google.Chrome.desktop); got {:?}",
-            result[0].name()
+        assert!(
+            result.iter().any(|e| e.name() == "Chrome"),
+            "query \"google\" should match the Chrome entry (com.google.Chrome.desktop); got names {:?}",
+            names(&result)
         );
     }
 
@@ -235,18 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn score_sort_descending_with_name_tiebreaker() {
-        // Both entries share the suffix "z.desktop" in their haystacks; the
-        // query "z.desktop" matches that suffix identically in both. The
-        // haystack prefix differs only in the name ("Bravo " vs "Alpha "),
-        // which has no effect on the matched substring's score. With equal
-        // scores the documented tiebreaker is ascending name, so "Alpha"
-        // must appear before "Bravo".
-        //
-        // If a future fuzzy-matcher release weights haystack prefix length
-        // and breaks the tie, this test would fail loudly and we would
-        // adjust the fixture; per the plan we prefer a stable-ish assertion
-        // over a flakier one.
+    fn matching_entries_are_returned_regardless_of_order() {
+        // search() is filter-only now: it returns matching entries in the
+        // input order (no score-based ranking, no tiebreaker). The set of
+        // matches is what callers should rely on; ordering is handled
+        // upstream by the MRU index.
         let entries = vec![app("Bravo", "z.desktop"), app("Alpha", "z.desktop")];
 
         let result = search(&entries, "z.desktop");
@@ -258,20 +238,15 @@ mod tests {
             names(&result)
         );
 
-        let result_names = names(&result);
-        let alpha_pos = result_names
-            .iter()
-            .position(|n| *n == "Alpha")
-            .expect("\"Alpha\" should be present in results");
-        let bravo_pos = result_names
-            .iter()
-            .position(|n| *n == "Bravo")
-            .expect("\"Bravo\" should be present in results");
-
         assert!(
-            alpha_pos < bravo_pos,
-            "with tied scores, alphabetical name tiebreaker should place \"Alpha\" before \"Bravo\"; got {:?}",
-            result_names
+            result.iter().any(|e| e.name() == "Alpha"),
+            "result should contain \"Alpha\"; got names {:?}",
+            names(&result)
+        );
+        assert!(
+            result.iter().any(|e| e.name() == "Bravo"),
+            "result should contain \"Bravo\"; got names {:?}",
+            names(&result)
         );
     }
 
