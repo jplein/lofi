@@ -7,3 +7,4 @@
 # (bazel-bin, bazel-out, bazel-testlogs, …). They are not source.
 # `MODULE.bazel.lock` is committed.
 /bazel-*
+.DS_Store

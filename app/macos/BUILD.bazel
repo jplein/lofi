@@ -14,6 +14,7 @@
 
 load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
 load("@build_bazel_rules_apple//apple:macos.bzl", "macos_application")
+load("@rules_xcodeproj//xcodeproj:defs.bzl", "xcodeproj")
 
 swift_library(
     name = "LoFiLib",
@@ -29,6 +30,9 @@ macos_application(
     infoplists = ["Resources/Info.plist"],
     entitlements = "Resources/LoFi.entitlements",
     minimum_os_version = "15.0",
+    # Public so rules_xcodeproj's generated package can depend on this
+    # for project generation.
+    visibility = ["//visibility:public"],
     deps = [":LoFiLib"],
 )
 
@@ -36,4 +40,16 @@ sh_binary(
     name = "launch",
     srcs = ["bazel/launch.sh"],
     data = [":LoFi"],
+)
+
+# Generates `LoFi.xcodeproj` from the Bazel graph so the app can be
+# opened, built, and debugged in Xcode. The project is generated on
+# demand — `bazel run //app/macos:xcodeproj` writes it to
+# `app/macos/LoFi.xcodeproj/`; the rendered project file is gitignored
+# so the YAML/Bazel files stay the source of truth.
+xcodeproj(
+    name = "xcodeproj",
+    project_name = "LoFi",
+    tags = ["manual"],
+    top_level_targets = [":LoFi"],
 )

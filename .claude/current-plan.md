@@ -127,4 +127,4 @@ The `genrule` reads sources, runs cbindgen, emits the header into Bazel's output
 Remaining (not blocking this slice):
 - Linux GNOME regression check: `cargo build -p lofi-gnome` from inside the Linux Crane shell still succeeds. Not verifiable from the macOS environment; flag for the next time the user is on Linux.
 - `DEVELOPER_DIR` override in `.envrc` so Bazel doesn't pick up the Nix-provided partial SDK. (Done.)
-- Optional follow-up slice: `rules_xcodeproj` to regenerate a debuggable Xcode project from the Bazel graph.
+- ~~Optional follow-up slice: `rules_xcodeproj` to regenerate a debuggable Xcode project from the Bazel graph.~~ Done — `bazel run //app/macos:xcodeproj` writes `app/macos/LoFi.xcodeproj/`; gitignored; rules_xcodeproj 4.1.0 pinned in MODULE.bazel.

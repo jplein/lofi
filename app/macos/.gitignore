@@ -2,3 +2,7 @@
 # root, not in this directory. macOS' Finder occasionally drops .DS_Store
 # files anywhere; ignore them so they don't pollute commits.
 .DS_Store
+
+# `bazel run //app/macos:xcodeproj` generates this in-place; the BUILD
+# file is the source of truth, the rendered Xcode project is not.
+LoFi.xcodeproj/
