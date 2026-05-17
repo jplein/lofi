@@ -12,7 +12,8 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
-    (flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
+    let
+      linuxOutputs = (flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -197,7 +198,30 @@
           inherit buildInputs;
         };
       })) // {
+        # home-manager modules ship only with the Linux side — there is
+        # no macOS equivalent planned.
         homeManagerModules.lofi = import ./nix/hm-module.nix { inherit self; };
         homeManagerModules.default = self.homeManagerModules.lofi;
       };
+
+      # macOS (Apple Silicon) outputs. Separate from the Linux block
+      # because the Darwin build will not share the GTK / GNOME inputs.
+      # Just a Rust devShell for now — packages/apps come as the macOS
+      # port comes together.
+      darwinOutputs = flake-utils.lib.eachSystem [ "aarch64-darwin" ] (system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in {
+          devShells.default = pkgs.mkShell {
+            nativeBuildInputs = [ rustToolchain ];
+          };
+        });
+    in
+      # `//` is shallow — both blocks define `devShells` (etc), so a
+      # plain merge would have Darwin clobber Linux at the top level.
+      nixpkgs.lib.recursiveUpdate linuxOutputs darwinOutputs;
 }
