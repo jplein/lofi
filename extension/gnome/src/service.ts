@@ -130,7 +130,7 @@ export class WindowManagerService {
             if (!dynamicWorkspacesEnabled()) {
                 return;
             }
-            wm.append_new_workspace(false, global.get_current_time());
+            wm.append_new_workspace(false, global.display.get_current_time_roundtrip());
         }
         moveWindowToWorkspaceIndex(win, target, true);
     }
@@ -169,7 +169,7 @@ export class WindowManagerService {
 
     FocusWindow(id: bigint): void {
         const win = lookupWindow(id);
-        win.activate(global.get_current_time());
+        win.activate(global.display.get_current_time_roundtrip());
     }
 
     MoveWindowToWorkspace(id: bigint, targetIndex: number): void {
@@ -186,7 +186,7 @@ export class WindowManagerService {
                 throw workspaceOutOfRange(targetIndex);
             }
             if (targetIndex === wm.n_workspaces) {
-                wm.append_new_workspace(false, global.get_current_time());
+                wm.append_new_workspace(false, global.display.get_current_time_roundtrip());
             }
         } else if (targetIndex >= wm.n_workspaces) {
             throw workspaceOutOfRange(targetIndex);
@@ -208,7 +208,7 @@ export class WindowManagerService {
 
     CloseWindow(id: bigint): void {
         const win = lookupWindow(id);
-        win.delete(global.get_current_time());
+        win.delete(global.display.get_current_time_roundtrip());
     }
 
     // ---- workspace action ----
@@ -222,6 +222,6 @@ export class WindowManagerService {
         if (ws === null) {
             throw workspaceOutOfRange(index);
         }
-        ws.activate(global.get_current_time());
+        ws.activate(global.display.get_current_time_roundtrip());
     }
 }
