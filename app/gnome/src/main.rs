@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use lofi_core::{Entry, EntryRef, MruStore};
-use lofi_gnome::{apps, commands, ui, windows, workspaces};
+use lofi_gnome::{apps, commands, power, ui, windows, workspaces};
 
 const APP_ID: &str = "dev.jplein.LoFi";
 
@@ -35,6 +35,7 @@ fn on_activate(app: &adw::Application) {
     let windows = windows::gather_windows();
     let workspaces_vec = workspaces::gather_workspaces();
     let commands_vec = commands::gather_commands();
+    let power_commands = power::gather_power_commands();
 
     // Build a desktop_id -> most-recent-window-id map. `gather_windows` returns
     // windows in MRU order, so the FIRST occurrence per app id is the right
@@ -57,12 +58,17 @@ fn on_activate(app: &adw::Application) {
     }
 
     let mut entries: Vec<Entry> = Vec::with_capacity(
-        applications.len() + windows.len() + workspaces_vec.len() + commands_vec.len(),
+        applications.len()
+            + windows.len()
+            + workspaces_vec.len()
+            + commands_vec.len()
+            + power_commands.len(),
     );
     entries.extend(applications.into_iter().map(Entry::Application));
     entries.extend(windows.into_iter().map(Entry::Window));
     entries.extend(workspaces_vec.into_iter().map(Entry::Workspace));
     entries.extend(commands_vec.into_iter().map(Entry::Command));
+    entries.extend(power_commands.into_iter().map(Entry::PowerCommand));
 
     // Open the persistent MRU store and snapshot the recency index. Both are
     // best-effort: any failure (no XDG_STATE_HOME + no HOME, permission

@@ -1,6 +1,7 @@
 pub mod apps;
 pub mod commands;
 pub mod launch;
+pub mod power;
 pub mod ui;
 pub mod windows;
 pub mod workspaces;

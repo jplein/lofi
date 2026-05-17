@@ -141,6 +141,87 @@ impl CommandKind {
     }
 }
 
+/// Identifier for the launcher's system-level power commands. Each variant
+/// maps to a stable snake_case id (`PowerCommandKind::as_id`) that round-trips
+/// into `EntryRef::PowerCommand(String)` so the persistent MRU store stays
+/// valid across sessions even if the runtime list is regenerated. Unlike the
+/// window-action `CommandKind`, these commands always apply regardless of
+/// focused window — they only need the kind, not a target/work area/frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerCommandKind {
+    LockSession,
+    Suspend,
+    Restart,
+    Shutdown,
+}
+
+impl PowerCommandKind {
+    /// Stable snake_case identifier for this kind. Used as the payload of
+    /// `EntryRef::PowerCommand(String)` (and therefore the persistent MRU
+    /// key), so it must remain backwards-compatible across releases — adding
+    /// a variant is fine, renaming an existing one would invalidate stored
+    /// history.
+    pub fn as_id(&self) -> &'static str {
+        match self {
+            PowerCommandKind::LockSession => "lock_session",
+            PowerCommandKind::Suspend => "suspend",
+            PowerCommandKind::Restart => "restart",
+            PowerCommandKind::Shutdown => "shutdown",
+        }
+    }
+
+    /// Human-readable label shown in the launcher list and used as the
+    /// matcher haystack. Short verb-like labels mirror what the GNOME
+    /// system menu uses.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            PowerCommandKind::LockSession => "Lock",
+            PowerCommandKind::Suspend => "Suspend",
+            PowerCommandKind::Restart => "Restart",
+            PowerCommandKind::Shutdown => "Shutdown",
+        }
+    }
+
+    /// Symbolic icon name (Adwaita / freedesktop-symbolic) shown beside the
+    /// command in the launcher. Picked to convey the action: a padlock for
+    /// Lock, a moon for Suspend, a reboot arrow for Restart, a power symbol
+    /// for Shutdown.
+    pub fn icon_name(&self) -> &'static str {
+        match self {
+            PowerCommandKind::LockSession => "system-lock-screen-symbolic",
+            PowerCommandKind::Suspend => "weather-clear-night-symbolic",
+            PowerCommandKind::Restart => "system-reboot-symbolic",
+            PowerCommandKind::Shutdown => "system-shutdown-symbolic",
+        }
+    }
+
+    /// Inverse of `as_id`: parse a snake_case id back to a `PowerCommandKind`.
+    /// Used at MRU-rehydrate time when we re-materialize stored
+    /// `EntryRef::PowerCommand(id)` entries. Returns `None` for unknown ids
+    /// so stale rows in MRU silently fall off rather than panic.
+    pub fn from_id(id: &str) -> Option<PowerCommandKind> {
+        match id {
+            "lock_session" => Some(PowerCommandKind::LockSession),
+            "suspend" => Some(PowerCommandKind::Suspend),
+            "restart" => Some(PowerCommandKind::Restart),
+            "shutdown" => Some(PowerCommandKind::Shutdown),
+            _ => None,
+        }
+    }
+}
+
+/// A launcher entry representing a system-level power command (Lock, Suspend,
+/// Restart, Shutdown). Distinct from `Command` because no per-window target,
+/// work area, or current frame is required — the command always applies. The
+/// wrapping struct (rather than a bare `PowerCommandKind` on `Entry`) keeps
+/// the variant shape consistent with `Application`/`Window`/`Workspace`/`Command`
+/// so future per-instance state can be added without a variant rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerCommand {
+    pub kind: PowerCommandKind,
+}
+
 /// Mutter work area (the monitor rectangle minus panel/dock struts) for a
 /// specific window's monitor. Used as the bounding box for every geometry
 /// command. Captured at gather time from `GetWindowWorkArea(id)` so the
@@ -177,6 +258,7 @@ pub enum EntryKind {
     Window,
     Workspace,
     Command,
+    PowerCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +267,7 @@ pub enum Entry {
     Window(Window),
     Workspace(Workspace),
     Command(Command),
+    PowerCommand(PowerCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -194,6 +277,7 @@ pub enum EntryRef {
     Window(u64),
     Workspace(i32),
     Command(String),
+    PowerCommand(String),
 }
 
 /// Icon name used for every `Entry::Workspace`. Hardcoded because workspaces
@@ -209,6 +293,7 @@ impl Entry {
             Entry::Window(w) => w.title.as_str(),
             Entry::Workspace(w) => w.name.as_str(),
             Entry::Command(c) => c.kind.display_name(),
+            Entry::PowerCommand(c) => c.kind.display_name(),
         }
     }
 
@@ -218,6 +303,7 @@ impl Entry {
             Entry::Window(w) => w.icon.as_deref(),
             Entry::Workspace(_) => Some(WORKSPACE_ICON),
             Entry::Command(c) => Some(c.kind.icon_name()),
+            Entry::PowerCommand(c) => Some(c.kind.icon_name()),
         }
     }
 
@@ -227,6 +313,7 @@ impl Entry {
             Entry::Window(_) => EntryKind::Window,
             Entry::Workspace(_) => EntryKind::Workspace,
             Entry::Command(_) => EntryKind::Command,
+            Entry::PowerCommand(_) => EntryKind::PowerCommand,
         }
     }
 
@@ -236,6 +323,7 @@ impl Entry {
             Entry::Window(w) => EntryRef::Window(w.id),
             Entry::Workspace(w) => EntryRef::Workspace(w.index),
             Entry::Command(c) => EntryRef::Command(c.kind.as_id().to_string()),
+            Entry::PowerCommand(c) => EntryRef::PowerCommand(c.kind.as_id().to_string()),
         }
     }
 }
@@ -305,6 +393,14 @@ mod tests {
             },
             current_frame: (100, 100, 800, 600),
         }
+    }
+
+    /// Test helper: build a `PowerCommand` for the given kind. Mirrors
+    /// `make_command` for the window-action commands. `PowerCommand` has no
+    /// per-instance state beyond the kind, but a helper keeps the test
+    /// fixtures aligned with the surrounding patterns.
+    fn make_power_command(kind: PowerCommandKind) -> PowerCommand {
+        PowerCommand { kind }
     }
 
     #[test]
@@ -964,6 +1060,201 @@ mod tests {
         assert_eq!(
             unknown, None,
             "CommandKind::from_id(\"not-a-command\") should be None; got {unknown:?}"
+        );
+    }
+
+    /// Exhaustive list of all `PowerCommandKind` variants, kept in one place
+    /// so the round-trip tests below stay synchronized. If a variant is
+    /// added, this list must grow — and the tests will fail loudly until the
+    /// maintainer extends it. Mirrors `ALL_COMMAND_KINDS`.
+    const ALL_POWER_COMMAND_KINDS: &[PowerCommandKind] = &[
+        PowerCommandKind::LockSession,
+        PowerCommandKind::Suspend,
+        PowerCommandKind::Restart,
+        PowerCommandKind::Shutdown,
+    ];
+
+    #[test]
+    fn entry_power_command_reference_round_trips() {
+        for &kind in ALL_POWER_COMMAND_KINDS {
+            let entry = Entry::PowerCommand(make_power_command(kind));
+            let reference = entry.reference();
+            let expected_ref = EntryRef::PowerCommand(kind.as_id().into());
+            assert_eq!(
+                reference, expected_ref,
+                "Entry::PowerCommand({kind:?}).reference() should be EntryRef::PowerCommand(kind.as_id()); got {reference:?}, want {expected_ref:?}"
+            );
+
+            let entries = vec![entry.clone()];
+            let resolved = resolve(&entries, &entry.reference());
+            assert!(
+                matches!(resolved, Some(r) if r == &entry),
+                "resolve should return Some(&entry) for the PowerCommand reference of kind {kind:?}; got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_finds_power_command_by_reference() {
+        let entries = vec![
+            Entry::Application(make_application("Center", "center.desktop", None)),
+            Entry::Window(make_window(7, "A Window", Some("Firefox"), None)),
+            Entry::Workspace(make_workspace(0, "Workspace 1")),
+            Entry::Command(make_command(CommandKind::Center)),
+            Entry::PowerCommand(make_power_command(PowerCommandKind::Suspend)),
+            Entry::PowerCommand(make_power_command(PowerCommandKind::LockSession)),
+        ];
+
+        // Positive: EntryRef::PowerCommand("suspend") resolves to the Suspend
+        // PowerCommand entry.
+        let reference = EntryRef::PowerCommand("suspend".into());
+        let resolved = resolve(&entries, &reference);
+        let found = resolved.expect("resolve should find a PowerCommand for \"suspend\"");
+        assert_eq!(
+            found.kind(),
+            EntryKind::PowerCommand,
+            "resolve(EntryRef::PowerCommand(\"suspend\")) must return a PowerCommand entry; got kind {:?}",
+            found.kind()
+        );
+        match found {
+            Entry::PowerCommand(c) => assert_eq!(
+                c.kind,
+                PowerCommandKind::Suspend,
+                "resolved PowerCommand must have kind Suspend; got {:?}",
+                c.kind
+            ),
+            other => panic!("expected Entry::PowerCommand, got {other:?}"),
+        }
+
+        // Cross-variant guard: EntryRef::Command("suspend") must NOT resolve
+        // to the Suspend PowerCommand. The window-Command id space and the
+        // PowerCommand id space are distinct EntryRef variants. "suspend" is
+        // not a valid CommandKind id, so resolve returns None here — but
+        // even if it weren't None, it must never be a PowerCommand.
+        let cmd_ref_suspend = EntryRef::Command("suspend".into());
+        let resolved_as_cmd = resolve(&entries, &cmd_ref_suspend);
+        if let Some(found) = resolved_as_cmd {
+            assert_ne!(
+                found.kind(),
+                EntryKind::PowerCommand,
+                "EntryRef::Command(\"suspend\") must NOT resolve to a PowerCommand entry; got kind {:?}",
+                found.kind()
+            );
+        }
+
+        // Cross-variant guard (other direction): EntryRef::PowerCommand("center")
+        // must NOT resolve to the Center window Command. There is no
+        // PowerCommandKind with id "center", so this must be None.
+        let power_ref_center = EntryRef::PowerCommand("center".into());
+        let resolved_as_power = resolve(&entries, &power_ref_center);
+        if let Some(found) = resolved_as_power {
+            assert_ne!(
+                found.kind(),
+                EntryKind::Command,
+                "EntryRef::PowerCommand(\"center\") must NOT resolve to a window Command entry; got kind {:?}",
+                found.kind()
+            );
+        }
+
+        // Missing PowerCommand id returns None.
+        let missing = EntryRef::PowerCommand("hibernate".into());
+        assert_eq!(
+            resolve(&entries, &missing),
+            None,
+            "resolve should return None for a PowerCommand id not in the slice; got {:?}",
+            resolve(&entries, &missing)
+        );
+    }
+
+    #[test]
+    fn entry_ref_power_command_serializes_to_tagged_json() {
+        let r = EntryRef::PowerCommand("suspend".into());
+
+        let serialized =
+            serde_json::to_string(&r).expect("EntryRef::PowerCommand should serialize");
+        assert_eq!(
+            serialized, r#"{"type":"power_command","id":"suspend"}"#,
+            "EntryRef::PowerCommand should serialize with tag=type/content=id and snake_case variant; got {serialized}"
+        );
+
+        let round_tripped: EntryRef =
+            serde_json::from_str(&serialized).expect("EntryRef::PowerCommand should deserialize");
+        assert_eq!(
+            round_tripped, r,
+            "EntryRef::PowerCommand should round-trip via serde_json; got {round_tripped:?}"
+        );
+    }
+
+    #[test]
+    fn entry_power_command_methods_return_command_data() {
+        // LockSession — display name "Lock", icon "system-lock-screen-symbolic".
+        let lock = Entry::PowerCommand(make_power_command(PowerCommandKind::LockSession));
+        assert_eq!(
+            lock.name(),
+            "Lock",
+            "Entry::PowerCommand(LockSession)::name should be \"Lock\"; got {:?}",
+            lock.name()
+        );
+        assert_eq!(
+            lock.icon(),
+            Some("system-lock-screen-symbolic"),
+            "Entry::PowerCommand(LockSession)::icon should be Some(\"system-lock-screen-symbolic\"); got {:?}",
+            lock.icon()
+        );
+        assert_eq!(
+            lock.kind(),
+            EntryKind::PowerCommand,
+            "Entry::PowerCommand(LockSession)::kind should return EntryKind::PowerCommand; got {:?}",
+            lock.kind()
+        );
+
+        // Suspend — display name "Suspend", icon "weather-clear-night-symbolic".
+        let suspend = Entry::PowerCommand(make_power_command(PowerCommandKind::Suspend));
+        assert_eq!(
+            suspend.name(),
+            "Suspend",
+            "Entry::PowerCommand(Suspend)::name should be \"Suspend\"; got {:?}",
+            suspend.name()
+        );
+        assert_eq!(
+            suspend.icon(),
+            Some("weather-clear-night-symbolic"),
+            "Entry::PowerCommand(Suspend)::icon should be Some(\"weather-clear-night-symbolic\"); got {:?}",
+            suspend.icon()
+        );
+
+        // Shutdown — display name "Shutdown", icon "system-shutdown-symbolic".
+        let shutdown = Entry::PowerCommand(make_power_command(PowerCommandKind::Shutdown));
+        assert_eq!(
+            shutdown.name(),
+            "Shutdown",
+            "Entry::PowerCommand(Shutdown)::name should be \"Shutdown\"; got {:?}",
+            shutdown.name()
+        );
+        assert_eq!(
+            shutdown.icon(),
+            Some("system-shutdown-symbolic"),
+            "Entry::PowerCommand(Shutdown)::icon should be Some(\"system-shutdown-symbolic\"); got {:?}",
+            shutdown.icon()
+        );
+    }
+
+    #[test]
+    fn power_command_kind_id_round_trips_through_from_id() {
+        for &kind in ALL_POWER_COMMAND_KINDS {
+            let id = kind.as_id();
+            let parsed = PowerCommandKind::from_id(id);
+            assert_eq!(
+                parsed,
+                Some(kind),
+                "PowerCommandKind::from_id({id:?}) should round-trip to Some({kind:?}); got {parsed:?}"
+            );
+        }
+
+        let unknown = PowerCommandKind::from_id("not-a-power-command");
+        assert_eq!(
+            unknown, None,
+            "PowerCommandKind::from_id(\"not-a-power-command\") should be None; got {unknown:?}"
         );
     }
 }

@@ -13,6 +13,7 @@ fn haystack(entry: &Entry) -> String {
         },
         Entry::Workspace(w) => w.name.clone(),
         Entry::Command(c) => c.kind.display_name().to_string(),
+        Entry::PowerCommand(c) => c.kind.display_name().to_string(),
     }
 }
 
@@ -43,7 +44,10 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Command, CommandKind, Entry, Window, WorkArea, Workspace};
+    use crate::{
+        Application, Command, CommandKind, Entry, PowerCommand, PowerCommandKind, Window, WorkArea,
+        Workspace,
+    };
     use std::collections::HashSet;
 
     /// Test helper: build an `Entry::Application` with the given name/desktop_id
@@ -94,6 +98,13 @@ mod tests {
             },
             current_frame: (0, 0, 0, 0),
         })
+    }
+
+    /// Test helper: build an `Entry::PowerCommand` with the given kind. The
+    /// matcher reads only the `kind.display_name()`, so no other state is
+    /// needed. Mirrors `cmd(...)` for power-command fixtures.
+    fn power(kind: PowerCommandKind) -> Entry {
+        Entry::PowerCommand(PowerCommand { kind })
     }
 
     /// Collect names out of a `Vec<&Entry>` for set-based or order-based assertions.
@@ -486,6 +497,91 @@ mod tests {
         assert!(
             command_kinds_toggle.contains(&CommandKind::ToggleFullscreen),
             "query \"toggle\" should match Command::ToggleFullscreen; got {command_kinds_toggle:?}"
+        );
+    }
+
+    #[test]
+    fn matcher_finds_power_command_by_name() {
+        // The matcher's haystack for Entry::PowerCommand is the kind's
+        // display name. Tests assert about the set of PowerCommand entries
+        // matched per query — Applications in the mix may or may not also
+        // match, but they should never shadow the expected PowerCommand
+        // matches. The "Lockheed Martin" application is here as a sanity
+        // check that it doesn't displace the Lock PowerCommand.
+        let entries = vec![
+            power(PowerCommandKind::LockSession),
+            power(PowerCommandKind::Suspend),
+            power(PowerCommandKind::Restart),
+            power(PowerCommandKind::Shutdown),
+            app("Lockheed Martin", "lockheed.desktop"),
+        ];
+
+        // Query "lock" should match LockSession in the PowerCommand subset.
+        // The "Lockheed Martin" application may or may not match — we only
+        // assert about the PowerCommand subset.
+        let result_lock = search(&entries, "lock");
+        let power_kinds_lock: HashSet<PowerCommandKind> = result_lock
+            .iter()
+            .filter_map(|e| match e {
+                Entry::PowerCommand(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            power_kinds_lock.contains(&PowerCommandKind::LockSession),
+            "query \"lock\" should match PowerCommand::LockSession; got {power_kinds_lock:?}"
+        );
+
+        // Query "suspend" should match Suspend only among PowerCommands.
+        let result_suspend = search(&entries, "suspend");
+        let power_kinds_suspend: HashSet<PowerCommandKind> = result_suspend
+            .iter()
+            .filter_map(|e| match e {
+                Entry::PowerCommand(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            power_kinds_suspend.contains(&PowerCommandKind::Suspend),
+            "query \"suspend\" should match PowerCommand::Suspend; got {power_kinds_suspend:?}"
+        );
+        assert!(
+            !power_kinds_suspend.contains(&PowerCommandKind::LockSession),
+            "query \"suspend\" should NOT match PowerCommand::LockSession; got {power_kinds_suspend:?}"
+        );
+        assert!(
+            !power_kinds_suspend.contains(&PowerCommandKind::Restart),
+            "query \"suspend\" should NOT match PowerCommand::Restart; got {power_kinds_suspend:?}"
+        );
+        assert!(
+            !power_kinds_suspend.contains(&PowerCommandKind::Shutdown),
+            "query \"suspend\" should NOT match PowerCommand::Shutdown; got {power_kinds_suspend:?}"
+        );
+
+        // Query "restart" should match Restart only among PowerCommands.
+        let result_restart = search(&entries, "restart");
+        let power_kinds_restart: HashSet<PowerCommandKind> = result_restart
+            .iter()
+            .filter_map(|e| match e {
+                Entry::PowerCommand(c) => Some(c.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            power_kinds_restart.contains(&PowerCommandKind::Restart),
+            "query \"restart\" should match PowerCommand::Restart; got {power_kinds_restart:?}"
+        );
+        assert!(
+            !power_kinds_restart.contains(&PowerCommandKind::LockSession),
+            "query \"restart\" should NOT match PowerCommand::LockSession; got {power_kinds_restart:?}"
+        );
+        assert!(
+            !power_kinds_restart.contains(&PowerCommandKind::Suspend),
+            "query \"restart\" should NOT match PowerCommand::Suspend; got {power_kinds_restart:?}"
+        );
+        assert!(
+            !power_kinds_restart.contains(&PowerCommandKind::Shutdown),
+            "query \"restart\" should NOT match PowerCommand::Shutdown; got {power_kinds_restart:?}"
         );
     }
 }

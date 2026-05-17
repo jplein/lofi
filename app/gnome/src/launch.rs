@@ -3,7 +3,7 @@ use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use lofi_core::{CommandKind, Entry, compute_geometry};
 
-use crate::{windows, workspaces};
+use crate::{power, windows, workspaces};
 
 /// Activate the entry. For an `Entry::Application` that has a
 /// `recent_window_id` (i.e. is currently running), focus that window over
@@ -56,5 +56,6 @@ pub fn activate(entry: &Entry) {
                 }
             }
         }
+        Entry::PowerCommand(c) => power::activate(c.kind),
     }
 }

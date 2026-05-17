@@ -516,6 +516,7 @@ fn kind_to_str(kind: EntryKind) -> &'static str {
         EntryKind::Window => "Window",
         EntryKind::Workspace => "Workspace",
         EntryKind::Command => "Command",
+        EntryKind::PowerCommand => "Power",
     }
 }
 
