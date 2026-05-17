@@ -1,0 +1,4 @@
+# Bzlmod is the modern Bazel dependency system; we have no external deps
+# yet, so MODULE.bazel is essentially empty, but enabling bzlmod up front
+# avoids a migration later.
+common --enable_bzlmod

@@ -33,6 +33,10 @@ XcodeGen comes from the Nix devShell (`xcodegen` is in `nativeBuildInputs` for t
 project.yml             XcodeGen spec; .xcodeproj is regenerated from this
 build.sh                cargo + xcodegen + xcodebuild driver
 run.sh                  opens the most recent .app bundle
+BUILD.bazel             sh_binary targets :build and :launch
+bazel/
+  build.sh              wrapper that execs ../build.sh under bazel run
+  launch.sh             wrapper that execs ../run.sh under bazel run
 Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
@@ -48,12 +52,25 @@ Resources/
 
 ## Build / run
 
+Two equivalent front doors. Pick whichever fits your habits.
+
+**Direct shell scripts:**
+
 ```sh
 ./build.sh    # cargo build + xcodegen + xcodebuild
 ./run.sh      # open the .app
 ```
 
 `build.sh --rust-only` is what the Xcode pre-build phase invokes; `build.sh --no-rust` skips the Rust stage for fast incremental Swift iteration when the staticlib hasn't changed.
+
+**Bazel:**
+
+```sh
+bazel run //app/macos:build     # same as ./build.sh
+bazel run //app/macos:launch    # same as ./run.sh
+```
+
+The Bazel targets are thin `sh_binary` wrappers that exec the canonical scripts (see `app/macos/bazel/`). Cargo and Xcode still do the real work — Bazel is just the entry-point driver. A future slice could swap this for `rules_rust` + `rules_apple` targets, but the wrap-the-script shape stays drop-in compatible with everything else in the repo. Bazelisk is provided by the Darwin Nix devShell; `.bazelversion` at the repo root pins the Bazel release.
 
 ## Gotchas worth calling out
 

@@ -2,3 +2,8 @@
 /result
 /result-*
 /.direnv
+
+# Bazel writes convenience symlinks at the workspace root
+# (bazel-bin, bazel-out, bazel-testlogs, …). They are not source.
+# `MODULE.bazel.lock` is committed.
+/bazel-*

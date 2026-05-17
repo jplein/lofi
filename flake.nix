@@ -221,7 +221,12 @@
             # `app/macos/project.yml`. Swift itself is not in the shell —
             # Nix on Darwin does not ship a usable Swift toolchain, so
             # that comes from the user's Xcode / Command Line Tools.
-            nativeBuildInputs = [ rustToolchain pkgs.xcodegen ];
+            #
+            # `bazelisk` is the Bazel version dispatcher; it reads
+            # `.bazelversion` at the repo root and downloads the matching
+            # Bazel release on first invocation. Darwin-only for now —
+            # the Linux GNOME crate still goes through Cargo + Crane.
+            nativeBuildInputs = [ rustToolchain pkgs.xcodegen pkgs.bazelisk ];
           };
         });
     in

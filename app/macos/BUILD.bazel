@@ -1,0 +1,18 @@
+# Bazel entry points for the macOS app.
+#
+# Both targets just shell out to the canonical `build.sh` / `run.sh`
+# scripts via a thin wrapper. Bazel is the front-door driver here; the
+# real work still happens in cargo / xcodegen / xcodebuild. A future
+# slice could replace the wrappers with rules_rust + rules_apple
+# targets, but the wrap-the-script approach keeps the Cargo and Xcode
+# build paths unchanged while giving us a single `bazel run …` UX.
+
+sh_binary(
+    name = "build",
+    srcs = ["bazel/build.sh"],
+)
+
+sh_binary(
+    name = "launch",
+    srcs = ["bazel/launch.sh"],
+)
