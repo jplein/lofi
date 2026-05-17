@@ -117,6 +117,25 @@ All errors are `GLib.Error` instances in the namespace
 - `WindowNotFound`
 - `WorkspaceOutOfRange`
 
+## Launcher window animation
+
+GNOME Shell's default open/close animation (a brief zoom/fade) is suppressed
+specifically for the LoFi launcher window — identified by its Shell.App id
+`dev.jplein.LoFi.desktop`. The launcher is modal, focus-driven, and dismisses
+on focus loss, so the standard animation adds perceptible latency to a flow
+that's supposed to feel instantaneous. All other windows keep their normal
+animations.
+
+Implementation lives in `src/launcher.ts`, hooked into `Shell.WM`'s `map`
+and `destroy` signals. We don't prevent Shell from starting the animation;
+we let it start and immediately `remove_all_transitions()` on the window
+actor, snapping it to its terminal state. On `destroy` we also call
+`WM.completed_destroy(actor)` because Shell otherwise keeps the destroy
+gated behind the (now zero-duration) animation it thinks is still running.
+
+This avoids monkey-patching the private `Main.wm._mapWindow` /
+`_destroyWindow` paths, which shift between GNOME versions.
+
 ## Workspace boundary semantics
 
 `MoveWindowToWorkspace` (explicit target) does **not** follow the window to
@@ -148,6 +167,7 @@ extension/gnome/
     windows.ts            - MetaWindow -> a{sv} serializer / lookup
     workspaces.ts         - Workspace serializer
     displays.ts           - Monitor serializer
+    launcher.ts           - Suppresses Shell's open/close animation for LoFi's own window
     errors.ts             - GLib.Error helpers under our error namespace
     dbus-xml.d.ts         - Declares the build-emitted dist/dbus-xml.js module
 ```
