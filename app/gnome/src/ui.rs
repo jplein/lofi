@@ -16,6 +16,9 @@ const WINDOW_HEIGHT: i32 = 500;
 const WINDOW_PADDING: i32 = 12;
 const ICON_SIZE: i32 = 24;
 const LIST_MARGIN: i32 = 4;
+// Extra breathing room under the search field so the larger text in it
+// doesn't visually crowd the first row of the list.
+const SEARCH_ENTRY_BOTTOM_MARGIN: i32 = 12;
 const ROW_SPACING: i32 = 8;
 const ROW_MARGIN_H: i32 = 8;
 // Asymmetric vertical margins (sum preserved at 8px so row height is
@@ -59,6 +62,26 @@ entry.search > text {
     box-shadow: none;
     border: none;
     outline: none;
+}
+/* Shift the magnifying-glass icon (and the text that follows it) inward so
+   the icon's right edge visually aligns with the list rows' icon column.
+   The list's icon column sits at `WINDOW_PADDING + ROW_MARGIN_H` from the
+   window edge; the SearchEntry container sits at `WINDOW_PADDING +
+   LIST_MARGIN`. We override the entry's leading padding rather than adding a
+   margin to the inner image — selectors like `searchentry > image` don't
+   reliably match because GTK's SearchEntry wraps its icon in an internal
+   GtkBox whose CSS-node layout has shifted across GTK4 versions. */
+searchentry,
+entry.search {
+    padding-left: 10px;
+}
+/* Nudge the typed text right so it aligns with the list rows' name labels.
+   The row label sits at WINDOW_PADDING + ROW_MARGIN_H + ICON_SIZE + ROW_SPACING
+   from the window edge; the SearchEntry's default gap between its leading
+   image and the text widget falls a couple pixels short of that target. */
+searchentry > text,
+entry.search > text {
+    padding-left: 4px;
 }
 /* Adwaita gives the window chrome `@window_bg_color` and the ListBox
    `@view_bg_color` (the canonical content-surface tone), which differ by a
@@ -129,7 +152,7 @@ pub fn build(
     let search_entry = gtk::SearchEntry::builder()
         .hexpand(true)
         .margin_top(LIST_MARGIN)
-        .margin_bottom(LIST_MARGIN)
+        .margin_bottom(SEARCH_ENTRY_BOTTOM_MARGIN)
         .margin_start(LIST_MARGIN)
         .margin_end(LIST_MARGIN)
         .build();
@@ -271,6 +294,11 @@ pub fn build(
     populate_list(&list_box, &state, "");
 
     window.present();
+    // Without this, the AdwApplicationWindow comes up with no focused widget
+    // and the user has to click the SearchEntry before typing reaches it.
+    // Call after `present()` so the widget is realised — `grab_focus` on an
+    // unrealised widget is silently a no-op.
+    search_entry.grab_focus();
 }
 
 /// Move the list selection by `delta` (typically +/-1). No-op when no row is
