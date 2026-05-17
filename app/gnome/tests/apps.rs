@@ -103,6 +103,98 @@ fn gather_applications_lists_all_desktop_files_in_supplied_dirs() {
 }
 
 #[test]
+fn gather_applications_dedupes_by_desktop_id_first_wins() {
+    let temp = tempdir().expect("tempdir should be creatable");
+    let temp_path = temp.path();
+
+    let data_home_apps = temp_path.join("data_home").join("applications");
+    let usr_share_apps = temp_path
+        .join("data_dirs")
+        .join("usr_share")
+        .join("applications");
+
+    // Same desktop_id in both dirs, with deliberately different Name/Icon so
+    // we can tell which copy survived dedup.
+    write_desktop(
+        &data_home_apps,
+        "ghostty.desktop",
+        "Ghostty User",
+        "true",
+        "ghostty-user",
+    );
+    write_desktop(
+        &usr_share_apps,
+        "ghostty.desktop",
+        "Ghostty System",
+        "true",
+        "ghostty-system",
+    );
+
+    // Unique entry per dir so the test is not trivially satisfied by "only
+    // return entries from the first dir" — both dirs must actually be walked.
+    write_desktop(
+        &data_home_apps,
+        "solo-home.desktop",
+        "Solo Home",
+        "true",
+        "test-icon-solo-home",
+    );
+    write_desktop(
+        &usr_share_apps,
+        "solo-system.desktop",
+        "Solo System",
+        "true",
+        "test-icon-solo-system",
+    );
+
+    // Order matters: data_home_apps first, so its ghostty.desktop should win.
+    let dirs: Vec<PathBuf> = vec![data_home_apps.clone(), usr_share_apps.clone()];
+    let apps: Vec<Application> = gather_applications(&dirs);
+
+    let expected_app_count = 3;
+    assert_eq!(
+        apps.len(),
+        expected_app_count,
+        "expected {expected_app_count} apps after deduping ghostty.desktop; got {apps:?}"
+    );
+
+    let ghostty_entries: Vec<&Application> = apps
+        .iter()
+        .filter(|a| a.desktop_id == "ghostty.desktop")
+        .collect();
+    assert_eq!(
+        ghostty_entries.len(),
+        1,
+        "expected exactly one ghostty.desktop entry after dedup; got {ghostty_entries:?}"
+    );
+
+    let ghostty = ghostty_entries[0];
+    assert_eq!(
+        ghostty.name, "Ghostty User",
+        "first dir (data_home) should win; expected name 'Ghostty User', got {:?}",
+        ghostty.name
+    );
+    assert_eq!(
+        ghostty.icon,
+        Some("ghostty-user".to_string()),
+        "first dir (data_home) should win; expected icon Some(\"ghostty-user\"), got {:?}",
+        ghostty.icon
+    );
+
+    let mut names: Vec<String> = apps.iter().map(|a| a.name.clone()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "Ghostty User".to_string(),
+            "Solo Home".to_string(),
+            "Solo System".to_string(),
+        ],
+        "sorted names should include the surviving Ghostty entry plus one unique app from each dir; got {names:?}"
+    );
+}
+
+#[test]
 fn gather_applications_follows_symlinks_to_desktop_files() {
     let temp = tempdir().expect("tempdir should be creatable");
     let temp_path = temp.path();

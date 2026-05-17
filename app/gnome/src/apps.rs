@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -49,6 +50,7 @@ pub fn application_directories() -> Vec<PathBuf> {
 
 pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
     let mut out: Vec<Application> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
     for dir in dirs {
         let entries = match fs::read_dir(dir) {
@@ -93,6 +95,10 @@ pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
             } else {
                 continue;
             };
+
+            if !seen.insert(desktop_id.clone()) {
+                continue;
+            }
 
             let icon: Option<String> = info
                 .icon()
