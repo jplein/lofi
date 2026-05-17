@@ -14,6 +14,67 @@
 import Foundation
 import LoFiCore
 
+/// Swift wrapper around the `lofi-core` `MruStore` opaque handle.
+///
+/// The store is the persistent activation history backing MRU ordering:
+/// `EntryList.applyMru(store:)` reorders the in-memory entries by recency,
+/// and `EntryList.bumpMru(store:, at:)` records that the user activated a
+/// specific row. The SQLite file is opened lazily at `init?(path:)` and
+/// stays open for the lifetime of the wrapper; `deinit` closes it.
+///
+/// `init?(path:)` returns nil when `lofi_mru_open` returns null — that
+/// covers invalid paths, permission errors, and SQLite failures. The
+/// launcher is expected to proceed without MRU ordering on nil, rather
+/// than refuse to launch.
+final class MruStore {
+    /// Underlying C handle. `fileprivate` so `EntryList`'s methods in
+    /// this same file can hand the raw pointer through to the C
+    /// functions without exposing the pointer to the rest of the app.
+    fileprivate let handle: OpaquePointer
+
+    /// Open (or create) the MRU store at `path`. Returns nil on failure
+    /// (invalid path, permission denied, SQLite error) — the C side
+    /// already logs the underlying cause via `eprintln!`.
+    ///
+    /// Reads slightly oddly: `withCString` returns whatever its closure
+    /// returns, so the outer `guard let` validates the C-side return
+    /// pointer (not the C string itself, which is always non-null when
+    /// `path` is a Swift `String`). `lofi_mru_open` is imported as
+    /// `OpaquePointer?` because cbindgen emits the return as `MruStore *`;
+    /// the unwrap converts that to a non-optional handle stored on self.
+    init?(path: String) {
+        guard let p = path.withCString({ lofi_mru_open($0) }) else {
+            return nil
+        }
+        self.handle = p
+    }
+
+    deinit {
+        // Mirrors the Rust contract: `free(null)` is a no-op, but we
+        // know the handle is non-null because `init?` returned non-nil.
+        lofi_mru_free(handle)
+    }
+
+    /// Canonical macOS storage path for the MRU SQLite file:
+    /// `~/Library/Application Support/dev.jplein.lofi/mru.sqlite`. The
+    /// containing directory is created on demand so a fresh install
+    /// can open the store without first running an installer step.
+    /// The Rust side also creates missing parents, but doing it here
+    /// keeps the WAL files (`-shm`, `-wal`) in a predictable place
+    /// alongside the main DB.
+    static func defaultPath() -> String {
+        let fm = FileManager.default
+        let appSupport = fm
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support")
+        let dir = appSupport.appendingPathComponent("dev.jplein.lofi")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("mru.sqlite").path
+    }
+}
+
 final class EntryList {
     /// Underlying C handle. `lofi_entries_new` never returns null in
     /// practice (the only failure mode is OOM, which aborts), but we
@@ -124,5 +185,37 @@ final class EntryList {
             return nil
         }
         return String(cString: cstr)
+    }
+
+    /// Reorder the underlying entries by recency (most-recently-used
+    /// first) using the persistent state from `store`. Stable: entries
+    /// with no MRU row keep their relative order at the bottom of the
+    /// list. Like `setQuery(_:)`, this is a mutating call: every
+    /// pointer previously returned through `name(at:)` / `bundleId(at:)`
+    /// / `category(at:)` / `icon(at:)` is invalidated, and the active
+    /// query (if any) is re-evaluated against the new order.
+    ///
+    /// Returns `false` only on store/read errors; on success returns
+    /// `true`. Discardable — the launcher treats a failed apply as
+    /// "degrade silently and show the input order".
+    @discardableResult
+    func applyMru(store: MruStore) -> Bool {
+        lofi_entries_apply_mru(handle, store.handle)
+    }
+
+    /// Record an activation of the row at filtered index `idx`. The
+    /// C side resolves the filtered index to the underlying entry,
+    /// pulls its `EntryRef`, and UPSERTs it into the MRU store with
+    /// the current timestamp. Subsequent `applyMru(store:)` calls (on
+    /// the next launch, typically) will sort that entry to the top.
+    ///
+    /// Returns `false` when the index is out of bounds against the
+    /// current filtered view or when the SQLite write fails;
+    /// discardable in the launch path because the worst case is "we
+    /// failed to record the activation" — the launch itself still
+    /// proceeds.
+    @discardableResult
+    func bumpMru(store: MruStore, at idx: Int) -> Bool {
+        lofi_mru_bump_entry(store.handle, handle, UInt(idx))
     }
 }

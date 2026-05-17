@@ -8,5 +8,7 @@
 //! re-exports them so the symbols all land in `lofi_core::ffi`.
 
 pub mod entries;
+pub mod mru;
 
 pub use entries::*;
+pub use mru::*;

@@ -8,7 +8,10 @@
 //! caller may read until the next mutation of the list. Mutations are:
 //! - any `lofi_entries_push_*` call,
 //! - `lofi_entries_set_query` (it can shuffle the filter and invalidates the
-//!   meaning of every previously-handed-out pointer), and
+//!   meaning of every previously-handed-out pointer),
+//! - `lofi_entries_apply_mru` (reorders the underlying vector in place and
+//!   clears every cache so any previously-handed-out pointer is invalid),
+//!   and
 //! - `lofi_entries_free`.
 //!
 //! Callers (Swift, in particular) must copy the bytes into their own storage
@@ -32,6 +35,7 @@
 //! `set_query` (the predicate itself changed).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -39,7 +43,8 @@ use std::ptr;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::matcher;
-use crate::{Application, Entry, EntryKind};
+use crate::mru::MruStore;
+use crate::{Application, Entry, EntryKind, EntryRef};
 
 /// Stable English category label for `EntryKind::Application`. The UI displays
 /// these as-is; localization is a UI-layer concern.
@@ -58,30 +63,30 @@ const CATEGORY_POWER_COMMAND: &str = "PowerCommand";
 /// via `lofi_entries_free`. The Rust-side layout is intentionally not exposed
 /// to C — cbindgen emits this as an opaque forward declaration.
 pub struct EntryList {
-    entries: Vec<Entry>,
+    pub(super) entries: Vec<Entry>,
     /// Current search string. Empty (or whitespace-only) means "no filter".
     /// Stored as an owned `String` so the FFI's borrowed `*const c_char` does
     /// not have to outlive the call.
-    query: String,
+    pub(super) query: String,
     /// `None` when `query` is the passthrough case (empty / whitespace-only);
     /// `Some(indices)` when a real filter is active. Each entry indexes into
     /// `entries`. Built by `recompute_filter`.
-    filter: Option<Vec<usize>>,
+    pub(super) filter: Option<Vec<usize>>,
     /// Lazily-built C strings backing the pointers returned by
     /// `lofi_entries_get_name`. Indexed parallel to `entries` (NOT to
     /// `filter`). Cleared on every mutation.
-    name_cache: RefCell<Vec<Option<CString>>>,
+    pub(super) name_cache: RefCell<Vec<Option<CString>>>,
     /// Parallel to `name_cache`; backs `lofi_entries_get_bundle_id`.
-    bundle_id_cache: RefCell<Vec<Option<CString>>>,
+    pub(super) bundle_id_cache: RefCell<Vec<Option<CString>>>,
     /// Parallel to `name_cache`; backs `lofi_entries_get_category`. Each slot
     /// caches the C-string form of the entry's stable English category label.
-    category_cache: RefCell<Vec<Option<CString>>>,
+    pub(super) category_cache: RefCell<Vec<Option<CString>>>,
     /// Parallel to `name_cache`; backs `lofi_entries_get_icon`. A `None` slot
     /// here means "not yet cached"; the wrapped `Option<CString>` is itself
     /// `None` when the underlying entry has no icon (we encode "no icon" via
     /// a `None` *value* and a `Some` cache slot, distinguishing it from "not
     /// yet computed").
-    icon_cache: RefCell<Vec<Option<Option<CString>>>>,
+    pub(super) icon_cache: RefCell<Vec<Option<Option<CString>>>>,
 }
 
 impl EntryList {
@@ -124,11 +129,20 @@ impl EntryList {
         }
     }
 
+    /// Resolve a filtered index to a borrow of the underlying entry. Used by
+    /// `lofi_mru_bump_entry` to walk filtered_idx -> &Entry -> EntryRef
+    /// without leaking the cache-key (underlying) index space across the
+    /// module boundary. Returns `None` when the filtered index is out of
+    /// bounds — same null-signaling semantics as `resolved`.
+    pub(super) fn resolve_filtered_index(&self, idx: usize) -> Option<&Entry> {
+        self.resolved(idx).and_then(|i| self.entries.get(i))
+    }
+
     /// Rebuild `filter` from `entries` + `query`. Empty / whitespace-only
     /// query becomes the passthrough case (`filter = None`). Non-empty query
     /// is tokenized on whitespace; every entry whose haystack matches every
     /// token (intersection semantics) ends up in the filter index vector.
-    fn recompute_filter(&mut self) {
+    pub(super) fn recompute_filter(&mut self) {
         if self.query.trim().is_empty() {
             self.filter = None;
             return;
@@ -153,7 +167,7 @@ impl EntryList {
     /// Clear every per-accessor cache. Called from every mutation so a stale
     /// pointer (already a no-no per the borrow contract) cannot point into
     /// freed or relocated memory either.
-    fn clear_caches(&mut self) {
+    pub(super) fn clear_caches(&mut self) {
         self.name_cache.borrow_mut().clear();
         self.bundle_id_cache.borrow_mut().clear();
         self.category_cache.borrow_mut().clear();
@@ -533,4 +547,74 @@ pub unsafe extern "C" fn lofi_entries_get_icon(
         Some(Some(cs)) => cs.as_ptr(),
         _ => ptr::null(),
     }
+}
+
+/// Reorder the underlying entries in MRU order, most-recent-first. Reads
+/// every row from `store` (via `MruStore::read_all`), builds a rank map
+/// keyed by `EntryRef` (rank 0 = most recent), and stable-sorts the list
+/// in place by `(rank, original_position)`. Entries with no MRU row fall
+/// to the bottom in their original push order (the stable sort preserves
+/// relative order for equal keys; we use `usize::MAX` for the unknown
+/// rank).
+///
+/// Returns `true` on success. Returns `false` when:
+/// - `list` or `store` is null,
+/// - or `MruStore::read_all` fails. On read failure the list is left
+///   untouched (no partial reordering) and the launcher proceeds with
+///   degraded behavior.
+///
+/// Like every other mutating call, this invalidates every pointer
+/// previously returned by `lofi_entries_get_*`. The filter is recomputed
+/// against the freshly-reordered vec so an active query still works.
+///
+/// # Safety
+///
+/// `list` must be null or a pointer obtained from `lofi_entries_new`.
+/// `store` must be null or a pointer obtained from `lofi_mru_open`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_apply_mru(
+    list: *mut EntryList,
+    store: *const MruStore,
+) -> bool {
+    if list.is_null() || store.is_null() {
+        return false;
+    }
+
+    // SAFETY: non-null per the precondition; single-threaded FFI contract
+    // gives us exclusive access to `list` and shared access to `store`.
+    let store_ref = unsafe { &*store };
+    let recent: Vec<EntryRef> = match store_ref.read_all() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lofi_entries_apply_mru: {e}");
+            return false;
+        }
+    };
+    let ranks: HashMap<EntryRef, usize> = recent
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| (r, i))
+        .collect();
+
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &mut *list };
+
+    // Stable-sort by (rank, original_position). `Vec::sort_by_key` is
+    // stable, so equal keys keep their relative order. For entries with
+    // no MRU row we use `usize::MAX`, which sinks them below all known
+    // entries while preserving their push order.
+    let mut paired: Vec<(usize, Entry)> = list_ref
+        .entries
+        .drain(..)
+        .map(|e| {
+            let rank = ranks.get(&e.reference()).copied().unwrap_or(usize::MAX);
+            (rank, e)
+        })
+        .collect();
+    paired.sort_by_key(|(rank, _)| *rank);
+    list_ref.entries = paired.into_iter().map(|(_, e)| e).collect();
+
+    list_ref.clear_caches();
+    list_ref.recompute_filter();
+    true
 }

@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // views. Pinning it on the delegate keeps it alive for the process
     // lifetime.
     private var listController: AppListController?
+    // Held for the process lifetime so the underlying SQLite connection
+    // stays open between the initial `applyMru` and any subsequent
+    // `bumpMru` on activation. `nil` when `MruStore.init?` failed —
+    // the launcher proceeds without MRU ordering in that case.
+    private var mruStore: MruStore?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
@@ -45,7 +50,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
-        let listController = AppListController(entries: entries)
+        // After every entry is pushed, apply the persistent MRU order so
+        // the most-recently-launched app shows up at the top. A failed
+        // open (permission denied, disk full, ...) leaves `mruStore` nil;
+        // the launcher falls back to the alphabetical order produced by
+        // `AppDiscovery.discover()`.
+        if let store = MruStore(path: MruStore.defaultPath()) {
+            self.mruStore = store
+            entries.applyMru(store: store)
+        }
+
+        let listController = AppListController(entries: entries, mruStore: mruStore)
         self.listController = listController
         let controller = PanelController(
             searchField: listController.searchField,

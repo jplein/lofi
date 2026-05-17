@@ -1,156 +1,201 @@
-# macOS UI slice: search field + icon/name/category rows
+# macOS MRU slice: persistent activation history wins ordering
 
 ## Context
 
-The first macOS slice landed a static list — every `.app` under `/Applications` and `~/Applications`, one column of plain text. Time to make it feel like a launcher: a search field at the top that fuzzy-filters as the user types, and rows that look like `[icon] Name … [Category]` with the category dimmed and right-aligned.
+The matcher returns entries in input order — filter-only, no ranking. Today the input order is "alphabetical by name from `AppDiscovery.discover()`", so the user sees the same list every launch regardless of which app they actually use most. The `lofi-core` crate already implements an MRU store (`app/core/src/mru.rs`, public API `MruStore::open/read_all/bump`, SQLite WAL backing, 5s busy_timeout, bad-row-tolerant `read_all`). The GNOME side consumes it: read once at startup, build a `HashMap<EntryRef, usize>` rank map, stable-sort visible results by rank with `usize::MAX` falling to the bottom in input order. We mirror that for macOS, gated by a new chunk of FFI surface.
 
-The matcher already exists on the Rust side (`app/core/src/matcher.rs::search`) — filter-only, whitespace-tokenized, case-insensitive, intersection semantics. The icon machinery on macOS is `NSWorkspace.shared.icon(forFile:)`, which takes a `.app` bundle path and returns an `NSImage`. The category is `Entry::kind()` → `EntryKind` (Application / Window / Workspace / Command / PowerCommand); only Application surfaces in this slice but the wiring works for all.
+After this slice: an Enter or click bumps the activated entry's `EntryRef` in the SQLite file. On the next launch, that entry sorts to the top. The matcher's filter-only behavior stays unchanged — when a query narrows the list, the in-list MRU order is preserved because the underlying `entries: Vec<Entry>` has already been MRU-sorted in place.
 
 ## Decisions
 
-- **Filtering lives in Rust.** `EntryList` grows a current-query field; `lofi_entries_set_query` recomputes a filtered index vector. `len` and `get_*` accessors then read through the filter. Empty query = identity passthrough (matches existing tests' expectations).
-- **Icons travel as bundle paths through the existing `icon: Option<String>` field.** No new icon-bytes plumbing — Swift passes the `.app` URL's path as the `icon` arg to `pushApplication`; Rust stores it verbatim; `lofi_entries_get_icon` returns it; Swift resolves via `NSWorkspace`. This mirrors GNOME's "icon identifier, not bytes" rule.
-- **Category is exposed as a stable English string** (`"Application"`, `"Window"`, …) via a new `lofi_entries_get_category`. Cheaper than threading the enum discriminant + a Swift-side translation table; localization can come later as a UI-side override.
-- **Borrow contract extends to `set_query`.** Any `get_*` pointer is invalidated by the next mutating call — currently `push_*` and `free`, now also `set_query`. Document and test.
+- **Sort happens once, in the Rust `EntryList`**, after the Swift side finishes pushing. A new `lofi_entries_apply_mru(list, store)` call reorders the underlying vector in place, clears all caches (so any borrow-contract-protected pointers are correctly invalidated), and recomputes the filter. Subsequent `len`/`get_*` calls naturally read in MRU order, through whatever filter is active.
+- **Bump on activation, before launching.** The Enter / click handler in `AppListController.launchRow(_:)` calls `mru.bump(list:, at: row)`, then `NSWorkspace.open(...)`, then `NSApp.terminate(nil)`. Bumping first is robust against the small window where `open` succeeds but `terminate` is interrupted; the worst case is a redundant write, never a missed one.
+- **Storage path: `~/Library/Application Support/dev.jplein.lofi/mru.sqlite`** — macOS's bundle-id-namespaced conventional location, the macOS analog of GNOME's `$XDG_STATE_HOME/lofi/mru.sqlite`. The Rust side already creates missing parent directories on `MruStore::open`.
+- **Failures degrade gracefully.** A store that fails to open returns null from `lofi_mru_open`; the Swift wrapper's `init` returns `nil` and the app proceeds without MRU ordering. `apply_mru` and `bump_entry` return `false` on any failure. Same shape as the existing FFI null-pointer pattern.
+- **The Swift API hangs off `EntryList`**, not a separate "MRU manager" Swift class. `entries.applyMru(store: mru)` and `entries.bumpMru(store: mru, at: row)` keep the Swift-side surface tight and match how `setQuery` is structured.
 
 ## Rust changes — `app/core/`
 
-### `src/ffi/entries.rs`
-
-`EntryList` gains:
-- `query: String` (empty = no filter)
-- `filter: Option<Vec<usize>>` — `Some(indices)` when a non-empty query is active, `None` for the passthrough case. Avoids reallocating an `(0..len).collect()` vector for the common no-filter case.
-
-Helper `EntryList::resolve(idx)` returns the underlying `entries` slot for a "filtered" index, going through `filter` when present.
-
-`push` clears `name_cache` (existing) **and** recomputes the filter so the new entry shows up if it matches the current query.
-
-New functions:
-- `lofi_entries_set_query(list, query) -> bool` — null query = empty (no filter). Stores the string, recomputes `filter` using the matcher. On success returns true; null `list` returns false.
-- `lofi_entries_get_bundle_id(list, idx) -> *const c_char` — returns `Application::desktop_id` (or null for non-Application variants once they exist).
-- `lofi_entries_get_category(list, idx) -> *const c_char` — returns one of the five stable strings.
-- `lofi_entries_get_icon(list, idx) -> *const c_char` — returns `Application::icon` if `Some`, null if `None`.
-
-Modified:
-- `lofi_entries_len`, `lofi_entries_get_name` — read through the filter when present.
-
-Each new accessor needs its own backing cache (`bundle_id_cache`, `category_cache`, `icon_cache`) to honor the borrow contract. All caches clear together on any mutation (push or set_query).
-
-### `src/matcher.rs`
-
-Factor out a tiny helper `pub(crate) fn matches(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> bool` so `set_query` in the FFI can run the same matching logic against a single entry without materializing a `Vec<&Entry>`.
-
 ### `src/ffi/mod.rs`
 
-Re-export the new symbols.
+Add `pub mod mru;` and `pub use mru::*;` next to the existing entries re-export.
+
+### `src/ffi/mru.rs` (new file)
+
+Two new opaque-handle functions plus the bump variant:
+
+- `lofi_mru_open(path: *const c_char) -> *mut MruStore`
+  - Validate `path` is non-null and UTF-8.
+  - Call `mru::MruStore::open(Path::new(path_str))`. Wrap the result in `Box::into_raw` on Ok; return `ptr::null_mut()` on Err (log via `eprintln!` for visibility during dev).
+- `lofi_mru_free(store: *mut MruStore)`
+  - Null-safe; `drop(Box::from_raw(store))` otherwise.
+- `lofi_mru_bump_entry(store: *const MruStore, list: *const EntryList, idx: usize) -> bool`
+  - Null checks on both pointers.
+  - Resolve `idx` to the underlying entry via the filtered-index resolver in `EntryList` (the helper that maps filtered index → underlying index, added in the search slice).
+  - Compute `entry.reference()`.
+  - Call `store.bump(&reference)`. Return true on Ok, false on Err.
+
+`MruStore` itself stays as-is in `src/mru.rs` — no changes needed.
+
+### `src/ffi/entries.rs`
+
+Add a new FFI function plus the supporting machinery to access internal state from the new `mru` module:
+
+- `lofi_entries_apply_mru(list: *mut EntryList, store: *const MruStore) -> bool`
+  - Null checks.
+  - Call `store.read_all()` → `Vec<EntryRef>`. On Err, return false (do not panic; degraded mode is fine).
+  - Build `HashMap<EntryRef, usize>` from the result, rank 0 = most recent.
+  - Stable-sort `list.entries` by `(rank, original_position)` where `rank` is `usize::MAX` for entries not in the map (so they sort below known entries while preserving their relative push order).
+  - Clear `name_cache`, `bundle_id_cache`, `category_cache`, `icon_cache` — pointers handed out before this call now reference moved entries.
+  - Recompute the filter so the active query still works against the freshly reordered list.
+  - Return true.
+
+The `EntryList` type does not need new fields. Implementation lives in `entries.rs` because that's where `EntryList` and its caches/filter live; making fields/helpers `pub(super)` so `mru.rs` can read them is the smallest cross-module surface.
+
+To support `lofi_mru_bump_entry`, expose a `pub(super) fn resolve_filtered_index(&self, idx: usize) -> Option<&Entry>` method on `EntryList`. Mirrors the existing private resolution but as a borrow returning the entry itself, ready for `reference()`.
 
 ### `cbindgen.toml`
 
-No changes — cbindgen regenerates the header from the Rust source; Bazel's genrule picks up the new functions automatically.
+No changes. The genrule auto-picks the new symbols.
 
 ## Rust tests — `app/core/tests/ffi.rs`
 
-Add cases:
-1. `set_query_filters_to_match` — push three apps with distinct names, set_query to a substring, len returns 1, get_name returns the matching app.
-2. `set_query_empty_restores_all` — after filtering down, set_query("") restores full count and order.
-3. `set_query_intersection_semantics` — whitespace-separated tokens both required.
-4. `set_query_case_insensitive` — query matches regardless of case.
-5. `set_query_invalidates_get_name_borrow` — call get_name, copy bytes, set_query, the copy is still valid (documents the contract via use).
-6. `get_bundle_id_round_trips` — push with a known bundleId, get_bundle_id returns it.
-7. `get_category_returns_application` — Application entries return "Application".
-8. `get_icon_returns_pushed_value` — non-null pushed icon comes back; null pushed icon returns null.
-9. `set_query_null_clears_filter` — symmetric with set_query of empty string.
-10. `push_recomputes_filter` — push while a query is active, the new entry appears in len iff it matches.
+Add cases (gated by `#![cfg(feature = "ffi")]`, all using `extern "C"` only — no imports from `lofi_core`):
+
+1. `mru_open_creates_file_and_can_be_freed` — pass a path under `tempfile::tempdir()`, assert non-null return, free. The file should exist on disk after.
+2. `mru_open_invalid_path_returns_null` — pass an unwritable path (`/dev/null/cannot_create`); assert null return.
+3. `mru_bump_then_apply_promotes_entry` — push three apps, open a fresh store, bump entry at idx 2, call `apply_mru`, assert `get_name(0)` returns the bumped entry's name.
+4. `apply_mru_with_empty_store_preserves_input_order` — push three apps, open an empty store, apply_mru, len + get_name still match insertion order.
+5. `mru_persists_across_open` — open store, bump idx 1, free; open same path again, apply_mru against the same pushed entries, assert idx 0 is the bumped one.
+6. `apply_mru_invalidates_caches` — push, get_name(0) (warms cache), bump+apply_mru that reorders, copy the original bytes, then call get_name(0) which must return the **new** top entry's name (not the cached old one). Document the contract through the test.
+7. `apply_mru_with_query_active_keeps_filter` — push three apps, set_query to match two of them, apply_mru, assert len still 2 (filter recomputed against new order).
+8. `mru_bump_entry_null_args_return_false` — null store, null list, both null; each returns false without crashing.
+9. `mru_apply_null_args_return_false` — same shape.
+10. `mru_bump_out_of_bounds_returns_false` — bump idx 999 against a 3-entry list; false, no crash.
 
 ## Swift changes — `app/macos/Sources/LoFi/`
 
-### `AppDiscovery.swift`
+### `RustBridge.swift`
 
-`DiscoveredApp` gains `bundlePath: String` (the `.app` URL's `path`).
+New class `MruStore`:
+
+```swift
+final class MruStore {
+    fileprivate let handle: OpaquePointer
+    init?(path: String) {
+        guard let p = path.withCString({ lofi_mru_open($0) }) else { return nil }
+        handle = OpaquePointer(p)
+    }
+    deinit { lofi_mru_free(handle) }
+}
+```
+
+`EntryList` gains two methods:
+
+```swift
+@discardableResult
+func applyMru(store: MruStore) -> Bool {
+    lofi_entries_apply_mru(handle, store.handle)
+}
+
+@discardableResult
+func bumpMru(store: MruStore, at idx: Int) -> Bool {
+    lofi_mru_bump_entry(store.handle, handle, UInt(idx))
+}
+```
+
+Match the OpaquePointer-passes-directly pattern from the first slice. `UInt(idx)` for `uintptr_t`.
 
 ### `AppDelegate.swift`
 
-Push call becomes:
+After the push loop and before constructing the panel:
+
 ```swift
-entries.pushApplication(name: app.name, bundleId: app.bundleId, icon: app.bundlePath)
+let storePath = MruStore.defaultPath()
+if let store = MruStore(path: storePath) {
+    self.mruStore = store
+    entries.applyMru(store: store)
+}
 ```
 
-### `RustBridge.swift`
+`MruStore` storage held on the delegate. The list controller needs the store to bump on activation — passed in via initializer.
 
-`EntryList` gains:
-- `setQuery(_ query: String)` → `lofi_entries_set_query`
-- `bundleId(at idx: Int) -> String?`
-- `category(at idx: Int) -> String?`
-- `icon(at idx: Int) -> String?`
+Add a small `defaultPath()` static helper on `MruStore`:
 
-Same copy-into-Swift-String pattern as `name(at:)`.
+```swift
+static func defaultPath() -> String {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+    let dir = appSupport.appendingPathComponent("dev.jplein.lofi")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir.appendingPathComponent("mru.sqlite").path
+}
+```
 
-### `PanelController.swift`
-
-`init(content:)` becomes `init(searchField:listView:)`. Layout:
-- `NSStackView` vertical, holding `NSSearchField` on top and `NSScrollView` filling the rest.
-- `panel.initialFirstResponder = searchField` so typing starts immediately.
+The Rust side also creates the directory, but doing it from Swift means the SQLite WAL files end up beside the main DB in a predictable place even if the Rust side decides to do something else later.
 
 ### `AppListController.swift`
 
-Becomes the `NSSearchFieldDelegate`. Owns the `NSSearchField`. New:
-- `controlTextDidChange(_:)` calls `entries.setQuery(searchField.stringValue)` then `tableView.reloadData()`.
-- `view` getter returns the composed stack (search field + scroll view); `AppDelegate` only sees one root view.
+`init` gains an optional `mruStore: MruStore?` parameter. Stored on the controller.
 
-Cell rendering rewritten to show:
-- `NSImageView` (24×24, icon resolved via `NSWorkspace.shared.icon(forFile: bundlePath)`)
-- `NSTextField` (name, `.labelColor`)
-- flexible spacer
-- `NSTextField` (category, `.secondaryLabelColor` or `.tertiaryLabelColor`, smaller font, trailing-aligned)
+`launchRow(_ row: Int)` becomes:
 
-Row height bumps from 28 to ~36.
+```swift
+private func launchRow(_ row: Int) {
+    guard row >= 0, row < entries.count else { return }
+    if let store = mruStore {
+        entries.bumpMru(store: store, at: row)
+    }
+    guard let path = entries.icon(at: row) else { return }
+    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    NSApp.terminate(nil)
+}
+```
+
+Bump *before* open: the bump is a fast local SQLite write that completes before terminate; the open call goes through LaunchServices and is non-blocking. If we ever lose the race we'd rather double-bump than miss-bump.
 
 ## Critical files
 
 **Modify (Rust):**
-- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/entries.rs`
 - `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/mod.rs`
-- `/Users/jplein/Git/jplein/lofi/app/core/src/matcher.rs`
+- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/entries.rs`
 - `/Users/jplein/Git/jplein/lofi/app/core/tests/ffi.rs`
 
+**Create (Rust):**
+- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/mru.rs`
+
 **Modify (Swift):**
-- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppDiscovery.swift`
-- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppDelegate.swift`
 - `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/RustBridge.swift`
-- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/PanelController.swift`
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppDelegate.swift`
 - `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppListController.swift`
 
 **README updates:**
-- `/Users/jplein/Git/jplein/lofi/app/macos/README.md` — out-of-scope list shrinks (search, icons); add a gotcha about NSSearchField first responder.
-- `/Users/jplein/Git/jplein/lofi/app/core/README.md` — FFI surface list grows.
+- `/Users/jplein/Git/jplein/lofi/app/macos/README.md` — drop "MRU persistence" from the out-of-scope list; one-line note that activation history is now persistent.
+- `/Users/jplein/Git/jplein/lofi/app/core/README.md` — FFI surface list grows from 9 to 12 (open, free, apply_mru, bump_entry).
 
 ## Verification
 
-1. `bazel test //app/core:ffi_test` — all old tests pass, ten new ones added pass.
+1. `bazel test //app/core:ffi_test` — old 22 cases still pass, 10 new MRU cases pass (total 32).
 2. `bazel build //app/macos:LoFi` — succeeds.
-3. `bazel run //app/macos:launch` — panel opens with the search field focused; rows show app icons + names; "Application" appears right-aligned and dimmed.
-4. Type into the search field: list filters as expected. Typing `"saf"` shows Safari; deleting back to empty restores the full list. Multi-token `"web safari"` still matches Safari.
+3. `bazel run //app/macos:launch` — first run looks identical (alphabetical), pick something via Enter, app launches and quits. `bazel run //app/macos:launch` again — that something is at the top.
+4. `ls -la ~/Library/Application\ Support/dev.jplein.lofi/` — `mru.sqlite` plus WAL files present.
+5. `sqlite3 ~/Library/Application\ Support/dev.jplein.lofi/mru.sqlite "SELECT entry_ref, last_used FROM mru ORDER BY last_used DESC"` — manual spot-check shows the JSON-encoded `EntryRef`s with millisecond timestamps.
 
 ## Risks / gotchas
 
-1. **`NSSearchField`'s built-in cancel button** can fight panel theming. Settle for the system default look in this slice.
-2. **First responder under a borderless `.nonactivatingPanel`** — `panel.initialFirstResponder = searchField` needs to be set before `makeKeyAndOrderFront`.
-3. **The borrow contract grows.** `lofi_entries_set_query` invalidates all in-flight `get_*` pointers. The Swift wrapper copies into `String` immediately, so this is fine in practice — but it's worth a clear note in the FFI module doc.
-4. **`NSWorkspace.icon(forFile:)` is synchronous** and may hit disk. For 50 apps on first paint it's fine; revisit if the list grows past hundreds.
-5. **Filter recomputation on push** — currently academic (all pushes happen before any set_query) but the code path has to be right for the eventual async-discovery slice.
+1. **The Swift `init?(path:)` failure path**: `withCString` returns the result of the closure, so the optional unwrap pattern works but reads slightly oddly. Comment it.
+2. **Bump-vs-launch ordering**: as above, bump first. A failed `open` still bumps, which the user could perceive as a "ghost" — but the ghost is correctly attributed to "I tried to launch this." Acceptable.
+3. **Caches must clear on `apply_mru`** — same borrow-contract growth as the search slice. Document in the FFI module header.
+4. **SQLite WAL files (`mru.sqlite-wal`, `-shm`)** are normal next to the main DB; do not delete them or the next open will reset to a clean state.
+5. **`Entry::reference()` exhaustiveness** — only Application entries exist on macOS today, but the match in `lofi_mru_bump_entry` should still go through `Entry::reference()` rather than special-casing, so future variants compile-error rather than silently no-op.
+6. **Empty MRU file on first run** — `apply_mru` on an empty store leaves entry order unchanged (all ranks = `usize::MAX`, stable-sort by original position). No special-case needed.
 
 ## Workflow status
 
 - [x] Plan written
-- [x] Test-writer pass 1 — 10 new FFI tests added to `tests/ffi.rs`
-- [x] Coder pass 1 — Rust FFI (set_query + 3 accessors), Swift UI (search field, icon/name/category rows), `bazel build //app/macos:LoFi` green; `bazel test //app/core:ffi_test` 21/22 (one fixture false-positive)
-- [x] Test-writer pass 2 — fixed `push_recomputes_filter` fixture (bundle IDs no longer contain `com.example`, removing the accidental `o-m-e` subsequence match)
-- [x] Coder pass 2 — `bazel test //app/core:ffi_test` 22/22 ✅, `bazel build //app/macos:LoFi` ✅
-- [x] Reviewer pass — approved with notes (all notes were README staleness, fixed in the next step)
-- [x] Technical-writer pass — `app/macos/README.md` and `app/core/README.md` updated: status paragraph, gotchas (initial-first-responder, stack-width pin), FFI surface count (5 → 9), borrow contract extended to include `set_query`, test count (12 → 22)
+- [x] Test-writer pass — 10 new MRU FFI tests appended to `tests/ffi.rs`
+- [x] Coder pass — `ffi/mru.rs` created; `ffi/mod.rs` and `ffi/entries.rs` extended; Swift `MruStore` + `EntryList.applyMru/bumpMru` + AppDelegate/AppListController wiring all in place; `bazel test //app/core:ffi_test` 32/32 ✅; `bazel build //app/macos:LoFi` ✅
+- [x] Reviewer pass — approved, all items PASS, only minors were README staleness (fixed in next step)
+- [x] Technical-writer pass — `app/macos/README.md` and `app/core/README.md` updated (status, FFI surface count 9 → 13, borrow contract extended with `apply_mru`, test count 22 → 32)
 
-Outstanding (minor, non-blocking; flagged by technical-writer):
-- macOS README Layout block (`AppListController.swift` description) still says "NSTableView data source + delegate" — also now the `NSSearchFieldDelegate`.
-- macOS README "Why Swift drives discovery and Rust holds the list" still lists only `lofi_entries_len` / `lofi_entries_get_name` for the readback path — also `get_bundle_id`, `get_category`, `get_icon` now.
-
-These are documentation-symmetry items; the substance is captured elsewhere.
+Note: the plan said "9 → 12" but the actual count is 13 — `lofi_entries_apply_mru` lives in `entries.rs` (the plan grouped it visually with the three `mru.rs` symbols). The READMEs reflect the correct count.

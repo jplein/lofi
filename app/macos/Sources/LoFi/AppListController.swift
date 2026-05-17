@@ -48,6 +48,13 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     NSSearchFieldDelegate
 {
     private let entries: EntryList
+    /// Optional persistent activation history. When non-nil, every
+    /// `launchRow(_:)` records the activation via `bumpMru` before
+    /// opening the bundle so the next launch reorders that entry to
+    /// the top. Nil means MRU is disabled for this run (store-open
+    /// failed in the delegate); the launcher still works, it just
+    /// doesn't remember the activation.
+    private let mruStore: MruStore?
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -60,8 +67,9 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// view wrapping the table so long lists overflow cleanly.
     var listView: NSView { scrollView }
 
-    init(entries: EntryList) {
+    init(entries: EntryList, mruStore: MruStore?) {
         self.entries = entries
+        self.mruStore = mruStore
 
         // Non-zero initial size. NSScrollView does NOT auto-resize its
         // documentView, so without an explicit frame the table sits at
@@ -205,8 +213,17 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// silently ignored — the user's mouse landed somewhere that didn't
     /// resolve to an entry; bailing without any visible response is
     /// the right thing.
+    ///
+    /// Bumps the MRU store *before* opening: the bump is a microsecond
+    /// local SQLite write; `NSWorkspace.open` goes through LaunchServices
+    /// asynchronously and we then immediately `terminate`. If we lose
+    /// the race we prefer a double-bump (correctly attributed to "the
+    /// user tried to launch this") over a miss-bump.
     private func launchRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
+        if let store = mruStore {
+            entries.bumpMru(store: store, at: row)
+        }
         // `entries.icon(at:)` returns the bundle path on macOS — see
         // the `DiscoveredApp.bundlePath` comment in `AppDiscovery.swift`
         // for why the icon field carries the path identifier.

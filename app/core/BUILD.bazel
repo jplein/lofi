@@ -98,14 +98,19 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# FFI integration tests. The 12 cases in `tests/ffi.rs` reach the
+# FFI integration tests. The cases in `tests/ffi.rs` reach the
 # `#[unsafe(no_mangle)]` symbols only because `extern crate lofi_core
 # as _;` forces the rlib onto the linker's input set; see the comment
-# at the top of that file.
+# at the top of that file. `tempfile` is a dev-dependency on the Cargo
+# side; Bazel requires it spelled out here because crate_universe
+# doesn't propagate dev-dependencies into the workspace target set.
 rust_test(
     name = "ffi_test",
     srcs = ["tests/ffi.rs"],
     edition = "2024",
     crate_features = ["ffi"],
-    deps = [":lofi_core_rlib"],
+    deps = [
+        ":lofi_core_rlib",
+        "@crates//:tempfile",
+    ],
 )

@@ -236,7 +236,7 @@ The macOS frontend (`app/macos/`) consumes `lofi-core` as a static library throu
 
 Why a hand-written C ABI rather than uniffi:
 
-- The surface is tiny (nine functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
+- The surface is tiny (thirteen functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
 - We control both sides — Swift calls the C functions directly, no Kotlin / Python / etc. The marginal benefit of uniffi's multi-language support is zero here.
 - The opaque-handle pattern (`EntryList`) is easier to reason about as plain Rust than as a uniffi `Object`.
 
@@ -246,9 +246,9 @@ Why a hand-written C ABI rather than uniffi:
 
 ### Ownership model — Swift produces, Rust holds
 
-Mirrors the GNOME pattern. Swift's `AppDiscovery` enumerates `.app` bundles and pushes each into a Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After the push loop the list belongs to Rust; Swift reads back through `lofi_entries_len` / `lofi_entries_get_name` / `lofi_entries_get_bundle_id` / `lofi_entries_get_category` / `lofi_entries_get_icon`, and drives fuzzy filtering by calling `lofi_entries_set_query` on each keystroke. Future MRU work happens on the Rust side and surfaces back to Swift the same way.
+Mirrors the GNOME pattern. Swift's `AppDiscovery` enumerates `.app` bundles and pushes each into a Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After the push loop the list belongs to Rust; Swift's read path uses the five accessors `lofi_entries_len`, `lofi_entries_get_name`, `lofi_entries_get_bundle_id`, `lofi_entries_get_category`, and `lofi_entries_get_icon` (wrapped Swift-side as `count`, `name(at:)`, `bundleId(at:)`, `category(at:)`, `icon(at:)`). The Swift mutation path is three more calls: `lofi_entries_set_query` (wrapped as `setQuery`) on each keystroke, `lofi_entries_apply_mru` (wrapped as `applyMru`) once at startup after the push loop, and `lofi_mru_bump_entry` (wrapped as `bumpMru`) on every Enter/click. The MRU store itself is held opaque on the Swift side via `lofi_mru_open` / `lofi_mru_free`.
 
-The nine functions in the current surface: `lofi_entries_new`, `lofi_entries_free`, `lofi_entries_push_application`, `lofi_entries_len`, `lofi_entries_get_name`, `lofi_entries_set_query`, `lofi_entries_get_bundle_id`, `lofi_entries_get_category`, `lofi_entries_get_icon`.
+The thirteen functions in the current surface: `lofi_entries_new`, `lofi_entries_free`, `lofi_entries_push_application`, `lofi_entries_len`, `lofi_entries_get_name`, `lofi_entries_set_query`, `lofi_entries_get_bundle_id`, `lofi_entries_get_category`, `lofi_entries_get_icon`, `lofi_entries_apply_mru`, `lofi_mru_open`, `lofi_mru_free`, `lofi_mru_bump_entry`.
 
 The four accessors added in the search-field slice:
 
@@ -256,15 +256,24 @@ The four accessors added in the search-field slice:
 - `lofi_entries_get_category(list, idx)` — returns one of five stable English strings (`"Application"`, `"Window"`, `"Workspace"`, `"Command"`, `"PowerCommand"`). Chosen over exposing the `EntryKind` discriminant because a stable string is cheaper across the FFI boundary than threading an enum value plus a Swift-side translation table; localization, if needed, can come later as a UI override.
 - `lofi_entries_get_icon(list, idx)` — returns the `Application::icon` payload (`Option<String>`) as a `const char *` or null. On macOS this is the `.app` bundle path that Swift then resolves via `NSWorkspace.shared.icon(forFile:)` — same icon-identifier-not-bytes rule as GNOME's themed-icon names.
 
+The four symbols added in the MRU persistence slice:
+
+- `lofi_entries_apply_mru(list, store)` — reorders the underlying `Vec<Entry>` by recency from the MRU store, clears every `CString` cache, and recomputes the active filter against the freshly reordered list. Returns true on success, false on null arguments or a `read_all` failure (degraded mode: leave order untouched). Called once after the push loop and before showing the panel; the matcher's filter-only semantics then preserve the MRU order through any subsequent `set_query`.
+- `lofi_mru_open(path)` — opens or creates the SQLite-backed `MruStore` at `path` (parents auto-created on the Rust side, WAL + 5s busy_timeout applied on open, migration idempotent). Returns an opaque `*mut MruStore` on success or null on any I/O / SQLite failure. Same null-pointer degraded-mode contract as the other openers — a Swift caller whose `init?` returns nil simply runs without MRU.
+- `lofi_mru_free(store)` — null-safe deallocator for the handle from `lofi_mru_open`.
+- `lofi_mru_bump_entry(store, list, idx)` — records the activation of the filtered-row entry under the active filter. Resolves the filtered index to the underlying `Entry`, computes its `Entry::reference()`, and writes through `MruStore::bump`. Returns true on success, false on any null pointer, out-of-bounds index, or SQLite error. Called *before* `NSWorkspace.open` on Enter / click so a fast local SQLite write completes ahead of the non-blocking LaunchServices call — double-bumping on a failed launch is preferable to missing a successful one.
+
 `lofi_entries_set_query(list, query)` recomputes the filter. A null `query` clears the filter (identity passthrough); a non-null UTF-8 `query` is whitespace-tokenized and intersected against each entry's per-variant haystack, exactly matching `matcher::search`'s semantics. After `set_query` returns, `lofi_entries_len` and every `get_*` accessor read through the filter — Swift's table view sees a contiguous, post-filter list and doesn't need to know which underlying indices survived.
 
 `EntryList` is an opaque heap-allocated wrapper around `Vec<Entry>`. The Rust-side layout (the vector, the per-accessor `CString` caches for the borrow contract, the current query string, the optional filter index vector — see below) is intentionally not exposed in the header; cbindgen emits `typedef struct EntryList EntryList;` and nothing more.
 
 ### Borrow contract on the `get_*` accessors
 
-Every `lofi_entries_get_*` function (`_name`, `_bundle_id`, `_category`, `_icon`) returns a `const char *` borrowed out of a per-accessor `CString` cache held inside `EntryList`. The pointer is valid until the next mutating call on the list — any `push_*`, `lofi_entries_set_query`, or `lofi_entries_free`. Callers must copy the bytes into their own storage before doing anything that could invalidate the borrow. The Swift wrapper (`RustBridge.swift::EntryList.name(at:)` and the parallel `bundleId` / `category` / `icon` accessors) copies into a Swift `String` immediately, so application code never sees the raw pointer.
+Every `lofi_entries_get_*` function (`_name`, `_bundle_id`, `_category`, `_icon`) returns a `const char *` borrowed out of a per-accessor `CString` cache held inside `EntryList`. The pointer is valid until the next mutating call on the list — any `push_*`, `lofi_entries_set_query`, `lofi_entries_apply_mru`, or `lofi_entries_free`. Callers must copy the bytes into their own storage before doing anything that could invalidate the borrow. The Swift wrapper (`RustBridge.swift::EntryList.name(at:)` and the parallel `bundleId` / `category` / `icon` accessors) copies into a Swift `String` immediately, so application code never sees the raw pointer.
 
 `set_query` is on the invalidation list — not on the `push_*` list — for a specific reason: the cached `CString`s key off filtered indices, and recomputing the filter can change which underlying entry sits at a given index (or remove an index entirely). A pointer handed out before `set_query` may, after the call, refer to a slot whose `CString` has been dropped because the entry is no longer reachable through the filter. Rather than try to detect which subset of cached pointers survives a query change, every cache clears together on any mutation. The Swift side already copies eagerly, so this conservative invalidation costs nothing in practice and keeps the contract trivially statable: "no mutating call between a `get_*` and the read of its bytes."
+
+`apply_mru` joins the invalidation list for a structurally identical reason: the caches key off positions in the underlying `entries: Vec<Entry>`, and an MRU reorder moves entries between positions. A pointer handed out before `apply_mru` would, after the reorder, refer to a slot whose `CString` was built from a *different* `Entry` — not stale text but actively wrong text, pointing at the previous occupant of that index. The fact that the caches survive across `get_*` calls is what makes them caches; the fact that any structural change (push, filter, reorder) drops them is what keeps them sound. Clearing all four caches on `apply_mru` is the same blanket policy as `set_query` and for the same reason: cheaper and more obviously correct than a per-index validity-tracking scheme.
 
 ### `desktop_id` policy on macOS (temporary)
 

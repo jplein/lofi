@@ -46,6 +46,467 @@ unsafe extern "C" {
     fn lofi_entries_get_bundle_id(list: *const EntryList, idx: usize) -> *const c_char;
     fn lofi_entries_get_category(list: *const EntryList, idx: usize) -> *const c_char;
     fn lofi_entries_get_icon(list: *const EntryList, idx: usize) -> *const c_char;
+
+    // MRU FFI surface (added in the macOS MRU slice). Mirrors the C
+    // signatures cbindgen emits for the new `lofi_core::ffi::mru` module:
+    //
+    //     typedef struct MruStore MruStore;
+    //     struct MruStore *lofi_mru_open(const char *path);
+    //     void             lofi_mru_free(struct MruStore *store);
+    //     bool             lofi_mru_bump_entry(const struct MruStore *store,
+    //                                          const struct EntryList *list,
+    //                                          uintptr_t idx);
+    //     bool             lofi_entries_apply_mru(struct EntryList *list,
+    //                                             const struct MruStore *store);
+    //
+    // The tests below only ever traffic in raw pointers to `MruStore`; the
+    // inside is opaque by design, same shape as `EntryList`.
+    fn lofi_mru_open(path: *const c_char) -> *mut MruStore;
+    fn lofi_mru_free(store: *mut MruStore);
+    fn lofi_mru_bump_entry(
+        store: *const MruStore,
+        list: *const EntryList,
+        idx: usize,
+    ) -> bool;
+    fn lofi_entries_apply_mru(list: *mut EntryList, store: *const MruStore) -> bool;
+}
+
+/// Opaque type matching the Rust-side `MruStore` newtype the FFI hands out
+/// via `lofi_mru_open`. Same zero-sized-private-field shape as `EntryList`:
+/// the inside is unreachable by design, mirroring the
+/// `typedef struct MruStore MruStore;` cbindgen emits for Swift.
+#[repr(C)]
+struct MruStore {
+    _private: [u8; 0],
+}
+
+/// Test helper: open a fresh `MruStore` backed by a SQLite file inside a
+/// brand-new `tempfile::tempdir()`. Returns the `TempDir` alongside the
+/// store pointer so the caller can keep the directory alive for the
+/// lifetime of the test by holding the tuple; dropping the tuple's first
+/// element cleans up the directory and its contents.
+fn open_temp_store() -> (tempfile::TempDir, *mut MruStore) {
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("mru.sqlite");
+    let path_str = path.to_str().expect("tempdir path should be UTF-8");
+    let cstr = CString::new(path_str).expect("tempdir path should have no NUL");
+    // SAFETY: `cstr` lives across the call; `lofi_mru_open` copies what it
+    // needs out of the borrowed C string before returning.
+    let store = unsafe { lofi_mru_open(cstr.as_ptr()) };
+    assert!(
+        !store.is_null(),
+        "lofi_mru_open should succeed in a fresh tempdir"
+    );
+    (dir, store)
+}
+
+#[test]
+fn mru_open_creates_file_and_can_be_freed() {
+    // Opening a store under a fresh tempdir must succeed, return a non-null
+    // handle, and leave a SQLite file on disk at the requested path. After
+    // free, the file should still exist (free closes the connection but
+    // does not delete the backing store).
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("mru.sqlite");
+    let path_str = path.to_str().expect("tempdir path should be UTF-8");
+    let cstr = CString::new(path_str).expect("tempdir path should have no NUL");
+
+    // SAFETY: standard FFI lifecycle: open -> free. `cstr` lives across
+    // the open call.
+    unsafe {
+        let store = lofi_mru_open(cstr.as_ptr());
+        assert!(
+            !store.is_null(),
+            "lofi_mru_open should succeed in a fresh tempdir"
+        );
+        lofi_mru_free(store);
+    }
+
+    assert!(
+        path.exists(),
+        "the SQLite file should still exist on disk after lofi_mru_free"
+    );
+}
+
+#[test]
+fn mru_open_invalid_path_returns_null() {
+    // `/dev/null/cannot_create` has a parent (`/dev/null`) that is a
+    // character device, not a directory. `MruStore::open`'s parent-dir
+    // create_dir_all call will fail; the FFI swallows that into null.
+    let cstr = CString::new("/dev/null/cannot_create").expect("path has no NUL");
+    // SAFETY: deliberately pass an unwritable path; FFI must return null,
+    // not panic.
+    unsafe {
+        let store = lofi_mru_open(cstr.as_ptr());
+        assert!(
+            store.is_null(),
+            "lofi_mru_open under an unwritable path must return null"
+        );
+        // Belt and braces: freeing null must be a safe no-op.
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn mru_bump_then_apply_promotes_entry() {
+    // Three apps in alphabetical push order. Bumping the third (Chrome)
+    // must promote it to idx 0 after apply_mru. The other two retain their
+    // relative input order (Alpha < Beta) because they have no MRU rank
+    // and fall through the stable-sort by original position.
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle: new -> push -> bump -> apply -> read
+    // -> free for both the list and the store.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Alpha", "com.example.alpha", None));
+        assert!(push_app(list, "Beta", "com.example.beta", None));
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+
+        assert!(
+            lofi_mru_bump_entry(store, list, 2),
+            "bumping idx 2 (Chrome) should return true"
+        );
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru should succeed"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            3,
+            "len should be unchanged at 3 after apply_mru"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Chrome",
+            "Chrome should be at the top after bump+apply_mru"
+        );
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn apply_mru_with_empty_store_preserves_input_order() {
+    // Empty MRU file on first run: every entry has rank `usize::MAX`, so
+    // the stable-sort by (rank, original_position) leaves the input order
+    // untouched. Documents the "no special case needed" point from the
+    // plan's risks section.
+    const EXPECTED: [&str; 3] = ["Alpha", "Beta", "Chrome"];
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+        for name in EXPECTED.iter() {
+            let bundle = format!("com.example.{name}");
+            assert!(push_app(list, name, &bundle, None));
+        }
+
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru against an empty store should succeed"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            EXPECTED.len(),
+            "len should match the push count"
+        );
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                name_at(list, i),
+                *expected,
+                "empty-store apply_mru should preserve push order at idx {i}"
+            );
+        }
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn mru_persists_across_open() {
+    // Open store A under a tempdir path, push apps, bump idx 1, free A.
+    // Open store B at the same path with a fresh list pushed in the same
+    // order. After apply_mru, idx 0 must be the previously bumped entry —
+    // the proof that MRU state survives the close/reopen cycle through
+    // the SQLite file on disk.
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("mru.sqlite");
+    let path_str = path.to_str().expect("tempdir path should be UTF-8");
+    let cstr = CString::new(path_str).expect("tempdir path should have no NUL");
+
+    // First open: push three apps, bump idx 1 (Beta), close.
+    // SAFETY: standard FFI lifecycle for store A and its list.
+    unsafe {
+        let store_a = lofi_mru_open(cstr.as_ptr());
+        assert!(!store_a.is_null(), "first open should succeed");
+
+        let list_a = lofi_entries_new();
+        assert!(push_app(list_a, "Alpha", "com.example.alpha", None));
+        assert!(push_app(list_a, "Beta", "com.example.beta", None));
+        assert!(push_app(list_a, "Chrome", "com.google.Chrome", None));
+
+        assert!(
+            lofi_mru_bump_entry(store_a, list_a, 1),
+            "bumping idx 1 (Beta) should succeed"
+        );
+
+        lofi_entries_free(list_a);
+        lofi_mru_free(store_a);
+    }
+
+    // Second open: same path, fresh list, same push order. After apply_mru,
+    // Beta should be promoted from the persisted MRU state.
+    // SAFETY: standard FFI lifecycle for store B and its list.
+    unsafe {
+        let store_b = lofi_mru_open(cstr.as_ptr());
+        assert!(!store_b.is_null(), "second open at the same path should succeed");
+
+        let list_b = lofi_entries_new();
+        assert!(push_app(list_b, "Alpha", "com.example.alpha", None));
+        assert!(push_app(list_b, "Beta", "com.example.beta", None));
+        assert!(push_app(list_b, "Chrome", "com.google.Chrome", None));
+
+        assert!(
+            lofi_entries_apply_mru(list_b, store_b),
+            "apply_mru on the reopened store should succeed"
+        );
+
+        assert_eq!(
+            name_at(list_b, 0),
+            "Beta",
+            "Beta should be at idx 0 after reopen+apply_mru thanks to persisted MRU"
+        );
+
+        lofi_entries_free(list_b);
+        lofi_mru_free(store_b);
+    }
+}
+
+#[test]
+fn apply_mru_invalidates_caches() {
+    // The borrow contract: `apply_mru` is a mutation, so any `*const c_char`
+    // handed out by `get_*` before the call is invalidated. The new call to
+    // `get_name(0)` after apply_mru must reflect the *new* top entry, not
+    // a cached pointer to the previously-top entry. Mirrors the
+    // borrow-lifetime contract test for push/set_query.
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle. We deliberately copy the bytes out
+    // of the pre-mutation pointer and never dereference it after apply_mru.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Alpha", "com.example.alpha", None));
+        assert!(push_app(list, "Beta", "com.example.beta", None));
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+
+        // Warm the name cache for idx 0 and copy the bytes out.
+        let p = lofi_entries_get_name(list, 0);
+        assert!(!p.is_null(), "pre-mutation get_name(0) should be non-null");
+        let before: Vec<u8> = CStr::from_ptr(p).to_bytes().to_vec();
+        assert_eq!(
+            before, b"Alpha",
+            "pre-mutation idx 0 should be the first pushed name"
+        );
+
+        // Bump Chrome (idx 2) and apply. This is the mutation; `p` is now
+        // not guaranteed valid and we do not touch it again.
+        assert!(lofi_mru_bump_entry(store, list, 2), "bump should succeed");
+        assert!(lofi_entries_apply_mru(list, store), "apply_mru should succeed");
+
+        // Fresh borrow: must reflect the new top entry, not the cached one.
+        let p2 = lofi_entries_get_name(list, 0);
+        assert!(!p2.is_null(), "post-mutation get_name(0) should be non-null");
+        let after: Vec<u8> = CStr::from_ptr(p2).to_bytes().to_vec();
+        assert_eq!(
+            after, b"Chrome",
+            "post-apply_mru idx 0 should be the bumped entry, not the cached pre-mutation value"
+        );
+
+        // The owned pre-mutation copy is, of course, independent.
+        assert_eq!(before, b"Alpha", "owned pre-mutation copy is unchanged");
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn apply_mru_with_query_active_keeps_filter() {
+    // With a query that narrows to two entries, apply_mru must recompute
+    // the filter against the freshly reordered underlying vec so the
+    // visible count stays at 2. The two Firefox variants both contain the
+    // "fire" subsequence; Chrome does not.
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(
+            list,
+            "Firefox",
+            "org.mozilla.firefox",
+            None,
+        ));
+        assert!(push_app(
+            list,
+            "Firefox Developer Edition",
+            "org.mozilla.firefoxdeveloperedition",
+            None,
+        ));
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+
+        // Narrow to the two Firefox entries.
+        let q = CString::new("fire").expect("query is valid C string");
+        assert!(
+            lofi_entries_set_query(list, q.as_ptr()),
+            "set_query should succeed"
+        );
+        assert_eq!(
+            lofi_entries_len(list),
+            2,
+            "sanity: \"fire\" should narrow to both Firefox variants"
+        );
+
+        // Bump the developer edition. In the filtered view it lives at
+        // idx 1 (insertion order: Firefox = filtered idx 0, Developer
+        // Edition = filtered idx 1, since Chrome was filtered out). The
+        // bump must go through the filtered-index resolver and reach the
+        // correct underlying entry.
+        assert!(
+            lofi_mru_bump_entry(store, list, 1),
+            "bumping filtered idx 1 (Developer Edition) should succeed"
+        );
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru with active query should succeed"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            2,
+            "filter should still match both Firefox variants after apply_mru"
+        );
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn mru_bump_entry_null_args_return_false() {
+    // Null-pointer contract for bump_entry: any null argument returns false
+    // and does not crash. Three sub-cases in one test.
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: deliberately pass nulls; FFI must short-circuit to false.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Solo", "com.example.solo", None));
+
+        // (a) null store + valid list.
+        assert!(
+            !lofi_mru_bump_entry(ptr::null(), list, 0),
+            "bump with null store must return false"
+        );
+
+        // (b) valid store + null list.
+        assert!(
+            !lofi_mru_bump_entry(store, ptr::null(), 0),
+            "bump with null list must return false"
+        );
+
+        // (c) both null.
+        assert!(
+            !lofi_mru_bump_entry(ptr::null(), ptr::null(), 0),
+            "bump with both null must return false"
+        );
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn mru_apply_null_args_return_false() {
+    // Null-pointer contract for apply_mru: any null argument returns false
+    // and does not crash. Symmetric with bump_entry.
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: deliberately pass nulls; FFI must short-circuit to false.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Solo", "com.example.solo", None));
+
+        // (a) null list + valid store.
+        assert!(
+            !lofi_entries_apply_mru(ptr::null_mut(), store),
+            "apply_mru with null list must return false"
+        );
+
+        // (b) valid list + null store.
+        assert!(
+            !lofi_entries_apply_mru(list, ptr::null()),
+            "apply_mru with null store must return false"
+        );
+
+        // (c) both null.
+        assert!(
+            !lofi_entries_apply_mru(ptr::null_mut(), ptr::null()),
+            "apply_mru with both null must return false"
+        );
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn mru_bump_out_of_bounds_returns_false() {
+    // Out-of-bounds idx must return false (no entry to resolve a reference
+    // for) and must not perturb the underlying list. After a follow-up
+    // apply_mru against the still-empty store, the entry order must be
+    // unchanged — proving that no entry was actually bumped on the OOB
+    // call.
+    const FAR_OUT_OF_BOUNDS: usize = 999;
+    const EXPECTED: [&str; 3] = ["Alpha", "Beta", "Chrome"];
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle with one deliberately OOB bump call.
+    unsafe {
+        let list = lofi_entries_new();
+        for name in EXPECTED.iter() {
+            let bundle = format!("com.example.{name}");
+            assert!(push_app(list, name, &bundle, None));
+        }
+
+        assert!(
+            !lofi_mru_bump_entry(store, list, FAR_OUT_OF_BOUNDS),
+            "bump with out-of-bounds idx must return false"
+        );
+
+        // Apply against the (still-empty) store; the entry order must be
+        // unchanged.
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru should succeed after OOB bump"
+        );
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                name_at(list, i),
+                *expected,
+                "entry order at idx {i} must be unchanged after OOB bump"
+            );
+        }
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
 }
 
 /// Push a `(name, bundle_id, icon)` triple where every string is a valid

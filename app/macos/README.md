@@ -4,7 +4,7 @@ The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app
 
 ## Status
 
-Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/System/Applications`, `/Applications`, and `~/Applications`. The panel now has a focused search field at the top that fuzzy-filters as the user types, and each row renders as `[icon] Name … [Category]` with the category dimmed and trailing-aligned. Still pending: no global hotkey, no launching, no MRU yet (see *Out of scope* below).
+Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/System/Applications`, `/Applications`, and `~/Applications`. The panel now has a focused search field at the top that fuzzy-filters as the user types, and each row renders as `[icon] Name … [Category]` with the category dimmed and trailing-aligned. Activation history persists across launches via the SQLite store at `~/Library/Application Support/dev.jplein.lofi/mru.sqlite`, so the apps you actually use bubble to the top on every subsequent launch. Still pending: no global hotkey (see *Out of scope* below).
 
 ## Why a separate frontend
 
@@ -50,7 +50,7 @@ Resources/
 ```sh
 bazel build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
 bazel run   //app/macos:launch     # unzip + `open` the bundle
-bazel test  //app/core:ffi_test    # run the 22 FFI integration tests
+bazel test  //app/core:ffi_test    # run the 32 FFI integration tests
 bazel run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
 
@@ -95,6 +95,4 @@ Each cost real time to figure out the first time; each is permanent in the code 
 Each is a follow-up:
 
 - Global hotkey to summon the panel (requires Accessibility entitlement).
-- MRU persistence.
-- Launching the selected app.
 - Window / workspace / power commands.
