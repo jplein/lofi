@@ -120,11 +120,19 @@ All errors are `GLib.Error` instances in the namespace
 ## Launcher window animation
 
 GNOME Shell's default open/close animation (a brief zoom/fade) is suppressed
-specifically for the LoFi launcher window — identified by its Shell.App id
-`dev.jplein.LoFi.desktop`. The launcher is modal, focus-driven, and dismisses
-on focus loss, so the standard animation adds perceptible latency to a flow
-that's supposed to feel instantaneous. All other windows keep their normal
-animations.
+specifically for the LoFi launcher window. The launcher is modal,
+focus-driven, and dismisses on focus loss, so the standard animation adds
+perceptible latency to a flow that's supposed to feel instantaneous. All
+other windows keep their normal animations.
+
+The window is identified primarily by its **GApplication id**
+(`dev.jplein.LoFi`, set in `app/gnome/src/main.rs`) via
+`Meta.Window.get_gtk_application_id()`. Identifying by the GApplication id
+rather than by a `Shell.App` id means the match works even when no
+`dev.jplein.LoFi.desktop` file is installed — which is the common case for
+ad-hoc invocations and dev builds. `src/launcher.ts` falls back to
+`WM_CLASS` (X11 / non-GTK path) and then to a `Shell.WindowTracker`
+lookup against `dev.jplein.LoFi.desktop` as a last resort.
 
 Implementation lives in `src/launcher.ts`, hooked into `Shell.WM`'s `map`
 and `destroy` signals. We don't prevent Shell from starting the animation;
