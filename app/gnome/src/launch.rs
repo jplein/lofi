@@ -3,7 +3,7 @@ use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use lofi_core::Entry;
 
-use crate::windows;
+use crate::{windows, workspaces};
 
 /// Activate the entry. For an `Entry::Application` that has a
 /// `recent_window_id` (i.e. is currently running), focus that window over
@@ -37,6 +37,9 @@ pub fn activate(entry: &Entry) {
         }
         Entry::Window(w) => {
             windows::focus_window(w.id);
+        }
+        Entry::Workspace(w) => {
+            workspaces::activate_workspace(w.index);
         }
     }
 }

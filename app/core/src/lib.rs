@@ -38,16 +38,28 @@ pub struct Window {
     pub app_desktop_id: Option<String>,
 }
 
+/// A GNOME workspace surfaced by the Shell extension over D-Bus. `index` is
+/// the 0-based workspace index used by Mutter; `name` is the human-readable
+/// label (the extension currently hardcodes `"Workspace N"`, but a custom
+/// naming extension would flow its label through here verbatim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    pub index: i32,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     Application,
     Window,
+    Workspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Application(Application),
     Window(Window),
+    Workspace(Workspace),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,13 +67,21 @@ pub enum Entry {
 pub enum EntryRef {
     Application(String),
     Window(u64),
+    Workspace(i32),
 }
+
+/// Icon name used for every `Entry::Workspace`. Hardcoded because workspaces
+/// don't have per-instance icons — the extension doesn't emit one and there's
+/// nothing useful to vary on (index/name aren't visual). Kept as a `&'static
+/// str` constant so `Entry::icon()` can borrow it without owning a String.
+const WORKSPACE_ICON: &str = "view-grid-symbolic";
 
 impl Entry {
     pub fn name(&self) -> &str {
         match self {
             Entry::Application(app) => app.name.as_str(),
             Entry::Window(w) => w.title.as_str(),
+            Entry::Workspace(w) => w.name.as_str(),
         }
     }
 
@@ -69,6 +89,7 @@ impl Entry {
         match self {
             Entry::Application(app) => app.icon.as_deref(),
             Entry::Window(w) => w.icon.as_deref(),
+            Entry::Workspace(_) => Some(WORKSPACE_ICON),
         }
     }
 
@@ -76,6 +97,7 @@ impl Entry {
         match self {
             Entry::Application(_) => EntryKind::Application,
             Entry::Window(_) => EntryKind::Window,
+            Entry::Workspace(_) => EntryKind::Workspace,
         }
     }
 
@@ -83,6 +105,7 @@ impl Entry {
         match self {
             Entry::Application(app) => EntryRef::Application(app.desktop_id.clone()),
             Entry::Window(w) => EntryRef::Window(w.id),
+            Entry::Workspace(w) => EntryRef::Workspace(w.index),
         }
     }
 }
@@ -126,6 +149,13 @@ mod tests {
             icon: icon.map(str::to_string),
             workspace: 0,
             app_desktop_id: None,
+        }
+    }
+
+    fn make_workspace(index: i32, name: &str) -> Workspace {
+        Workspace {
+            index,
+            name: name.to_string(),
         }
     }
 
@@ -457,6 +487,140 @@ mod tests {
             no_icon.icon(),
             None,
             "Entry::Window::icon should return None when the underlying Window has no icon"
+        );
+    }
+
+    #[test]
+    fn entry_workspace_reference_round_trips() {
+        let entry = Entry::Workspace(make_workspace(2, "Workspace 3"));
+
+        let reference = entry.reference();
+        assert_eq!(
+            reference,
+            EntryRef::Workspace(2),
+            "Entry::Workspace::reference() should be EntryRef::Workspace(index); got {reference:?}"
+        );
+
+        let entries = vec![entry.clone()];
+        let resolved = resolve(&entries, &entry.reference());
+        assert!(
+            matches!(resolved, Some(r) if r == &entry),
+            "resolve should return Some(&entry) for its own Workspace reference; got {resolved:?}"
+        );
+
+        // index=0 is a legal workspace index (GNOME's first workspace);
+        // it must round-trip as well.
+        let zero_entry = Entry::Workspace(make_workspace(0, "Workspace 1"));
+        let zero_entries = vec![zero_entry.clone()];
+        let zero_resolved = resolve(&zero_entries, &zero_entry.reference());
+        assert!(
+            matches!(zero_resolved, Some(r) if r == &zero_entry),
+            "EntryRef::Workspace(0) should round-trip via resolve; got {zero_resolved:?}"
+        );
+        assert_eq!(
+            zero_entry.reference(),
+            EntryRef::Workspace(0),
+            "Entry::Workspace with index=0 should reference EntryRef::Workspace(0)"
+        );
+    }
+
+    #[test]
+    fn resolve_finds_workspace_by_reference() {
+        let entries = vec![
+            Entry::Application(make_application("Alpha", "alpha.desktop", None)),
+            Entry::Window(make_window(2, "Window Two", Some("Firefox"), None)),
+            Entry::Workspace(make_workspace(0, "Workspace 1")),
+            Entry::Workspace(make_workspace(1, "Workspace 2")),
+            Entry::Workspace(make_workspace(2, "Workspace 3")),
+        ];
+
+        let resolved = resolve(&entries, &EntryRef::Workspace(2));
+        let found = resolved.expect("resolve should find a Workspace for index 2");
+        assert_eq!(
+            found.name(),
+            "Workspace 3",
+            "resolve should return the workspace whose index is 2; got {:?}",
+            found.name()
+        );
+        assert_eq!(
+            found.kind(),
+            EntryKind::Workspace,
+            "resolve(&EntryRef::Workspace(2)) must return a Workspace entry; got kind {:?}",
+            found.kind()
+        );
+
+        // Cross-variant: a Window(2) ref must NOT resolve to a Workspace(2).
+        let by_window_2 = resolve(&entries, &EntryRef::Window(2))
+            .expect("resolve should find the Window with id 2");
+        assert_eq!(
+            by_window_2.kind(),
+            EntryKind::Window,
+            "EntryRef::Window(2) must resolve to a Window, not a Workspace; got kind {:?}",
+            by_window_2.kind()
+        );
+        assert_eq!(
+            by_window_2.name(),
+            "Window Two",
+            "EntryRef::Window(2) must resolve to the Window named \"Window Two\"; got {:?}",
+            by_window_2.name()
+        );
+
+        // Cross-variant (other direction): EntryRef::Workspace(2) must NOT
+        // resolve to the Window with id 2.
+        let by_workspace_2 = resolve(&entries, &EntryRef::Workspace(2))
+            .expect("resolve should find the Workspace with index 2");
+        assert_eq!(
+            by_workspace_2.kind(),
+            EntryKind::Workspace,
+            "EntryRef::Workspace(2) must resolve to a Workspace, not a Window; got kind {:?}",
+            by_workspace_2.kind()
+        );
+
+        // Missing workspace index returns None.
+        let missing = EntryRef::Workspace(99);
+        assert_eq!(
+            resolve(&entries, &missing),
+            None,
+            "resolve should return None for a Workspace index not in the slice"
+        );
+    }
+
+    #[test]
+    fn entry_ref_workspace_serializes_to_tagged_json() {
+        let r = EntryRef::Workspace(2);
+
+        let serialized = serde_json::to_string(&r).expect("EntryRef::Workspace should serialize");
+        assert_eq!(
+            serialized, r#"{"type":"workspace","id":2}"#,
+            "EntryRef::Workspace should serialize with tag=type/content=id and snake_case variant; got {serialized}"
+        );
+
+        let round_tripped: EntryRef =
+            serde_json::from_str(&serialized).expect("EntryRef::Workspace should deserialize");
+        assert_eq!(
+            round_tripped, r,
+            "EntryRef::Workspace should round-trip via serde_json; got {round_tripped:?}"
+        );
+    }
+
+    #[test]
+    fn entry_workspace_methods_return_workspace_data() {
+        let entry = Entry::Workspace(make_workspace(1, "Editor"));
+
+        assert_eq!(
+            entry.name(),
+            "Editor",
+            "Entry::Workspace::name should return the workspace name"
+        );
+        assert_eq!(
+            entry.icon(),
+            Some("view-grid-symbolic"),
+            "Entry::Workspace::icon should return the hardcoded \"view-grid-symbolic\" constant"
+        );
+        assert_eq!(
+            entry.kind(),
+            EntryKind::Workspace,
+            "Entry::Workspace::kind should return EntryKind::Workspace"
         );
     }
 }

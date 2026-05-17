@@ -431,6 +431,7 @@ fn kind_to_str(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Application => "Application",
         EntryKind::Window => "Window",
+        EntryKind::Workspace => "Workspace",
     }
 }
 

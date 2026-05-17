@@ -52,13 +52,24 @@ A struct describing an open window. Six fields:
 
 `app_name`, `icon`, and `app_desktop_id` are all `Option` because the extension may emit empty strings when `Shell.WindowTracker` cannot resolve an owning app for the window (typically system surfaces and override-redirect windows). The `lofi-gnome` D-Bus client coerces those empty strings to `None` when it builds the `Window`, so consumers see only fully-populated values or `None` — never `Some("")`.
 
+### `Workspace`
+
+A struct describing a GNOME workspace surfaced by the Shell extension. Two fields:
+
+- `index` — `i32`, the 0-based workspace index used by Mutter. **Session-stable** in the sense that it identifies the same workspace for the duration of a shell session, but **not durable**: the index of a given workspace can shift when the user adds or removes workspaces above it. This is the same trade-off `Window::id` has — `EntryRef::Workspace(index)` is the MRU key, and a stale row matching a different-but-same-index workspace is acceptable dead weight rather than a correctness problem. The user only ever sees MRU as ordering, never as identity.
+- `name` — `String`, the human-readable workspace label. The extension currently hardcodes `"Workspace N"` (1-based), but a custom naming extension that overrides Mutter's workspace names would flow its label through here verbatim. This is also the entire matcher haystack for `Entry::Workspace` (see the matcher section below) — typing `"2"`, `"work"`, or `"workspace 2"` all match the default-labelled second workspace.
+
+There is deliberately no `icon` field. Workspaces don't have per-instance icons — the extension doesn't emit one and there's nothing visual to vary on. `Entry::icon()` returns `Some("view-grid-symbolic")` for the `Workspace` arm as a hardcoded `&'static str` constant; threading an always-`Some` field through the gatherer would be pure ceremony.
+
+The wire dict produced by the extension also carries `active` and `n_windows`, but those are dropped on decode (zvariant's dict decoder ignores keys not declared on the target struct). Adding either back later is a one-line change in the platform layer; we drop them today because nothing in `core` or the UI uses them yet.
+
 ### `Entry`, `EntryKind`, `EntryRef`, and `resolve`
 
-`Entry` is the runtime sum type the UI consumes. Today its variants are `Entry::Application(Application)` and `Entry::Window(Window)`. `Workspace` and `Command` become additional variants as those features land.
+`Entry` is the runtime sum type the UI consumes. Today its variants are `Entry::Application(Application)`, `Entry::Window(Window)`, and `Entry::Workspace(Workspace)`. `Command` becomes an additional variant as that feature lands.
 
 `EntryKind` is the matching unit discriminant (`Copy`/`Hash`), useful for grouping or filtering without holding the payload.
 
-`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has two variants — `EntryRef::Application(String)` carrying a canonical `desktop_id`, and `EntryRef::Window(u64)` carrying a Mutter window id. The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here.
+`EntryRef` is the **persistence handle**: an enum-shaped `{type, id}` tagged with `#[serde(tag = "type", content = "id", rename_all = "snake_case")]`. Today it has three variants — `EntryRef::Application(String)` carrying a canonical `desktop_id`, `EntryRef::Window(u64)` carrying a Mutter window id, and `EntryRef::Workspace(i32)` carrying a workspace index. The window id is session-scoped (see `Window::id` above), so a persisted `EntryRef::Window` only resolves within the same shell session that produced it; cross-session window history is out of scope here. The workspace index has the weaker session-stable-but-can-shift property described in the `Workspace` section above — same dead-weight tolerance applies.
 
 `resolve(&[Entry], &EntryRef) -> Option<&Entry>` is a linear scan that pairs `EntryRef`s back to the live `Entry`s from a gather.
 
@@ -78,7 +89,7 @@ Behavior:
 - A non-empty query is split on whitespace into tokens. Each token must fuzzy-match the entry's haystack (intersection semantics).
 - `search` is **filter-only**: matching entries are returned in input order. The matcher does not rank or score — once the MRU store exists (see `mru` below), ordering is the caller's job, and combining two ordering policies in this function would only obscure which one is winning. This is a deliberate split so the launcher can apply MRU (or any other order) without the fuzzy score fighting it. The classic Raycast-style "selection shifts mid-keystroke" is what filter-only + caller-sorted prevents: typing "Foo", "Foob", "Foobar" can change which rows are visible but not their order relative to each other.
 
-The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. Future `Entry` variants force this function to be updated (no `_` arm).
+The "haystack" — the text we match against — is built per-variant by an exhaustive `match` on `Entry` inside a private `haystack` function. For `Entry::Application` it is `"{name} {desktop_id}"`, so typing either the display name or the desktop id works. For `Entry::Window` it is `"{title} {app_name}"` when `app_name` is `Some`, and just `title` when it is `None`. The practical consequence is that typing an app name (e.g. `"firefox"`) matches both the Firefox application entry and every open Firefox window in the same gather. For `Entry::Workspace` the haystack is `name` alone — no second field worth concatenating, and the default `"Workspace N"` label already makes `"work"`, `"2"`, and `"workspace 2"` all match the right row; a custom workspace-naming extension flows its label through unchanged. Future `Entry` variants force this function to be updated (no `_` arm).
 
 The fuzzy implementation is [`fuzzy-matcher`](https://docs.rs/fuzzy-matcher)'s `SkimMatcherV2` configured with `ignore_case()`. It's the same algorithm `skim` uses, which is in turn a port of fzf's scoring. `fuzzy-matcher` is one direct dependency of this crate, alongside `serde`, `serde_json`, and `rusqlite`.
 
@@ -138,4 +149,4 @@ Display fields drift between sessions: locale changes the display name, the user
 - `fuzzy-matcher` — `matcher::search` (Skim-style fuzzy scoring).
 - `rusqlite` with the `bundled` feature — the `mru` module's SQLite connection. `bundled` ships SQLite as C sources inside the crate so we don't need a system `libsqlite` and `nix build` stays self-contained.
 
-`Workspace` and `Command` will land here as their corresponding features are built out.
+`Command` will land here as its corresponding feature is built out.

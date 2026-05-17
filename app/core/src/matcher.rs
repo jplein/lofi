@@ -11,6 +11,7 @@ fn haystack(entry: &Entry) -> String {
             Some(app) => format!("{} {}", w.title, app),
             None => w.title.clone(),
         },
+        Entry::Workspace(w) => w.name.clone(),
     }
 }
 
@@ -41,7 +42,7 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Entry, Window};
+    use crate::{Application, Entry, Window, Workspace};
     use std::collections::HashSet;
 
     /// Test helper: build an `Entry::Application` with the given name/desktop_id
@@ -65,6 +66,15 @@ mod tests {
             icon: None,
             workspace: 0,
             app_desktop_id: None,
+        })
+    }
+
+    /// Test helper: build an `Entry::Workspace` with the given index and name.
+    /// Mirrors `app(...)` and `win(...)` for workspace fixtures.
+    fn workspace(index: i32, name: &str) -> Entry {
+        Entry::Workspace(Workspace {
+            index,
+            name: name.into(),
         })
     }
 
@@ -343,6 +353,53 @@ mod tests {
             miss.is_empty(),
             "query \"firefox\" should not match a Window with no app_name and an unrelated title; got names {:?}",
             names(&miss)
+        );
+    }
+
+    #[test]
+    fn matcher_finds_workspace_by_name() {
+        // Includes an Application whose name contains "workspaces" so we can
+        // sanity-check that it doesn't shadow Workspace entries. The matcher
+        // may or may not return that Application; what matters is that the
+        // expected Workspace entries are present.
+        let entries = vec![
+            workspace(0, "Workspace 1"),
+            workspace(1, "Workspace 2"),
+            app("Workspaces App", "workspaces-app.desktop"),
+        ];
+
+        // Query "workspace 2": there must be exactly one Workspace entry in
+        // the result set and it must be the one named "Workspace 2".
+        let result = search(&entries, "workspace 2");
+        let workspace_matches: Vec<&&Entry> = result
+            .iter()
+            .filter(|e| matches!(e, Entry::Workspace(_)))
+            .collect();
+        assert_eq!(
+            workspace_matches.len(),
+            1,
+            "query \"workspace 2\" should match exactly one Workspace entry; got names {:?}",
+            names(&result)
+        );
+        assert_eq!(
+            workspace_matches[0].name(),
+            "Workspace 2",
+            "query \"workspace 2\" should match the Workspace named \"Workspace 2\"; got {:?}",
+            workspace_matches[0].name()
+        );
+
+        // Query "2": "Workspace 2" must be in the result, "Workspace 1" must not.
+        let result_two = search(&entries, "2");
+        let names_two: HashSet<&str> = result_two.iter().map(|e| e.name()).collect();
+        assert!(
+            names_two.contains("Workspace 2"),
+            "query \"2\" should match \"Workspace 2\"; got names {:?}",
+            names_two
+        );
+        assert!(
+            !names_two.contains("Workspace 1"),
+            "query \"2\" should not match \"Workspace 1\"; got names {:?}",
+            names_two
         );
     }
 }

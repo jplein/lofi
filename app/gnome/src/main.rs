@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use lofi_core::{Entry, EntryRef, MruStore};
-use lofi_gnome::{apps, ui, windows};
+use lofi_gnome::{apps, ui, windows, workspaces};
 
 const APP_ID: &str = "dev.jplein.LoFi";
 
@@ -20,6 +20,7 @@ fn on_activate(app: &adw::Application) {
     let dirs = apps::application_directories();
     let mut applications = apps::gather_applications(&dirs);
     let windows = windows::gather_windows();
+    let workspaces_vec = workspaces::gather_workspaces();
 
     // Build a desktop_id -> most-recent-window-id map. `gather_windows` returns
     // windows in MRU order, so the FIRST occurrence per app id is the right
@@ -41,9 +42,11 @@ fn on_activate(app: &adw::Application) {
         app.recent_window_id = mru.get(&app.desktop_id).copied();
     }
 
-    let mut entries: Vec<Entry> = Vec::with_capacity(applications.len() + windows.len());
+    let mut entries: Vec<Entry> =
+        Vec::with_capacity(applications.len() + windows.len() + workspaces_vec.len());
     entries.extend(applications.into_iter().map(Entry::Application));
     entries.extend(windows.into_iter().map(Entry::Window));
+    entries.extend(workspaces_vec.into_iter().map(Entry::Workspace));
 
     // Open the persistent MRU store and snapshot the recency index. Both are
     // best-effort: any failure (no XDG_STATE_HOME + no HOME, permission
