@@ -22,6 +22,21 @@ targets:
       base:
         # macOS Tahoe (15) — see project goals; LoFi opts in to modern AppKit.
         MACOSX_DEPLOYMENT_TARGET: "15.0"
+        # Xcode 15.3+ splits the Debug executable into a small shim that
+        # dlopens a `.debug.dylib`, for faster incremental reloads. On
+        # Xcode 26 / MacOSX26.5 SDK that flow invokes `ld` directly with
+        # clang-driver flags it does not understand (`-Xlinker`,
+        # `-dynamiclib`, `-rdynamic`, `-fobjc-link-runtime`, …), and the
+        # link fails. Opting out reverts to the classic single-binary
+        # Debug build, which works.
+        ENABLE_DEBUG_DYLIB: "NO"
+        # Force clang as the linker driver. With LD unset, Xcode 26 on
+        # this setup invokes raw `ld` with clang-driver flags
+        # (`-Xlinker`, `-isysroot`, `-rdynamic`, `-fobjc-link-runtime`)
+        # that ld does not understand. Pinning LD to clang restores the
+        # driver translation step so those flags are interpreted before
+        # ld is invoked.
+        LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang
         INFOPLIST_FILE: Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/LoFi.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: dev.jplein.lofi

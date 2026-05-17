@@ -31,7 +31,7 @@ final class EntryList {
     deinit {
         // Mirrors the Rust contract: `free(null)` is a no-op, but we
         // know the handle is non-null because `init` asserted it.
-        lofi_entries_free(UnsafeMutablePointer(handle))
+        lofi_entries_free(handle)
     }
 
     /// Push an application onto the list. Returns `false` on null
@@ -44,7 +44,7 @@ final class EntryList {
             bundleId.withCString { bundlePtr in
                 let withIcon: (UnsafePointer<CChar>?) -> Bool = { iconPtr in
                     lofi_entries_push_application(
-                        UnsafeMutablePointer(self.handle),
+                        self.handle,
                         namePtr,
                         bundlePtr,
                         iconPtr
@@ -60,7 +60,7 @@ final class EntryList {
     }
 
     var count: Int {
-        Int(lofi_entries_len(UnsafePointer(handle)))
+        Int(lofi_entries_len(handle))
     }
 
     /// Read the display name at `idx`. Returns `nil` if the index is
@@ -69,7 +69,7 @@ final class EntryList {
     /// callers never see a pointer that could be invalidated by a
     /// later `pushApplication`.
     func name(at idx: Int) -> String? {
-        guard let cstr = lofi_entries_get_name(UnsafePointer(handle), idx) else {
+        guard let cstr = lofi_entries_get_name(handle, UInt(idx)) else {
             return nil
         }
         return String(cString: cstr)
