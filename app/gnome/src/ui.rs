@@ -27,16 +27,45 @@ const ROW_MARGIN_BOTTOM: i32 = 2;
 const RUNNING_DOT_SIZE: i32 = 6;
 const ICON_COLUMN_SPACING: i32 = 2;
 
-/// CSS for the running-indicator dot rendered under an Application's icon
-/// when `recent_window_id.is_some()`. `alpha(@theme_fg_color, ...)` adapts
-/// to light/dark themes; `border-radius: 9999px` forces a circle regardless
-/// of the box's actual dimensions.
-const RUNNING_DOT_CSS: &str = "\
+/// App-wide CSS for the launcher. Covers:
+///
+/// 1. The running-indicator dot under an Application's icon when
+///    `recent_window_id.is_some()`. `alpha(@theme_fg_color, ...)` adapts to
+///    light/dark themes; `border-radius: 9999px` forces a circle regardless
+///    of the box's actual dimensions.
+/// 2. The top SearchEntry, stripped of its default rounded border, focus
+///    ring, and tinted fill so it blends into the window background instead
+///    of looking like a separate input control inset into the chrome.
+const LAUNCHER_CSS: &str = "\
 .running-indicator {
     background-color: alpha(@theme_fg_color, 0.8);
     border-radius: 9999px;
     min-width: 6px;
     min-height: 6px;
+}
+/* GtkSearchEntry's CSS node has been spelled both `searchentry` and
+   `entry.search` across GTK4 versions. We target both, plus the inner `text`
+   node where the focus ring actually lives in GTK4.14+, so the input blends
+   into the window background regardless of the precise GTK build. The `.flat`
+   style class added to the widget (see `build()`) handles the frame removal
+   on its own; this rule reinforces it and strips the tinted fill that
+   `.flat` doesn't touch. */
+searchentry,
+searchentry > text,
+entry.search,
+entry.search > text {
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    border: none;
+    outline: none;
+}
+/* Adwaita gives the window chrome `@window_bg_color` and the ListBox
+   `@view_bg_color` (the canonical content-surface tone), which differ by a
+   small amount. Pulling the window background up to `@view_bg_color`
+   eliminates that seam so the whole launcher reads as one surface. */
+window {
+    background-color: @view_bg_color;
 }
 ";
 
@@ -64,7 +93,7 @@ fn install_styles() {
     // `load_from_string` is gated behind gtk4's `v4_12` feature; we target
     // the unfeatured baseline so use `load_from_data`, which is the same
     // call with a different signature.
-    provider.load_from_data(RUNNING_DOT_CSS);
+    provider.load_from_data(LAUNCHER_CSS);
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
@@ -104,6 +133,10 @@ pub fn build(
         .margin_start(LIST_MARGIN)
         .margin_end(LIST_MARGIN)
         .build();
+    // `.flat` is GTK's built-in style class for frameless entries. Adwaita
+    // honours it on GtkSearchEntry; supplemental CSS in `LAUNCHER_CSS` strips
+    // the tinted fill and focus shadow that `.flat` alone leaves behind.
+    search_entry.add_css_class("flat");
 
     let list_box = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
