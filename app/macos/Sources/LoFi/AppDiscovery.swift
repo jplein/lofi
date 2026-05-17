@@ -51,8 +51,15 @@ enum AppDiscovery {
                 guard let bundleId = bundle.bundleIdentifier else { continue }
                 if seen.contains(bundleId) { continue }
 
-                let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                    ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                // `??` only catches nil, not empty strings. Some apps set
+                // `CFBundleDisplayName` to "" rather than omitting the key,
+                // which would otherwise leak an empty row to the UI.
+                func nonEmpty(_ s: String?) -> String? {
+                    guard let s = s, !s.isEmpty else { return nil }
+                    return s
+                }
+                let name = nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                    ?? nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
                     ?? url.deletingPathExtension().lastPathComponent
 
                 seen.insert(bundleId)

@@ -13,8 +13,12 @@
 // - `[.canJoinAllSpaces, .fullScreenAuxiliary]` — the panel follows the
 //   user across spaces and overlays full-screen apps the same way the
 //   system Spotlight does.
-// - `hidesOnDeactivate = true` — dismisses the panel as soon as focus
-//   leaves it (e.g. user clicks another window). Matches Spotlight UX.
+// - `hidesOnDeactivate = false` *for this slice only*. Spotlight-style
+//   "dismiss on focus loss" is the eventual UX, but with no global
+//   hotkey yet to bring the panel back, a hide-on-deactivate panel
+//   would vanish the moment `open LoFi.app` returns control to the
+//   launching terminal. Keeping it visible lets the static-list demo
+//   actually be seen; flip back to `true` once the hotkey slice lands.
 // - Fixed 640×400; centered after sizing.
 
 import AppKit
@@ -36,7 +40,7 @@ final class PanelController {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = false
-        panel.hidesOnDeactivate = true
+        panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .windowBackgroundColor
 
