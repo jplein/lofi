@@ -236,7 +236,7 @@ The macOS frontend (`app/macos/`) consumes `lofi-core` as a static library throu
 
 Why a hand-written C ABI rather than uniffi:
 
-- The surface is tiny (five functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
+- The surface is tiny (nine functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
 - We control both sides — Swift calls the C functions directly, no Kotlin / Python / etc. The marginal benefit of uniffi's multi-language support is zero here.
 - The opaque-handle pattern (`EntryList`) is easier to reason about as plain Rust than as a uniffi `Object`.
 
@@ -246,13 +246,25 @@ Why a hand-written C ABI rather than uniffi:
 
 ### Ownership model — Swift produces, Rust holds
 
-Mirrors the GNOME pattern. Swift's `AppDiscovery` enumerates `.app` bundles and pushes each into a Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After the push loop the list belongs to Rust; Swift only reads back through `lofi_entries_len` / `lofi_entries_get_name`. Future MRU and matcher work happens on the Rust side and surfaces back to Swift the same way.
+Mirrors the GNOME pattern. Swift's `AppDiscovery` enumerates `.app` bundles and pushes each into a Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After the push loop the list belongs to Rust; Swift reads back through `lofi_entries_len` / `lofi_entries_get_name` / `lofi_entries_get_bundle_id` / `lofi_entries_get_category` / `lofi_entries_get_icon`, and drives fuzzy filtering by calling `lofi_entries_set_query` on each keystroke. Future MRU work happens on the Rust side and surfaces back to Swift the same way.
 
-`EntryList` is an opaque heap-allocated wrapper around `Vec<Entry>`. The Rust-side layout (the vector, the name cache for the borrow contract — see below) is intentionally not exposed in the header; cbindgen emits `typedef struct EntryList EntryList;` and nothing more.
+The nine functions in the current surface: `lofi_entries_new`, `lofi_entries_free`, `lofi_entries_push_application`, `lofi_entries_len`, `lofi_entries_get_name`, `lofi_entries_set_query`, `lofi_entries_get_bundle_id`, `lofi_entries_get_category`, `lofi_entries_get_icon`.
 
-### Borrow contract on `lofi_entries_get_name`
+The four accessors added in the search-field slice:
 
-The function returns a `const char *` borrowed out of an internal CString cache. The pointer is valid until the next mutation of the list (any `push_*` call) or `lofi_entries_free`. Callers must copy the bytes into their own storage before doing anything that could invalidate the borrow. The Swift wrapper (`RustBridge.swift::EntryList.name(at:)`) copies into a Swift `String` immediately, so application code never sees the raw pointer.
+- `lofi_entries_get_bundle_id(list, idx)` — returns the underlying `Application::desktop_id` (on macOS, the bundle identifier, e.g. `com.apple.Terminal`). Null for non-Application variants once those exist on macOS.
+- `lofi_entries_get_category(list, idx)` — returns one of five stable English strings (`"Application"`, `"Window"`, `"Workspace"`, `"Command"`, `"PowerCommand"`). Chosen over exposing the `EntryKind` discriminant because a stable string is cheaper across the FFI boundary than threading an enum value plus a Swift-side translation table; localization, if needed, can come later as a UI override.
+- `lofi_entries_get_icon(list, idx)` — returns the `Application::icon` payload (`Option<String>`) as a `const char *` or null. On macOS this is the `.app` bundle path that Swift then resolves via `NSWorkspace.shared.icon(forFile:)` — same icon-identifier-not-bytes rule as GNOME's themed-icon names.
+
+`lofi_entries_set_query(list, query)` recomputes the filter. A null `query` clears the filter (identity passthrough); a non-null UTF-8 `query` is whitespace-tokenized and intersected against each entry's per-variant haystack, exactly matching `matcher::search`'s semantics. After `set_query` returns, `lofi_entries_len` and every `get_*` accessor read through the filter — Swift's table view sees a contiguous, post-filter list and doesn't need to know which underlying indices survived.
+
+`EntryList` is an opaque heap-allocated wrapper around `Vec<Entry>`. The Rust-side layout (the vector, the per-accessor `CString` caches for the borrow contract, the current query string, the optional filter index vector — see below) is intentionally not exposed in the header; cbindgen emits `typedef struct EntryList EntryList;` and nothing more.
+
+### Borrow contract on the `get_*` accessors
+
+Every `lofi_entries_get_*` function (`_name`, `_bundle_id`, `_category`, `_icon`) returns a `const char *` borrowed out of a per-accessor `CString` cache held inside `EntryList`. The pointer is valid until the next mutating call on the list — any `push_*`, `lofi_entries_set_query`, or `lofi_entries_free`. Callers must copy the bytes into their own storage before doing anything that could invalidate the borrow. The Swift wrapper (`RustBridge.swift::EntryList.name(at:)` and the parallel `bundleId` / `category` / `icon` accessors) copies into a Swift `String` immediately, so application code never sees the raw pointer.
+
+`set_query` is on the invalidation list — not on the `push_*` list — for a specific reason: the cached `CString`s key off filtered indices, and recomputing the filter can change which underlying entry sits at a given index (or remove an index entirely). A pointer handed out before `set_query` may, after the call, refer to a slot whose `CString` has been dropped because the entry is no longer reachable through the filter. Rather than try to detect which subset of cached pointers survives a query change, every cache clears together on any mutation. The Swift side already copies eagerly, so this conservative invalidation costs nothing in practice and keeps the contract trivially statable: "no mutating call between a `get_*` and the read of its bytes."
 
 ### `desktop_id` policy on macOS (temporary)
 

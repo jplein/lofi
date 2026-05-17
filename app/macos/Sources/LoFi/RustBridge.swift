@@ -75,4 +75,54 @@ final class EntryList {
         }
         return String(cString: cstr)
     }
+
+    /// Set the active fuzzy-search query. An empty string clears the
+    /// filter (`count` goes back to the unfiltered total). Matches the
+    /// Rust contract: whitespace-tokenized, case-insensitive,
+    /// intersection semantics; same predicate the GNOME side uses.
+    ///
+    /// Discardable — the only failure mode the Rust side reports is
+    /// "list pointer was null" (impossible here, we own it) or "invalid
+    /// UTF-8" (impossible from a Swift `String`).
+    @discardableResult
+    func setQuery(_ query: String) -> Bool {
+        return query.withCString { qPtr in
+            lofi_entries_set_query(self.handle, qPtr)
+        }
+    }
+
+    /// Read the bundle id at `idx`. Returns `nil` when the index is out
+    /// of bounds or the entry has no bundle id (only Application entries
+    /// carry one today). The borrowed pointer is copied into a Swift
+    /// `String` immediately so the same invalidation rules as
+    /// `name(at:)` apply.
+    func bundleId(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_bundle_id(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
+    /// Read the stable English category label at `idx` (one of
+    /// `"Application"`, `"Window"`, `"Workspace"`, `"Command"`,
+    /// `"PowerCommand"`). Returns `nil` when the index is out of bounds.
+    /// Same copy-into-`String` borrow rules as `name(at:)`.
+    func category(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_category(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
+    /// Read the icon identifier at `idx` — for Application entries this
+    /// is whatever was passed as `icon` on push (macOS pushes the `.app`
+    /// bundle path). Returns `nil` when the index is out of bounds or
+    /// the entry was pushed without an icon. Same copy-into-`String`
+    /// borrow rules as `name(at:)`.
+    func icon(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_icon(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
 }

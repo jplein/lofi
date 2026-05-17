@@ -42,6 +42,10 @@ unsafe extern "C" {
     ) -> bool;
     fn lofi_entries_len(list: *const EntryList) -> usize;
     fn lofi_entries_get_name(list: *const EntryList, idx: usize) -> *const c_char;
+    fn lofi_entries_set_query(list: *mut EntryList, query: *const c_char) -> bool;
+    fn lofi_entries_get_bundle_id(list: *const EntryList, idx: usize) -> *const c_char;
+    fn lofi_entries_get_category(list: *const EntryList, idx: usize) -> *const c_char;
+    fn lofi_entries_get_icon(list: *const EntryList, idx: usize) -> *const c_char;
 }
 
 /// Push a `(name, bundle_id, icon)` triple where every string is a valid
@@ -432,6 +436,380 @@ fn borrow_lifetime_contract_copy_before_mutation() {
         assert_eq!(
             second, "Second",
             "second push should be retrievable after mutation"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+/// Test helper: set the current query on `list` via `lofi_entries_set_query`,
+/// taking ownership of the `CString` for the duration of the call.
+fn set_query(list: *mut EntryList, query: &str) -> bool {
+    let q = CString::new(query).expect("query must be valid for CString");
+    // SAFETY: `q` lives across the FFI call; the FFI is documented to copy
+    // the bytes into the list's owned `query` field before returning.
+    unsafe { lofi_entries_set_query(list, q.as_ptr()) }
+}
+
+/// Test helper: push three apps used by several of the `set_query_*` tests.
+/// The names are deliberately picked so that `"fire"` matches only `"Firefox"`
+/// and nothing else in this set (Calculator has no 'f', Terminal has no 'f').
+fn push_three_apps(list: *mut EntryList) {
+    assert!(
+        push_app(list, "Firefox", "org.mozilla.firefox", None),
+        "push Firefox should succeed"
+    );
+    assert!(
+        push_app(list, "Calculator", "com.apple.calculator", None),
+        "push Calculator should succeed"
+    );
+    assert!(
+        push_app(list, "Terminal", "com.apple.Terminal", None),
+        "push Terminal should succeed"
+    );
+}
+
+/// Read the bundle id at `idx` and return it as an owned `String`. Panics on
+/// null or non-UTF-8 — mirrors `name_at` for the new accessor.
+fn bundle_id_at(list: *const EntryList, idx: usize) -> String {
+    // SAFETY: caller is responsible for `idx` being in bounds; pointer is
+    // valid until the next mutation or free.
+    unsafe {
+        let p = lofi_entries_get_bundle_id(list, idx);
+        assert!(
+            !p.is_null(),
+            "lofi_entries_get_bundle_id returned null for in-bounds idx={idx}"
+        );
+        CStr::from_ptr(p)
+            .to_str()
+            .expect("bundle_id bytes should be UTF-8")
+            .to_owned()
+    }
+}
+
+/// Read the category at `idx` and return it as an owned `String`. Panics on
+/// null or non-UTF-8 — mirrors `name_at` for the new accessor.
+fn category_at(list: *const EntryList, idx: usize) -> String {
+    // SAFETY: caller is responsible for `idx` being in bounds.
+    unsafe {
+        let p = lofi_entries_get_category(list, idx);
+        assert!(
+            !p.is_null(),
+            "lofi_entries_get_category returned null for in-bounds idx={idx}"
+        );
+        CStr::from_ptr(p)
+            .to_str()
+            .expect("category bytes should be UTF-8")
+            .to_owned()
+    }
+}
+
+#[test]
+fn set_query_filters_to_match() {
+    // Filtering down to a single matching entry. With the three apps from
+    // `push_three_apps`, the substring "fire" only fuzzy-matches "Firefox".
+    unsafe {
+        let list = lofi_entries_new();
+        push_three_apps(list);
+
+        assert!(set_query(list, "fire"), "set_query should return true");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "len should reflect the single match for query \"fire\""
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Firefox",
+            "the surviving entry under \"fire\" should be Firefox"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn set_query_empty_restores_all() {
+    // Empty query is the passthrough case: after filtering down, setting the
+    // query back to "" must restore the original count and insertion order.
+    const EXPECTED: [&str; 3] = ["Firefox", "Calculator", "Terminal"];
+
+    unsafe {
+        let list = lofi_entries_new();
+        push_three_apps(list);
+
+        assert!(set_query(list, "fire"), "narrowing set_query should succeed");
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "sanity: \"fire\" narrows to one entry before restoring"
+        );
+
+        assert!(set_query(list, ""), "set_query(\"\") should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            EXPECTED.len(),
+            "empty query should restore the full count"
+        );
+        for (i, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                name_at(list, i),
+                *expected,
+                "empty query should restore insertion order at idx {i}"
+            );
+        }
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn set_query_intersection_semantics() {
+    // Multi-token queries require every whitespace-separated token to match.
+    // "fire" matches all three Firefox variants; "dev" only matches the
+    // entry whose haystack contains a d-e-v subsequence — "Firefox Developer
+    // Edition". The plain "Firefox" entry has bundle id "org.mozilla.firefox"
+    // (no 'd'), so it must be excluded.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(push_app(
+            list,
+            "Firefox Developer Edition",
+            "org.mozilla.firefoxdeveloperedition",
+            None,
+        ));
+        assert!(push_app(list, "Firefox", "org.mozilla.firefox", None));
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+
+        assert!(set_query(list, "fire dev"), "set_query should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "only Firefox Developer Edition should satisfy both \"fire\" and \"dev\""
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Firefox Developer Edition",
+            "the surviving entry under \"fire dev\" should be the developer edition"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn set_query_case_insensitive() {
+    // The matcher is case-insensitive (skim's `.ignore_case()`); an
+    // uppercase query must still match a mixed-case name.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Firefox", "org.mozilla.firefox", None));
+        assert!(push_app(list, "Calculator", "com.apple.calculator", None));
+
+        assert!(set_query(list, "FIRE"), "set_query should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "uppercase \"FIRE\" should match Firefox only"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Firefox",
+            "case-insensitive match should still return Firefox"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn set_query_invalidates_get_name_borrow() {
+    // The borrow contract: pointers returned by `get_*` are valid only until
+    // the next mutating call. `set_query` is a mutating call. This test
+    // documents the contract by example: take a borrow, copy the bytes out,
+    // mutate via set_query, and only then assert against the owned copy. The
+    // original pointer is NEVER dereferenced after the set_query call.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Firefox", "org.mozilla.firefox", None));
+        assert!(push_app(list, "Calculator", "com.apple.calculator", None));
+
+        let p = lofi_entries_get_name(list, 0);
+        assert!(!p.is_null(), "name at idx 0 should be non-null pre-mutation");
+
+        // Copy the bytes out BEFORE the mutating call.
+        let owned: Vec<u8> = CStr::from_ptr(p).to_bytes().to_vec();
+        assert_eq!(
+            owned, b"Firefox",
+            "copied bytes should match the pushed name verbatim"
+        );
+
+        // Mutate. After this point, `p` is no longer guaranteed valid and we
+        // do not touch it again.
+        assert!(set_query(list, "nomatch"), "set_query should succeed");
+
+        // The owned copy is independent of the list's storage and unchanged.
+        assert_eq!(
+            owned, b"Firefox",
+            "owned copy must survive set_query mutation intact"
+        );
+
+        // Sanity: the filter actually narrowed (no entry has a fuzzy match
+        // for "nomatch" — none of the names or ids contain the n-o-m-a-t-c-h
+        // subsequence).
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "query \"nomatch\" should filter out everything"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_bundle_id_round_trips() {
+    // The new get_bundle_id accessor must return the bundle id verbatim, and
+    // must return null for an out-of-bounds idx (the same null-on-OOB contract
+    // as get_name).
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Foo", "org.example.foo", None));
+
+        assert_eq!(
+            bundle_id_at(list, 0),
+            "org.example.foo",
+            "get_bundle_id should return the pushed bundle id verbatim"
+        );
+
+        const FAR_OUT_OF_BOUNDS: usize = 999;
+        let p = lofi_entries_get_bundle_id(list, FAR_OUT_OF_BOUNDS);
+        assert!(
+            p.is_null(),
+            "get_bundle_id must return null for an out-of-bounds idx"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_category_returns_application() {
+    // Application entries must report the stable category string
+    // "Application" (the plan calls out this constant for the Application
+    // variant; other variants get their own constants once they're wired up).
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Foo", "org.example.foo", None));
+
+        assert_eq!(
+            category_at(list, 0),
+            "Application",
+            "Application entries should report category \"Application\""
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_icon_returns_pushed_value() {
+    // A non-null `icon` pushed in must come back out byte-for-byte via
+    // get_icon. A null `icon` pushed in must come back as a null pointer
+    // (no silent empty-string substitution).
+    const ICON_PATH: &str = "/Applications/Foo.app";
+
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Foo", "org.example.foo", Some(ICON_PATH)));
+        assert!(push_app(list, "Bar", "org.example.bar", None));
+
+        let p0 = lofi_entries_get_icon(list, 0);
+        assert!(
+            !p0.is_null(),
+            "get_icon should return non-null for an entry pushed with a non-null icon"
+        );
+        let icon0 = CStr::from_ptr(p0)
+            .to_str()
+            .expect("icon bytes should be UTF-8");
+        assert_eq!(
+            icon0, ICON_PATH,
+            "get_icon should return the pushed icon path verbatim"
+        );
+
+        let p1 = lofi_entries_get_icon(list, 1);
+        assert!(
+            p1.is_null(),
+            "get_icon should return null for an entry pushed with a null icon"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn set_query_null_clears_filter() {
+    // A null `query` pointer is documented as equivalent to the empty string
+    // (passthrough — no filter). Symmetric with `set_query("")`.
+    unsafe {
+        let list = lofi_entries_new();
+        push_three_apps(list);
+
+        assert!(set_query(list, "fire"), "narrowing set_query should succeed");
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "sanity: \"fire\" narrows to one entry before clearing"
+        );
+
+        // Null query pointer: per the plan, must be treated as no filter.
+        let ok = lofi_entries_set_query(list, ptr::null());
+        assert!(ok, "set_query(null) should succeed and return true");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            3,
+            "null query should clear the filter, restoring all entries"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_recomputes_filter() {
+    // With a query active, pushing a new matching entry must make it visible
+    // in `len`/`get_name` without a follow-up `set_query` call. Pushing a
+    // non-matching entry must leave the visible count untouched.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Alpha", "alpha", None));
+        assert!(push_app(list, "Beta", "beta", None));
+
+        assert!(set_query(list, "ome"), "set_query should succeed");
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "neither Alpha nor Beta should match \"ome\""
+        );
+
+        // Now push a matching entry; the filter must be recomputed.
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "Chrome should appear in len after push under active query \"ome\""
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Chrome",
+            "the visible entry after push should be the freshly pushed Chrome"
         );
 
         lofi_entries_free(list);

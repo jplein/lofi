@@ -4,7 +4,7 @@ The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app
 
 ## Status
 
-Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The slice is intentionally a static list — no global hotkey, no search, no launching, no MRU yet (see *Out of scope* below).
+Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The panel now has a focused search field at the top that fuzzy-filters as the user types, and each row renders as `[icon] Name … [Category]` with the category dimmed and trailing-aligned. Still pending: no global hotkey, no launching, no MRU yet (see *Out of scope* below).
 
 ## Why a separate frontend
 
@@ -50,7 +50,7 @@ Resources/
 ```sh
 bazel build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
 bazel run   //app/macos:launch     # unzip + `open` the bundle
-bazel test  //app/core:ffi_test    # run the 12 FFI integration tests
+bazel test  //app/core:ffi_test    # run the 22 FFI integration tests
 bazel run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
 
@@ -74,27 +74,27 @@ Each cost real time to figure out the first time; each is permanent in the code 
 4. **`NSScrollView` does not auto-resize its `documentView`.** A bare `NSTableView()` set as `documentView` sits at 0×0 inside the scroll view and never asks for cell views — the table is alive (clicks select rows, the scroll wheel "scrolls") but draws nothing. `AppListController` constructs the table with an explicit non-zero `frame` and pairs it with `columnAutoresizingStyle = .uniformColumnAutoresizingStyle`.
 5. **`NSTableView.dataSource` and `.delegate` are weak.** If the only strong reference to the list controller is a local variable inside `applicationDidFinishLaunching`, the controller deallocates when that method returns and the table silently stops calling `viewFor:row:` — rows scroll and select normally because `numberOfRows` is cached, but cells render blank. `AppDelegate` keeps a strong `listController` property; do not "simplify" it away.
 6. **`??` does not fall through empty strings, only `nil`.** Some apps set `CFBundleDisplayName` to `""` rather than omitting the key, which a naive `(displayName as? String) ?? (bundleName as? String) ?? basename` accepts as a valid empty string. `AppDiscovery.discover()` uses a `nonEmpty()` helper to coerce empty-string Info.plist values to `nil` so the fallback chain works.
+7. **`panel.initialFirstResponder = searchField` must be set *before* `makeKeyAndOrderFront(_:)`.** Setting it afterwards is a silent no-op — by the time the panel orders front it has already picked a default responder, and assigning `initialFirstResponder` later does not retroactively re-route the focus. The user sees the panel appear with the cursor "in" the search field visually but typing goes nowhere. `PanelController.swift`'s init wires this up in the right order; do not move the assignment.
+8. **`NSStackView` with `.leading` alignment leaves the search field at its intrinsic narrow width.** A stack view in vertical orientation sizes its arranged subviews to their intrinsic content size on the cross axis, and `NSSearchField`'s intrinsic width is ~100pt — far narrower than the panel. The panel pins the search field's leading and trailing anchors to the stack so the field spans the full panel width.
 
 ### Bazel
 
-7. **`DEVELOPER_DIR` set by the Nix devShell points at a partial Darwin SDK** in the nix store, which doesn't contain a usable Swift toolchain. `rules_swift` walks `xcrun --find swiftc` against `DEVELOPER_DIR` and bails. `.envrc` explicitly re-exports `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` after `use flake` to override.
-8. **`apple_support` must appear above `rules_cc` in `MODULE.bazel`.** Module ordering determines toolchain registration order; if `rules_cc` registers first, rules_swift picks up the generic CC toolchain (target triple "local") and fails. Reordering is non-obvious from the error message.
-9. **`swift_interop_hint` auto-generates the Clang module map** — do not also put a hand-written `module.modulemap` in `cc_library.hdrs`. It gets included as a C header in the auto-generated map and the parser barfs on module-map syntax.
-10. **`crate_universe`'s binary targets are named `<crate>__<bin>`**, e.g. `@crates//:cbindgen__cbindgen`, not `__cli` or `__bin`. `gen_binaries` takes a list of binary names, not a `True` boolean.
-11. **cbindgen 0.29 has no `--features` CLI flag** — features are discovered by running `cargo metadata --all-features` internally. Passing `--features ffi` to the binary errors out; the right approach is to let cbindgen compute it.
+9. **`DEVELOPER_DIR` set by the Nix devShell points at a partial Darwin SDK** in the nix store, which doesn't contain a usable Swift toolchain. `rules_swift` walks `xcrun --find swiftc` against `DEVELOPER_DIR` and bails. `.envrc` explicitly re-exports `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` after `use flake` to override.
+10. **`apple_support` must appear above `rules_cc` in `MODULE.bazel`.** Module ordering determines toolchain registration order; if `rules_cc` registers first, rules_swift picks up the generic CC toolchain (target triple "local") and fails. Reordering is non-obvious from the error message.
+11. **`swift_interop_hint` auto-generates the Clang module map** — do not also put a hand-written `module.modulemap` in `cc_library.hdrs`. It gets included as a C header in the auto-generated map and the parser barfs on module-map syntax.
+12. **`crate_universe`'s binary targets are named `<crate>__<bin>`**, e.g. `@crates//:cbindgen__cbindgen`, not `__cli` or `__bin`. `gen_binaries` takes a list of binary names, not a `True` boolean.
+13. **cbindgen 0.29 has no `--features` CLI flag** — features are discovered by running `cargo metadata --all-features` internally. Passing `--features ffi` to the binary errors out; the right approach is to let cbindgen compute it.
 
 ### Temporary for this slice
 
-12. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
+14. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
 
 ## Out of scope this slice
 
 Each is a follow-up:
 
 - Global hotkey to summon the panel (requires Accessibility entitlement).
-- Search field + matcher integration.
 - MRU persistence.
 - Launching the selected app.
-- Icon rendering.
 - Window / workspace / power commands.
 - `/System/Applications` discovery.

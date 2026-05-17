@@ -1,130 +1,156 @@
-# Bazel migration — option 2 (native rules)
+# macOS UI slice: search field + icon/name/category rows
 
 ## Context
 
-The first Bazel pass wrapped `build.sh` and `run.sh` as `sh_binary` targets — a beachhead, but it bought nothing beyond a nicer command surface. This slice replaces that with real Bazel rules so we get caching, incrementality, hermeticity, and a real build graph.
+The first macOS slice landed a static list — every `.app` under `/Applications` and `~/Applications`, one column of plain text. Time to make it feel like a launcher: a search field at the top that fuzzy-filters as the user types, and rows that look like `[icon] Name … [Category]` with the category dimmed and right-aligned.
 
-Scope is **macOS only**. The Linux/GNOME build keeps its `cargo build -p lofi-gnome` path through Crane in `flake.nix`. Bazel reads `app/Cargo.lock` via `crate_universe` so dependency versions stay coherent between the two paths.
+The matcher already exists on the Rust side (`app/core/src/matcher.rs::search`) — filter-only, whitespace-tokenized, case-insensitive, intersection semantics. The icon machinery on macOS is `NSWorkspace.shared.icon(forFile:)`, which takes a `.app` bundle path and returns an `NSImage`. The category is `Entry::kind()` → `EntryKind` (Application / Window / Workspace / Command / PowerCommand); only Application surfaces in this slice but the wiring works for all.
 
-## Decisions baked in
+## Decisions
 
-- **rules_rust + crate_universe** for Rust deps. Reads `app/Cargo.lock`.
-- **rules_swift + rules_apple** for Swift and the `.app` bundle.
-- **cbindgen runs as a Bazel rule**, not via `build.rs`. The cbindgen binary itself is built from `Cargo.lock` (it's already a build-dependency of `lofi-core`).
-- **Retire `build.sh` / `run.sh` / `project.yml` / xcodegen / xcodebuild.** One front door (Bazel).
-- **No `rules_xcodeproj` yet** — opening the project in Xcode for debugging is a follow-up. Day-to-day editing happens in the editor of choice; building happens via `bazel build`.
+- **Filtering lives in Rust.** `EntryList` grows a current-query field; `lofi_entries_set_query` recomputes a filtered index vector. `len` and `get_*` accessors then read through the filter. Empty query = identity passthrough (matches existing tests' expectations).
+- **Icons travel as bundle paths through the existing `icon: Option<String>` field.** No new icon-bytes plumbing — Swift passes the `.app` URL's path as the `icon` arg to `pushApplication`; Rust stores it verbatim; `lofi_entries_get_icon` returns it; Swift resolves via `NSWorkspace`. This mirrors GNOME's "icon identifier, not bytes" rule.
+- **Category is exposed as a stable English string** (`"Application"`, `"Window"`, …) via a new `lofi_entries_get_category`. Cheaper than threading the enum discriminant + a Swift-side translation table; localization can come later as a UI-side override.
+- **Borrow contract extends to `set_query`.** Any `get_*` pointer is invalidated by the next mutating call — currently `push_*` and `free`, now also `set_query`. Document and test.
 
-## Architecture
+## Rust changes — `app/core/`
 
-### `MODULE.bazel`
+### `src/ffi/entries.rs`
 
-Add bazel_deps:
-- `rules_rust` (latest stable; check release notes for compatible version)
-- `rules_swift`
-- `rules_apple`
-- `rules_cc`
+`EntryList` gains:
+- `query: String` (empty = no filter)
+- `filter: Option<Vec<usize>>` — `Some(indices)` when a non-empty query is active, `None` for the passthrough case. Avoids reallocating an `(0..len).collect()` vector for the common no-filter case.
 
-Configure `crate_universe`:
-- `from_cargo` extension pointing at `app/Cargo.lock` and `app/Cargo.toml`
-- Generate a lockfile `MODULE.bazel.lock` plus a `Cargo.Bazel.lock` for crate_universe's regeneration step
-- Define an alias for the `cbindgen` binary so we can `bazel run @crates//:cbindgen__cli` (or whatever the conventional name is)
+Helper `EntryList::resolve(idx)` returns the underlying `entries` slot for a "filtered" index, going through `filter` when present.
 
-### `app/core/BUILD.bazel`
+`push` clears `name_cache` (existing) **and** recomputes the filter so the new entry shows up if it matches the current query.
 
-- `rust_static_library` for `lofi_core`
-  - `srcs` glob over `src/**/*.rs`
-  - `crate_features = ["ffi"]`
-  - `edition = "2024"`
-  - `deps = ["@crates//:serde", "@crates//:serde_json", "@crates//:fuzzy-matcher", "@crates//:rusqlite"]` (exact target names per crate_universe output)
-  - Skip the existing `build.rs` — cbindgen runs separately as a genrule, and Cargo build script directives don't apply under Bazel
-- `genrule` to run cbindgen
-  - `tools = ["@crates//:cbindgen__cli"]`
-  - `srcs` = `glob(["src/**/*.rs"])` + `cbindgen.toml`
-  - `outs = ["include/lofi_core.h"]`
-  - `cmd = "$(execpath @crates//:cbindgen__cli) --config $(execpath cbindgen.toml) --crate lofi-core --output $@ $(execpath src/lib.rs)"`
-- `cc_library` named `lofi_core_cc`
-  - `hdrs = [":include/lofi_core.h"]` (the genrule's output)
-  - `includes = ["include"]`
-  - `linkstatic = True`
-  - `srcs` includes the `liblofi_core.a` produced by the `rust_static_library` (via `:lofi_core.a` or a filegroup)
-- `rust_test` for `tests/ffi.rs`
-  - `crate_features = ["ffi"]`
-  - Same deps as `lofi_core` plus `lofi_core` itself
+New functions:
+- `lofi_entries_set_query(list, query) -> bool` — null query = empty (no filter). Stores the string, recomputes `filter` using the matcher. On success returns true; null `list` returns false.
+- `lofi_entries_get_bundle_id(list, idx) -> *const c_char` — returns `Application::desktop_id` (or null for non-Application variants once they exist).
+- `lofi_entries_get_category(list, idx) -> *const c_char` — returns one of the five stable strings.
+- `lofi_entries_get_icon(list, idx) -> *const c_char` — returns `Application::icon` if `Some`, null if `None`.
 
-### `app/macos/BUILD.bazel`
+Modified:
+- `lofi_entries_len`, `lofi_entries_get_name` — read through the filter when present.
 
-- `swift_library` named `LoFiLib`
-  - `srcs = glob(["Sources/LoFi/*.swift"])`
-  - `module_name = "LoFi"`
-  - `objc_copts = []` and `swiftc_inputs` if needed for the bridging header
-  - `deps = ["//app/core:lofi_core_cc"]`
-  - `swift_settings = { "OBJC_BRIDGING_HEADER": "Sources/LoFi/LoFi-Bridging-Header.h" }` (exact attr per rules_swift conventions)
-- `macos_application` named `LoFi`
-  - `bundle_id = "dev.jplein.lofi"`
-  - `infoplists = ["Resources/Info.plist"]`
-  - `entitlements = "Resources/LoFi.entitlements"`
-  - `minimum_os_version = "15.0"`
-  - `deps = [":LoFiLib"]`
-- `sh_binary` named `launch`
-  - `srcs = ["bazel/launch.sh"]` (rewrite to invoke the Bazel-built `.app` from `bazel-bin/...`)
+Each new accessor needs its own backing cache (`bundle_id_cache`, `category_cache`, `icon_cache`) to honor the borrow contract. All caches clear together on any mutation (push or set_query).
 
-### Files to delete
+### `src/matcher.rs`
 
-- `app/macos/build.sh`
-- `app/macos/run.sh`
-- `app/macos/project.yml`
-- `app/macos/bazel/build.sh` (the existing thin wrapper)
-- `app/macos/LoFi.xcodeproj` (generated; was gitignored anyway)
-- `app/core/build.rs` (only ran cbindgen)
-- `app/core/cbindgen.toml` — *keep* (Bazel cbindgen genrule still uses it)
+Factor out a tiny helper `pub(crate) fn matches(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> bool` so `set_query` in the FFI can run the same matching logic against a single entry without materializing a `Vec<&Entry>`.
 
-### Files to update
+### `src/ffi/mod.rs`
 
-- `flake.nix` — remove `xcodegen` from the Darwin devShell (no longer used). Keep `bazelisk`.
-- `app/core/Cargo.toml` — remove `cbindgen` from `[build-dependencies]` if we want a clean separation, OR keep it for the (now-defunct) build.rs and let cargo+crane ignore it. **Decision: keep** so `cargo build -p lofi-core --features ffi` still produces a header for anyone who wants to use the Cargo path (e.g. when porting to a non-Bazel environment). The Bazel build will use its own cbindgen invocation.
-- `app/core/build.rs` — keep but gate the cbindgen call so Bazel doesn't trigger it (Bazel doesn't run build.rs for the workspace-root crate; this is moot)
-- `app/macos/README.md` — rewrite the build/run section, document what changed.
-- `app/core/README.md` — note the Bazel build path.
-- `app/README.md` — note that macOS frontend is now Bazel-driven.
-- Root `README.md` — mention the Bazel build for macOS.
+Re-export the new symbols.
 
-## Build script tour for cbindgen under Bazel
+### `cbindgen.toml`
 
-cbindgen needs:
-- The crate's source tree (`src/**/*.rs`)
-- A config file (`cbindgen.toml`)
-- Knowledge of the `ffi` feature being on (cbindgen has `--features ffi` flag)
+No changes — cbindgen regenerates the header from the Rust source; Bazel's genrule picks up the new functions automatically.
 
-Output: `lofi_core.h`.
+## Rust tests — `app/core/tests/ffi.rs`
 
-The `genrule` reads sources, runs cbindgen, emits the header into Bazel's output tree. The `cc_library` exposes it to Swift via `hdrs` + `includes`.
+Add cases:
+1. `set_query_filters_to_match` — push three apps with distinct names, set_query to a substring, len returns 1, get_name returns the matching app.
+2. `set_query_empty_restores_all` — after filtering down, set_query("") restores full count and order.
+3. `set_query_intersection_semantics` — whitespace-separated tokens both required.
+4. `set_query_case_insensitive` — query matches regardless of case.
+5. `set_query_invalidates_get_name_borrow` — call get_name, copy bytes, set_query, the copy is still valid (documents the contract via use).
+6. `get_bundle_id_round_trips` — push with a known bundleId, get_bundle_id returns it.
+7. `get_category_returns_application` — Application entries return "Application".
+8. `get_icon_returns_pushed_value` — non-null pushed icon comes back; null pushed icon returns null.
+9. `set_query_null_clears_filter` — symmetric with set_query of empty string.
+10. `push_recomputes_filter` — push while a query is active, the new entry appears in len iff it matches.
+
+## Swift changes — `app/macos/Sources/LoFi/`
+
+### `AppDiscovery.swift`
+
+`DiscoveredApp` gains `bundlePath: String` (the `.app` URL's `path`).
+
+### `AppDelegate.swift`
+
+Push call becomes:
+```swift
+entries.pushApplication(name: app.name, bundleId: app.bundleId, icon: app.bundlePath)
+```
+
+### `RustBridge.swift`
+
+`EntryList` gains:
+- `setQuery(_ query: String)` → `lofi_entries_set_query`
+- `bundleId(at idx: Int) -> String?`
+- `category(at idx: Int) -> String?`
+- `icon(at idx: Int) -> String?`
+
+Same copy-into-Swift-String pattern as `name(at:)`.
+
+### `PanelController.swift`
+
+`init(content:)` becomes `init(searchField:listView:)`. Layout:
+- `NSStackView` vertical, holding `NSSearchField` on top and `NSScrollView` filling the rest.
+- `panel.initialFirstResponder = searchField` so typing starts immediately.
+
+### `AppListController.swift`
+
+Becomes the `NSSearchFieldDelegate`. Owns the `NSSearchField`. New:
+- `controlTextDidChange(_:)` calls `entries.setQuery(searchField.stringValue)` then `tableView.reloadData()`.
+- `view` getter returns the composed stack (search field + scroll view); `AppDelegate` only sees one root view.
+
+Cell rendering rewritten to show:
+- `NSImageView` (24×24, icon resolved via `NSWorkspace.shared.icon(forFile: bundlePath)`)
+- `NSTextField` (name, `.labelColor`)
+- flexible spacer
+- `NSTextField` (category, `.secondaryLabelColor` or `.tertiaryLabelColor`, smaller font, trailing-aligned)
+
+Row height bumps from 28 to ~36.
+
+## Critical files
+
+**Modify (Rust):**
+- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/entries.rs`
+- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/mod.rs`
+- `/Users/jplein/Git/jplein/lofi/app/core/src/matcher.rs`
+- `/Users/jplein/Git/jplein/lofi/app/core/tests/ffi.rs`
+
+**Modify (Swift):**
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppDiscovery.swift`
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppDelegate.swift`
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/RustBridge.swift`
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/PanelController.swift`
+- `/Users/jplein/Git/jplein/lofi/app/macos/Sources/LoFi/AppListController.swift`
+
+**README updates:**
+- `/Users/jplein/Git/jplein/lofi/app/macos/README.md` — out-of-scope list shrinks (search, icons); add a gotcha about NSSearchField first responder.
+- `/Users/jplein/Git/jplein/lofi/app/core/README.md` — FFI surface list grows.
 
 ## Verification
 
-1. `nix develop` on Darwin, then `bazel build //app/macos:LoFi` — produces `bazel-bin/app/macos/LoFi.app`.
-2. `bazel run //app/macos:launch` — opens the bundle.
-3. `bazel test //app/core:ffi_test` — runs the 12 FFI integration tests; expect all pass.
-4. Linux regression: `cargo build -p lofi-gnome` from inside the existing Crane-driven shell still succeeds (Bazel changes do not touch GNOME).
-5. Open `LoFi.app` from Finder — same UI behaviour as the xcodebuild path produced.
+1. `bazel test //app/core:ffi_test` — all old tests pass, ten new ones added pass.
+2. `bazel build //app/macos:LoFi` — succeeds.
+3. `bazel run //app/macos:launch` — panel opens with the search field focused; rows show app icons + names; "Application" appears right-aligned and dimmed.
+4. Type into the search field: list filters as expected. Typing `"saf"` shows Safari; deleting back to empty restores the full list. Multi-token `"web safari"` still matches Safari.
 
 ## Risks / gotchas
 
-1. **rusqlite-bundled compiles SQLite from C source** at build time via its build.rs. rules_rust's `cargo_build_script` machinery has to find a cc toolchain — Xcode CLT should provide it on macOS, but the cross-platform-target dance (`x86_64-apple-darwin` vs `aarch64-apple-darwin`) sometimes trips it.
-2. **rules_apple version drift** — code signing defaults have changed between minor versions. With `LoFi.entitlements` empty and `LSUIElement=YES`, we're not exercising the harder cases, but pin the version.
-3. **edition = "2024"** — confirm the chosen `rules_rust` version supports edition 2024 (introduced in Rust 1.85). Older rules_rust versions cap at 2021.
-4. **cbindgen's `--features` arg** must be plumbed through so the FFI module is visible to the parser. The current build.rs handles this implicitly via cargo's `CARGO_FEATURE_FFI`; the Bazel genrule must pass it explicitly.
-5. **Bridging header path** — Swift sees Rust types via `LoFi-Bridging-Header.h`, which `#include "lofi_core.h"`. The cc_library's `includes` attribute has to put the genrule's output dir on the search path so `#include "lofi_core.h"` resolves.
+1. **`NSSearchField`'s built-in cancel button** can fight panel theming. Settle for the system default look in this slice.
+2. **First responder under a borderless `.nonactivatingPanel`** — `panel.initialFirstResponder = searchField` needs to be set before `makeKeyAndOrderFront`.
+3. **The borrow contract grows.** `lofi_entries_set_query` invalidates all in-flight `get_*` pointers. The Swift wrapper copies into `String` immediately, so this is fine in practice — but it's worth a clear note in the FFI module doc.
+4. **`NSWorkspace.icon(forFile:)` is synchronous** and may hit disk. For 50 apps on first paint it's fine; revisit if the list grows past hundreds.
+5. **Filter recomputation on push** — currently academic (all pushes happen before any set_query) but the code path has to be right for the eventual async-discovery slice.
 
 ## Workflow status
 
-- [x] MODULE.bazel + crate_universe wiring (versions pinned against actual BCR registry)
-- [x] app/core/BUILD.bazel (rust_static_library + cbindgen genrule + cc_library + swift_interop_hint + rust_test)
-- [x] app/macos/BUILD.bazel (swift_library + macos_application + launch)
-- [x] Delete script-driven path (build.sh, run.sh, project.yml; xcodegen removed from flake)
-- [x] Verify: `bazel build //app/macos:LoFi` (succeeds), `bazel run //app/macos:launch` (panel renders with 51 apps), `bazel test //app/core:ffi_test` (12/12 pass)
-- [x] README updates (root, app/, app/core/, app/macos/)
+- [x] Plan written
+- [x] Test-writer pass 1 — 10 new FFI tests added to `tests/ffi.rs`
+- [x] Coder pass 1 — Rust FFI (set_query + 3 accessors), Swift UI (search field, icon/name/category rows), `bazel build //app/macos:LoFi` green; `bazel test //app/core:ffi_test` 21/22 (one fixture false-positive)
+- [x] Test-writer pass 2 — fixed `push_recomputes_filter` fixture (bundle IDs no longer contain `com.example`, removing the accidental `o-m-e` subsequence match)
+- [x] Coder pass 2 — `bazel test //app/core:ffi_test` 22/22 ✅, `bazel build //app/macos:LoFi` ✅
+- [x] Reviewer pass — approved with notes (all notes were README staleness, fixed in the next step)
+- [x] Technical-writer pass — `app/macos/README.md` and `app/core/README.md` updated: status paragraph, gotchas (initial-first-responder, stack-width pin), FFI surface count (5 → 9), borrow contract extended to include `set_query`, test count (12 → 22)
 
-Remaining (not blocking this slice):
-- Linux GNOME regression check: `cargo build -p lofi-gnome` from inside the Linux Crane shell still succeeds. Not verifiable from the macOS environment; flag for the next time the user is on Linux.
-- `DEVELOPER_DIR` override in `.envrc` so Bazel doesn't pick up the Nix-provided partial SDK. (Done.)
-- ~~Optional follow-up slice: `rules_xcodeproj` to regenerate a debuggable Xcode project from the Bazel graph.~~ Done — `bazel run //app/macos:xcodeproj` writes `app/macos/LoFi.xcodeproj/`; gitignored; rules_xcodeproj 4.1.0 pinned in MODULE.bazel.
+Outstanding (minor, non-blocking; flagged by technical-writer):
+- macOS README Layout block (`AppListController.swift` description) still says "NSTableView data source + delegate" — also now the `NSSearchFieldDelegate`.
+- macOS README "Why Swift drives discovery and Rust holds the list" still lists only `lofi_entries_len` / `lofi_entries_get_name` for the readback path — also `get_bundle_id`, `get_category`, `get_icon` now.
+
+These are documentation-symmetry items; the substance is captured elsewhere.

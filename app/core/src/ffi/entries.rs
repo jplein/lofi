@@ -1,45 +1,99 @@
-//! `EntryList` C-ABI: an opaque heap-allocated `Vec<Entry>` plus a small name
-//! cache that backs `lofi_entries_get_name`'s borrow contract.
+//! `EntryList` C-ABI: an opaque heap-allocated `Vec<Entry>` plus small per-
+//! accessor caches that back the `lofi_entries_get_*` borrow contracts and an
+//! optional fuzzy-filter index built from a current query.
 //!
 //! ## Borrow contract
 //!
-//! `lofi_entries_get_name(list, idx)` returns a `*const c_char` that the
-//! caller may read until the next mutation of the list (any `push_*` call)
-//! or `lofi_entries_free`. Callers (Swift, in particular) must copy the
-//! bytes into their own storage before doing anything else with the list.
+//! Every `lofi_entries_get_*(list, idx)` returns a `*const c_char` that the
+//! caller may read until the next mutation of the list. Mutations are:
+//! - any `lofi_entries_push_*` call,
+//! - `lofi_entries_set_query` (it can shuffle the filter and invalidates the
+//!   meaning of every previously-handed-out pointer), and
+//! - `lofi_entries_free`.
 //!
-//! The cache is a `RefCell<Vec<Option<CString>>>` parallel to `entries`. We
-//! lazily fill slot `idx` on demand and clear the whole cache on every
-//! `push_*`. The cache lives behind `RefCell` rather than raw `UnsafeCell`
-//! because every entry into Rust from the FFI is single-threaded per call by
-//! contract; the only `RefCell` borrow we take is a short `borrow_mut()`
-//! confined to a single FFI call, so there is no reentrancy hazard.
+//! Callers (Swift, in particular) must copy the bytes into their own storage
+//! before doing anything else with the list.
+//!
+//! Each cache is a `RefCell<Vec<Option<CString>>>` keyed on the **underlying**
+//! `entries` index (not the filtered index — see `EntryList::resolved`). We
+//! lazily fill slot `i` on demand and clear the whole cache on every mutation.
+//! The cache lives behind `RefCell` rather than raw `UnsafeCell` because every
+//! entry into Rust from the FFI is single-threaded per call by contract; the
+//! only `RefCell` borrow we take is a short `borrow_mut()` confined to a
+//! single FFI call, so there is no reentrancy hazard.
+//!
+//! ## Filtering
+//!
+//! `query` is the active search string. `filter` is `None` when the query is
+//! empty (or whitespace-only) — that's the passthrough case. When non-empty,
+//! `filter` is `Some(indices)` where each index points into `entries`. The
+//! filter is recomputed on every mutation that could change membership: a
+//! `push_*` (the new entry may or may not match the active query) and a
+//! `set_query` (the predicate itself changed).
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::{Application, Entry};
+use fuzzy_matcher::skim::SkimMatcherV2;
 
-/// Opaque handle owning a vector of `Entry` values. Construction is via
-/// `lofi_entries_new`; teardown is via `lofi_entries_free`. The Rust-side
-/// layout is intentionally not exposed to C — cbindgen emits this as an
-/// opaque forward declaration.
+use crate::matcher;
+use crate::{Application, Entry, EntryKind};
+
+/// Stable English category label for `EntryKind::Application`. The UI displays
+/// these as-is; localization is a UI-layer concern.
+const CATEGORY_APPLICATION: &str = "Application";
+/// Stable English category label for `EntryKind::Window`.
+const CATEGORY_WINDOW: &str = "Window";
+/// Stable English category label for `EntryKind::Workspace`.
+const CATEGORY_WORKSPACE: &str = "Workspace";
+/// Stable English category label for `EntryKind::Command`.
+const CATEGORY_COMMAND: &str = "Command";
+/// Stable English category label for `EntryKind::PowerCommand`.
+const CATEGORY_POWER_COMMAND: &str = "PowerCommand";
+
+/// Opaque handle owning a vector of `Entry` values plus a current query and
+/// per-accessor caches. Construction is via `lofi_entries_new`; teardown is
+/// via `lofi_entries_free`. The Rust-side layout is intentionally not exposed
+/// to C — cbindgen emits this as an opaque forward declaration.
 pub struct EntryList {
     entries: Vec<Entry>,
+    /// Current search string. Empty (or whitespace-only) means "no filter".
+    /// Stored as an owned `String` so the FFI's borrowed `*const c_char` does
+    /// not have to outlive the call.
+    query: String,
+    /// `None` when `query` is the passthrough case (empty / whitespace-only);
+    /// `Some(indices)` when a real filter is active. Each entry indexes into
+    /// `entries`. Built by `recompute_filter`.
+    filter: Option<Vec<usize>>,
     /// Lazily-built C strings backing the pointers returned by
-    /// `lofi_entries_get_name`. Indexed parallel to `entries`. Cleared
-    /// whenever the list mutates so a stale pointer (already a no-no per the
-    /// borrow contract) cannot point into freed memory either.
+    /// `lofi_entries_get_name`. Indexed parallel to `entries` (NOT to
+    /// `filter`). Cleared on every mutation.
     name_cache: RefCell<Vec<Option<CString>>>,
+    /// Parallel to `name_cache`; backs `lofi_entries_get_bundle_id`.
+    bundle_id_cache: RefCell<Vec<Option<CString>>>,
+    /// Parallel to `name_cache`; backs `lofi_entries_get_category`. Each slot
+    /// caches the C-string form of the entry's stable English category label.
+    category_cache: RefCell<Vec<Option<CString>>>,
+    /// Parallel to `name_cache`; backs `lofi_entries_get_icon`. A `None` slot
+    /// here means "not yet cached"; the wrapped `Option<CString>` is itself
+    /// `None` when the underlying entry has no icon (we encode "no icon" via
+    /// a `None` *value* and a `Some` cache slot, distinguishing it from "not
+    /// yet computed").
+    icon_cache: RefCell<Vec<Option<Option<CString>>>>,
 }
 
 impl EntryList {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
+            query: String::new(),
+            filter: None,
             name_cache: RefCell::new(Vec::new()),
+            bundle_id_cache: RefCell::new(Vec::new()),
+            category_cache: RefCell::new(Vec::new()),
+            icon_cache: RefCell::new(Vec::new()),
         }
     }
 
@@ -48,7 +102,62 @@ impl EntryList {
         // Any cached `CString` is suspect once the underlying `Vec<Entry>`
         // has moved (a reallocation could change every `&str` source); clear
         // wholesale rather than try to preserve indices.
+        self.clear_caches();
+        // The new entry may or may not pass the active query; rebuild the
+        // filter so it shows up in `len`/`get_*` only when it should.
+        self.recompute_filter();
+    }
+
+    /// Map a filtered index (the index callers pass to `get_*`) to the
+    /// underlying `entries` index. Returns `None` if the filtered index is
+    /// out of bounds — that's how every accessor signals null.
+    fn resolved(&self, filtered_idx: usize) -> Option<usize> {
+        match &self.filter {
+            Some(indices) => indices.get(filtered_idx).copied(),
+            None => {
+                if filtered_idx < self.entries.len() {
+                    Some(filtered_idx)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Rebuild `filter` from `entries` + `query`. Empty / whitespace-only
+    /// query becomes the passthrough case (`filter = None`). Non-empty query
+    /// is tokenized on whitespace; every entry whose haystack matches every
+    /// token (intersection semantics) ends up in the filter index vector.
+    fn recompute_filter(&mut self) {
+        if self.query.trim().is_empty() {
+            self.filter = None;
+            return;
+        }
+        let tokens: Vec<&str> = self.query.split_whitespace().collect();
+        let matcher = SkimMatcherV2::default().ignore_case();
+        let indices: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                if matcher::matches(e, &tokens, &matcher) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.filter = Some(indices);
+    }
+
+    /// Clear every per-accessor cache. Called from every mutation so a stale
+    /// pointer (already a no-no per the borrow contract) cannot point into
+    /// freed or relocated memory either.
+    fn clear_caches(&mut self) {
         self.name_cache.borrow_mut().clear();
+        self.bundle_id_cache.borrow_mut().clear();
+        self.category_cache.borrow_mut().clear();
+        self.icon_cache.borrow_mut().clear();
     }
 }
 
@@ -93,6 +202,11 @@ pub unsafe extern "C" fn lofi_entries_free(list: *mut EntryList) {
 /// `icon` may be null to mean "no icon"; the resulting `Application::icon`
 /// is `None`. A non-null `icon` that is invalid UTF-8 is rejected (strict
 /// rather than silent-`None` so a Swift bug is easier to spot).
+///
+/// A successful push invalidates every pointer previously returned by
+/// `lofi_entries_get_*` (the borrow contract). It also recomputes the filter
+/// against the active query so the new entry appears in `len`/`get_*` only
+/// when it matches.
 ///
 /// # Safety
 ///
@@ -141,9 +255,58 @@ pub unsafe extern "C" fn lofi_entries_push_application(
     true
 }
 
-/// Return the number of entries currently in `list`. A null `list` returns
-/// `0` (rather than crashing) so a defensive Swift caller can use the same
-/// shape for both initialized and not-yet-initialized handles.
+/// Set the active search query. The list is filtered using whitespace-
+/// tokenized, case-insensitive, intersection-semantics fuzzy matching (same
+/// rules as `matcher::search`). An empty or whitespace-only query clears the
+/// filter; a null `query` pointer is also treated as "clear the filter".
+///
+/// Returns `true` on success, `false` if `list` is null or the non-null
+/// `query` pointer is invalid UTF-8.
+///
+/// Like every other mutating call, this invalidates every pointer previously
+/// returned by `lofi_entries_get_*`. Callers must copy borrowed bytes into
+/// their own storage before calling.
+///
+/// # Safety
+///
+/// `list` must be null or a pointer obtained from `lofi_entries_new`.
+/// `query` must be null or a NUL-terminated C string whose buffer remains
+/// valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_set_query(
+    list: *mut EntryList,
+    query: *const c_char,
+) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    let new_query = if query.is_null() {
+        String::new()
+    } else {
+        // SAFETY: non-null branch — caller's contract is "NUL-terminated C
+        // string". We reject invalid UTF-8 strictly.
+        match unsafe { CStr::from_ptr(query) }.to_str() {
+            Ok(s) => s.to_owned(),
+            Err(_) => return false,
+        }
+    };
+
+    // SAFETY: non-null `list` precondition; exclusive access per the
+    // single-threaded FFI contract.
+    let list_ref = unsafe { &mut *list };
+    list_ref.query = new_query;
+    list_ref.recompute_filter();
+    // set_query is a mutating call — any pointers we handed out previously
+    // are no longer valid.
+    list_ref.clear_caches();
+    true
+}
+
+/// Return the number of entries currently visible in `list` — i.e. the number
+/// of entries that pass the active filter (or `entries.len()` when no filter
+/// is active). A null `list` returns `0` (rather than crashing) so a
+/// defensive Swift caller can use the same shape for both initialized and
+/// not-yet-initialized handles.
 ///
 /// # Safety
 ///
@@ -154,15 +317,19 @@ pub unsafe extern "C" fn lofi_entries_len(list: *const EntryList) -> usize {
         return 0;
     }
     // SAFETY: non-null `list` per the precondition.
-    unsafe { (*list).entries.len() }
+    let list_ref = unsafe { &*list };
+    match &list_ref.filter {
+        Some(v) => v.len(),
+        None => list_ref.entries.len(),
+    }
 }
 
 /// Return a borrowed pointer to the entry-at-`idx`'s display name.
 ///
-/// The returned pointer is valid until the next mutation of the list (any
-/// `push_*` call) or `lofi_entries_free`. Callers must copy before doing
-/// anything that could mutate or free the list. See the module-level borrow
-/// contract.
+/// `idx` is the *filtered* index (0..len()). The returned pointer is valid
+/// until the next mutation of the list (any `push_*` or `set_query` call) or
+/// `lofi_entries_free`. Callers must copy before doing anything that could
+/// mutate or free the list. See the module-level borrow contract.
 ///
 /// Returns null when `list` is null or `idx >= len`.
 ///
@@ -170,26 +337,29 @@ pub unsafe extern "C" fn lofi_entries_len(list: *const EntryList) -> usize {
 ///
 /// `list` must be null or a valid `EntryList` pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lofi_entries_get_name(list: *const EntryList, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lofi_entries_get_name(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
     if list.is_null() {
         return ptr::null();
     }
     // SAFETY: non-null `list` per the precondition.
     let list_ref = unsafe { &*list };
-    if idx >= list_ref.entries.len() {
+    let Some(real_idx) = list_ref.resolved(idx) else {
         return ptr::null();
-    }
+    };
 
     let mut cache = list_ref.name_cache.borrow_mut();
     if cache.len() < list_ref.entries.len() {
         cache.resize(list_ref.entries.len(), None);
     }
-    if cache[idx].is_none() {
+    if cache[real_idx].is_none() {
         // `Entry::name()` returns the in-memory display name. We copy it
         // into a `CString` once and stash it in the cache slot; the pointer
         // we hand back lives inside `list_ref` and is therefore valid for
         // the documented borrow lifetime.
-        let name = list_ref.entries[idx].name();
+        let name = list_ref.entries[real_idx].name();
         let Ok(cstring) = CString::new(name) else {
             // `Entry::name()` returning a string containing an interior NUL
             // is unexpected — `Application::name` is built from a `&str`
@@ -198,9 +368,169 @@ pub unsafe extern "C" fn lofi_entries_get_name(list: *const EntryList, idx: usiz
             // out with null rather than panic.
             return ptr::null();
         };
-        cache[idx] = Some(cstring);
+        cache[real_idx] = Some(cstring);
     }
-    cache[idx]
+    cache[real_idx]
         .as_ref()
         .map_or(ptr::null(), |s| s.as_ptr())
+}
+
+/// Return a borrowed pointer to the entry-at-`idx`'s bundle id. Only
+/// `Entry::Application` carries a bundle id; for every other variant this
+/// returns null. The match below is exhaustive on `Entry` so adding a new
+/// variant is a compile error until this function is updated.
+///
+/// `idx` is the *filtered* index. Borrow lifetime: same as `get_name`.
+///
+/// Returns null when `list` is null, `idx >= len`, or the entry has no bundle
+/// id (non-Application variants).
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_bundle_id(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
+    if list.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(real_idx) = list_ref.resolved(idx) else {
+        return ptr::null();
+    };
+
+    // Read the value the cache will hold. Non-Application variants get a
+    // null pointer right back; only Application carries a bundle id today.
+    let bundle: Option<&str> = match &list_ref.entries[real_idx] {
+        Entry::Application(app) => Some(app.desktop_id.as_str()),
+        Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::Command(_)
+        | Entry::PowerCommand(_) => None,
+    };
+    let Some(bundle_str) = bundle else {
+        return ptr::null();
+    };
+
+    let mut cache = list_ref.bundle_id_cache.borrow_mut();
+    if cache.len() < list_ref.entries.len() {
+        cache.resize(list_ref.entries.len(), None);
+    }
+    if cache[real_idx].is_none() {
+        let Ok(cstring) = CString::new(bundle_str) else {
+            return ptr::null();
+        };
+        cache[real_idx] = Some(cstring);
+    }
+    cache[real_idx]
+        .as_ref()
+        .map_or(ptr::null(), |s| s.as_ptr())
+}
+
+/// Return a borrowed pointer to the entry-at-`idx`'s stable English category
+/// label — one of `"Application"`, `"Window"`, `"Workspace"`, `"Command"`,
+/// `"PowerCommand"`. The UI displays these as-is; localization is a UI-layer
+/// concern.
+///
+/// `idx` is the *filtered* index. Borrow lifetime: same as `get_name`.
+///
+/// Returns null when `list` is null or `idx >= len`.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_category(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
+    if list.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(real_idx) = list_ref.resolved(idx) else {
+        return ptr::null();
+    };
+
+    let label: &str = match list_ref.entries[real_idx].kind() {
+        EntryKind::Application => CATEGORY_APPLICATION,
+        EntryKind::Window => CATEGORY_WINDOW,
+        EntryKind::Workspace => CATEGORY_WORKSPACE,
+        EntryKind::Command => CATEGORY_COMMAND,
+        EntryKind::PowerCommand => CATEGORY_POWER_COMMAND,
+    };
+
+    let mut cache = list_ref.category_cache.borrow_mut();
+    if cache.len() < list_ref.entries.len() {
+        cache.resize(list_ref.entries.len(), None);
+    }
+    if cache[real_idx].is_none() {
+        let Ok(cstring) = CString::new(label) else {
+            return ptr::null();
+        };
+        cache[real_idx] = Some(cstring);
+    }
+    cache[real_idx]
+        .as_ref()
+        .map_or(ptr::null(), |s| s.as_ptr())
+}
+
+/// Return a borrowed pointer to the entry-at-`idx`'s icon identifier. For
+/// `Entry::Application` this is the `icon` field as pushed in (or null when
+/// `None`); for every other variant the result is null today. (When Window
+/// etc. land, the match here grows to return their icon field analogously.)
+///
+/// `idx` is the *filtered* index. Borrow lifetime: same as `get_name`.
+///
+/// Returns null when `list` is null, `idx >= len`, or the entry has no icon.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_icon(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
+    if list.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(real_idx) = list_ref.resolved(idx) else {
+        return ptr::null();
+    };
+
+    // Exhaustive match so future variants are a compile error until this is
+    // updated. Only Application carries a caller-supplied icon string today.
+    let icon: Option<&str> = match &list_ref.entries[real_idx] {
+        Entry::Application(app) => app.icon.as_deref(),
+        Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::Command(_)
+        | Entry::PowerCommand(_) => None,
+    };
+
+    let mut cache = list_ref.icon_cache.borrow_mut();
+    if cache.len() < list_ref.entries.len() {
+        cache.resize(list_ref.entries.len(), None);
+    }
+    if cache[real_idx].is_none() {
+        // Outer `Some` means "we've computed this"; inner `Option<CString>`
+        // distinguishes "icon present" from "no icon". This lets us return a
+        // stable null for absent icons without recomputing every call.
+        let computed = match icon {
+            Some(s) => CString::new(s).ok(),
+            None => None,
+        };
+        cache[real_idx] = Some(computed);
+    }
+    match &cache[real_idx] {
+        Some(Some(cs)) => cs.as_ptr(),
+        _ => ptr::null(),
+    }
 }

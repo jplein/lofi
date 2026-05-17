@@ -33,15 +33,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Gather + push happens before the panel is constructed so the
         // table view sees a fully-populated list at first paint.
         for app in AppDiscovery.discover() {
-            // Icon is intentionally `nil` this slice — `.app` icons are
-            // a future story (Application Services / NSWorkspace icon
-            // resolution). The Rust side accepts a `nil` icon as `None`.
-            _ = entries.pushApplication(name: app.name, bundleId: app.bundleId, icon: nil)
+            // Per the cross-platform contract (mirroring GNOME's "icon
+            // identifier, not bytes"), the `icon` argument is whatever
+            // identifier the platform layer needs to resolve a real icon
+            // later. On macOS that's the `.app` bundle path; the UI calls
+            // `NSWorkspace.shared.icon(forFile:)` at draw time.
+            _ = entries.pushApplication(
+                name: app.name,
+                bundleId: app.bundleId,
+                icon: app.bundlePath
+            )
         }
 
         let listController = AppListController(entries: entries)
         self.listController = listController
-        let controller = PanelController(content: listController.view)
+        let controller = PanelController(
+            searchField: listController.searchField,
+            listView: listController.listView
+        )
         panelController = controller
 
         // `LSUIElement=YES` keeps LoFi out of the Dock and forces a

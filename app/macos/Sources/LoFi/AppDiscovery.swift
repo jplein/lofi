@@ -5,18 +5,23 @@
 //
 // Out of scope this slice (each is a follow-up):
 //   - `/System/Applications` (system-provided apps).
-//   - Icon resolution.
 //   - Async / progressive enumeration.
 
 import AppKit
 import Foundation
 
-/// A `.app` bundle the user can launch. Three fields are enough for
-/// this slice — name (display), bundleId (stable identifier), and
-/// nothing else. Icons land in a later slice.
+/// A `.app` bundle the user can launch. Four fields:
+///   - `name`     — user-visible display name
+///   - `bundleId` — stable identifier (the `CFBundleIdentifier`)
+///   - `bundlePath` — the absolute filesystem path to the `.app` bundle.
+///     Passed through to the Rust side as the `icon` argument so the Swift
+///     UI layer can later resolve it via `NSWorkspace.shared.icon(forFile:)`.
+///     The Rust core treats this string as an opaque "icon identifier"; only
+///     the Swift UI is allowed to interpret it as a path.
 struct DiscoveredApp {
     let name: String
     let bundleId: String
+    let bundlePath: String
 }
 
 enum AppDiscovery {
@@ -63,7 +68,11 @@ enum AppDiscovery {
                     ?? url.deletingPathExtension().lastPathComponent
 
                 seen.insert(bundleId)
-                out.append(DiscoveredApp(name: name, bundleId: bundleId))
+                out.append(DiscoveredApp(
+                    name: name,
+                    bundleId: bundleId,
+                    bundlePath: url.path
+                ))
             }
         }
 

@@ -17,6 +17,22 @@ fn haystack(entry: &Entry) -> String {
     }
 }
 
+/// Whether a single `entry` matches every whitespace-separated token in
+/// `tokens` against its haystack (intersection / case-insensitive semantics).
+/// Factored out of `search` so the FFI layer (`lofi_entries_set_query`) can
+/// reuse the same predicate without materializing a `Vec<&Entry>`.
+///
+/// `tokens` is expected to already be tokenized by the caller (typically via
+/// `query.split_whitespace().collect::<Vec<_>>()`); `matcher` is the
+/// case-insensitive skim matcher. Both are passed in so the caller can reuse
+/// them across many entries.
+pub(crate) fn matches(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> bool {
+    let hay = haystack(entry);
+    tokens
+        .iter()
+        .all(|token| matcher.fuzzy_match(&hay, token).is_some())
+}
+
 /// Fuzzy-filter `entries` by `query`. An empty or whitespace-only query is a
 /// passthrough that returns every entry. Otherwise the query is tokenized on
 /// whitespace and every token must match the entry's haystack (intersection
@@ -32,12 +48,7 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 
     entries
         .iter()
-        .filter(|entry| {
-            let hay = haystack(entry);
-            tokens
-                .iter()
-                .all(|token| matcher.fuzzy_match(&hay, token).is_some())
-        })
+        .filter(|entry| matches(entry, &tokens, &matcher))
         .collect()
 }
 
