@@ -293,6 +293,18 @@ pub fn build(
 
     populate_list(&list_box, &state, "");
 
+    // Close when the window loses keyboard focus. This is the simplest
+    // available substitute for "don't show in Alt-Tab" on GNOME/Wayland —
+    // the window only exists while focused, so Alt-Tabbing away closes it
+    // before the switcher would even surface it. `is_visible()` guards the
+    // teardown notify (close → is_visible false → is_active notify false),
+    // preventing a redundant second close call.
+    window.connect_is_active_notify(|w| {
+        if !w.is_active() && w.is_visible() {
+            w.close();
+        }
+    });
+
     window.present();
     // Without this, the AdwApplicationWindow comes up with no focused widget
     // and the user has to click the SearchEntry before typing reaches it.
