@@ -18,7 +18,12 @@ const ICON_SIZE: i32 = 24;
 const LIST_MARGIN: i32 = 4;
 const ROW_SPACING: i32 = 8;
 const ROW_MARGIN_H: i32 = 8;
-const ROW_MARGIN_V: i32 = 4;
+// Asymmetric vertical margins (sum preserved at 8px so row height is
+// unchanged from the original 4/4 split) — the icon column's dot at the
+// bottom pulls the visual centre of mass up a hair, so we compensate by
+// pushing content down.
+const ROW_MARGIN_TOP: i32 = 6;
+const ROW_MARGIN_BOTTOM: i32 = 2;
 const RUNNING_DOT_SIZE: i32 = 6;
 const ICON_COLUMN_SPACING: i32 = 2;
 
@@ -373,8 +378,8 @@ fn build_row(entry: &Entry) -> gtk::ListBoxRow {
         .spacing(ROW_SPACING)
         .margin_start(ROW_MARGIN_H)
         .margin_end(ROW_MARGIN_H)
-        .margin_top(ROW_MARGIN_V)
-        .margin_bottom(ROW_MARGIN_V)
+        .margin_top(ROW_MARGIN_TOP)
+        .margin_bottom(ROW_MARGIN_BOTTOM)
         .build();
 
     let icon_column = gtk::Box::builder()
@@ -391,14 +396,19 @@ fn build_row(entry: &Entry) -> gtk::ListBoxRow {
     image.set_pixel_size(ICON_SIZE);
     icon_column.append(&image);
 
+    // The dot is always present at the same size so every row's icon column
+    // has identical height; only the visible styling (`.running-indicator`
+    // class) is applied for running apps. `set_visible(false)` would drop the
+    // widget from layout entirely and make rows shift height between
+    // running/non-running entries.
     let dot = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .halign(gtk::Align::Center)
         .build();
-    dot.add_css_class("running-indicator");
     dot.set_size_request(RUNNING_DOT_SIZE, RUNNING_DOT_SIZE);
-    let is_running = matches!(entry, Entry::Application(a) if a.recent_window_id.is_some());
-    dot.set_visible(is_running);
+    if matches!(entry, Entry::Application(a) if a.recent_window_id.is_some()) {
+        dot.add_css_class("running-indicator");
+    }
     icon_column.append(&dot);
 
     hbox.append(&icon_column);
