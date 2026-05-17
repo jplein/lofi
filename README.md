@@ -1,6 +1,6 @@
 # LoFi
 
-LoFi is a small launcher for GNOME and macOS.
+LoFi is a small launcher for GNOME and macOS (planned).
 
 ## Goals
 
@@ -25,11 +25,13 @@ What it can do:
     - Power management
     - Locking the screen
 
-## System requirements: macOS
-
-- macOS Tahoe
-
 ## System requirements: Linux
 
 - NixOS
 - GNOME
+
+## System requirements: macOS
+
+(Planned)
+
+- macOS Tahoe
