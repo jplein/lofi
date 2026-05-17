@@ -1,0 +1,18 @@
+## cbindgen configuration for `lofi-core`'s FFI surface.
+##
+## Why this file exists: the macOS Swift frontend consumes `lofi-core`
+## through a generated C header (`include/lofi_core.h`). `build.rs` invokes
+## cbindgen with this config whenever the `ffi` feature is on. The header
+## is gitignored — see `include/.gitignore` — so the source of truth stays
+## the Rust signatures in `src/ffi/`.
+
+language = "C"
+pragma_once = true
+# Surface doc comments on each `#[no_mangle] extern "C" fn` so the bridging
+# header is self-explanatory in Swift's quick-help.
+documentation = true
+
+# Don't chase workspace deps; `lofi-core` is the only crate whose symbols
+# we want emitted.
+[parse]
+parse_deps = false

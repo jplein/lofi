@@ -6,12 +6,30 @@ edition = "2024"
 [lib]
 name = "lofi_core"
 path = "src/lib.rs"
+# `staticlib` is what the Swift/AppKit frontend links (`liblofi_core.a` +
+# `OTHER_LDFLAGS = -llofi_core`); `rlib` is what the GNOME crate consumes via
+# workspace path dependency. Both are emitted unconditionally so the same
+# checkout builds both consumers without a feature flag toggle on the producer.
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# C-ABI FFI surface used by the macOS Swift frontend. Off by default so the
+# default `cargo test -p lofi-core` invocation does not pull cbindgen or run
+# the FFI integration tests; the macOS build script turns it on explicitly.
+ffi = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fuzzy-matcher = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+[build-dependencies]
+# Generates the C header (`include/lofi_core.h`) consumed via the Swift
+# bridging header. Only invoked when the `ffi` feature is on; otherwise
+# `build.rs` is a no-op. 0.29 is required for edition-2024
+# `#[unsafe(no_mangle)]` parsing; 0.27 silently drops those functions.
+cbindgen = "0.29"
 
 [dev-dependencies]
 tempfile = "3"

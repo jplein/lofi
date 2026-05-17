@@ -4,14 +4,14 @@ The platform-agnostic shared crate (`lofi-core`). Defines the cross-platform dat
 
 ## Why this crate exists
 
-LoFi runs on both GNOME (Rust + GTK4) and macOS (planned: Swift UI on top of a Rust core exposed via a C ABI). The two platforms share nothing at the windowing-system level, but they do share the *shape* of the things a launcher cares about: applications, windows, workspaces, commands.
+LoFi runs on both GNOME (Rust + GTK4) and macOS (Swift + AppKit on top of a Rust core exposed via a C ABI; experimental, see `app/macos/README.md`). The two platforms share nothing at the windowing-system level, but they do share the *shape* of the things a launcher cares about: applications, windows, workspaces, commands.
 
 `core` holds those shared types and nothing else. Keeping it free of platform dependencies is the whole point:
 
 - A macOS build of `core` must compile without pulling in `gtk`, `gio`, or any Linux-only crate. Otherwise the C-ABI surface for the Swift side either breaks or has to be `cfg`-forked.
 - Conversely, a GNOME build must not need anything from `objc2` or the Apple frameworks.
 
-If a type or function needs a platform crate to exist, it does not belong here. It belongs in `app/gnome/` (or the future `app/macos/`).
+If a type or function needs a platform crate to exist, it does not belong here. It belongs in `app/gnome/` or `app/macos/`.
 
 ## What belongs here
 
@@ -228,3 +228,44 @@ Display fields drift between sessions: locale changes the display name, the user
 - `serde_json` — runtime dependency now (not dev-only): the `mru` module serializes and deserializes `EntryRef` to/from the SQLite `entry_ref TEXT` column.
 - `fuzzy-matcher` — `matcher::search` (Skim-style fuzzy scoring).
 - `rusqlite` with the `bundled` feature — the `mru` module's SQLite connection. `bundled` ships SQLite as C sources inside the crate so we don't need a system `libsqlite` and `nix build` stays self-contained.
+- `cbindgen` (build-dependency only, gated on `feature = "ffi"`) — generates the C header consumed by Swift.
+
+## FFI surface (`feature = "ffi"`)
+
+The macOS frontend (`app/macos/`) consumes `lofi-core` as a static library through a C ABI. The Rust-side surface lives under `src/ffi/`; the generated C header is `include/lofi_core.h` (gitignored — Rust is the source of truth, cbindgen the regenerator).
+
+Why a hand-written C ABI rather than uniffi:
+
+- The surface is tiny (five functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
+- We control both sides — Swift calls the C functions through a bridging header, no Kotlin / Python / etc. The marginal benefit of uniffi's multi-language support is zero here.
+- The opaque-handle pattern (`EntryList`) is easier to reason about as plain Rust than as a uniffi `Object`.
+
+### Crate types
+
+`[lib] crate-type = ["staticlib", "rlib"]`. The `rlib` is what the GNOME crate (and the workspace's other consumers) link against. The `staticlib` is `liblofi_core.a`, which the macOS Xcode project links via `OTHER_LDFLAGS = -llofi_core`. Both are emitted unconditionally — adding a feature flag to gate the staticlib would only complicate the build pipeline; the unused output is cheap.
+
+### Ownership model — Swift produces, Rust holds
+
+Mirrors the GNOME pattern. Swift's `AppDiscovery` enumerates `.app` bundles and pushes each into a Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After the push loop the list belongs to Rust; Swift only reads back through `lofi_entries_len` / `lofi_entries_get_name`. Future MRU and matcher work happens on the Rust side and surfaces back to Swift the same way.
+
+`EntryList` is an opaque heap-allocated wrapper around `Vec<Entry>`. The Rust-side layout (the vector, the name cache for the borrow contract — see below) is intentionally not exposed in the header; cbindgen emits `typedef struct EntryList EntryList;` and nothing more.
+
+### Borrow contract on `lofi_entries_get_name`
+
+The function returns a `const char *` borrowed out of an internal CString cache. The pointer is valid until the next mutation of the list (any `push_*` call) or `lofi_entries_free`. Callers must copy the bytes into their own storage before doing anything that could invalidate the borrow. The Swift wrapper (`RustBridge.swift::EntryList.name(at:)`) copies into a Swift `String` immediately, so application code never sees the raw pointer.
+
+### `desktop_id` policy on macOS (temporary)
+
+On macOS we store the bundle identifier (e.g. `com.apple.Terminal`) verbatim in `Application::desktop_id`. The `.desktop`-suffix invariant from the GNOME platform layer does not apply — on macOS the field is just an opaque stable identifier used as the MRU key and the persistence handle. This is temporary in the sense that once cross-platform MRU lands we may want a more carefully namespaced key (e.g. `macos:com.apple.Terminal`), but for the first macOS slice the bundle id alone is sufficient because there's nothing else writing to the store.
+
+### `rusqlite` bundled SQLite on macOS
+
+`rusqlite`'s `bundled` feature is still on — the macOS Swift code must not also link `libsqlite3.tbd` from the macOS SDK or the link step fails with duplicate-symbol errors on `sqlite3_*`. If you ever need SQLite from Swift on macOS, do it through the Rust core, not directly.
+
+### Build script (`build.rs`)
+
+When `feature = "ffi"` is on, `build.rs` runs cbindgen and writes `include/lofi_core.h`. With the feature off it returns immediately so the GNOME build (and the default `cargo test -p lofi-core` invocation) doesn't depend on cbindgen at all.
+
+### How `cargo test -p lofi-core --features ffi` links the FFI symbols
+
+The integration test in `tests/ffi.rs` reaches each FFI function through an `extern "C"` declaration. With no Rust-side reference into `lofi_core::*`, rustc would otherwise drop the rlib from the linker's input list and the `lofi_entries_*` symbols would come out undefined. The test file pulls the rlib in explicitly with `extern crate lofi_core as _;` at the top, which is enough — no nested staticlib build, no `rustc-link-arg-tests` directive, no out-of-tree target directory. This is why the build script can stay as small as it is.

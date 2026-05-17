@@ -2,13 +2,13 @@
 
 The LoFi launcher application, written in Rust.
 
-Code in this directory (outside of `gnome/` and the future `macos/`) is shared between platforms: the core data model, fuzzy matching, configuration loading, and anything else that doesn't depend on a specific window system or desktop environment.
+Code in this directory (outside of `gnome/` and `macos/`) is shared between platforms: the core data model, fuzzy matching, configuration loading, and anything else that doesn't depend on a specific window system or desktop environment.
 
 ## Layout
 
-- `core/` — platform-agnostic shared crate (`lofi-core`). Holds the cross-platform data model (`Application`, `Window`, `Entry`, `EntryKind`, `EntryRef`), the `resolve` helper that pairs persisted references back to live entries, and `matcher::search` (Skim-style fuzzy ranking over `&[Entry]`). See `core/README.md` for the split between runtime and persistence types. No GTK/gio or other platform dependencies.
+- `core/` — platform-agnostic shared crate (`lofi-core`). Holds the cross-platform data model (`Application`, `Window`, `Entry`, `EntryKind`, `EntryRef`), the `resolve` helper that pairs persisted references back to live entries, and `matcher::search` (Skim-style fuzzy ranking over `&[Entry]`). Also exposes a C ABI (the `ffi` Cargo feature) consumed by the macOS frontend — see `core/README.md` for the runtime/persistence type split and the FFI surface.
 - `gnome/` — Linux/GNOME-specific code: the GTK4 + libadwaita launcher window (`ui`), `.desktop` enumeration (`apps`), activation via `gio_unix::DesktopAppInfo` and the extension proxy (`launch`), and the `windows` module — a blocking `zbus` client to the LoFi GNOME extension for window enumeration and focus/activation. The extension surface itself lives in `extension/gnome/`.
-- `macos/` — macOS-specific code (planned, not yet present). The macOS UI will be Swift on top of a Rust core exposed via a C ABI.
+- `macos/` — macOS-specific code (experimental). Swift + AppKit on top of `lofi-core` as a `staticlib`. First slice shows a borderless `NSPanel` listing `.app` bundles under `/Applications` and `~/Applications`. Same data-flow pattern as GNOME: the platform layer discovers and pushes into the Rust-owned entry list. See `macos/README.md`.
 
 ## Shared concerns
 

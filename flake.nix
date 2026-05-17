@@ -217,7 +217,11 @@
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         in {
           devShells.default = pkgs.mkShell {
-            nativeBuildInputs = [ rustToolchain ];
+            # `xcodegen` generates the macOS `LoFi.xcodeproj` from
+            # `app/macos/project.yml`. Swift itself is not in the shell —
+            # Nix on Darwin does not ship a usable Swift toolchain, so
+            # that comes from the user's Xcode / Command Line Tools.
+            nativeBuildInputs = [ rustToolchain pkgs.xcodegen ];
           };
         });
     in

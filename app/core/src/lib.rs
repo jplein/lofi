@@ -1,7 +1,11 @@
 pub mod commands;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod matcher;
 pub mod mru;
 pub use commands::compute_geometry;
+#[cfg(feature = "ffi")]
+pub use ffi::*;
 pub use matcher::search;
 pub use mru::{MruError, MruStore};
 

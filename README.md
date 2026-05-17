@@ -32,6 +32,8 @@ What it can do:
 
 ## System requirements: macOS
 
-(Planned)
+(Experimental)
 
-- macOS Tahoe
+- macOS Tahoe (15+)
+
+The macOS frontend at `app/macos/` is implemented but unverified end-to-end: the build pipeline (cargo + xcodegen + xcodebuild) and the Swift sources are in place, the Rust FFI integration tests pass, but the Xcode build itself has not yet been run on a Mac. When it runs, the `.app` floats an `NSPanel` listing every `.app` bundle under `/Applications` and `~/Applications`. It does not yet support search, MRU, launching, icons, or a global hotkey — see `app/macos/README.md` for the slice-by-slice rollout plan.

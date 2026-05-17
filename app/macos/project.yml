@@ -1,0 +1,65 @@
+# XcodeGen spec for the LoFi macOS app.
+#
+# Why XcodeGen: the `.xcodeproj` is generated, gitignored, and rebuilt
+# locally — the YAML here is the source of truth in the repo. That keeps
+# diffs reviewable and avoids the merge-conflict surface of checked-in
+# project files.
+
+name: LoFi
+
+options:
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  LoFi:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        # macOS Tahoe (15) — see project goals; LoFi opts in to modern AppKit.
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/LoFi.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: dev.jplein.lofi
+        SWIFT_VERSION: "5.10"
+        # cbindgen drops `lofi_core.h` into this directory.
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../core/include
+        # Bridging header exposes the C API to Swift.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/LoFi/LoFi-Bridging-Header.h
+        # Link the Rust static library. `-llofi_core` resolves to
+        # `liblofi_core.a` in one of the search paths below.
+        OTHER_LDFLAGS: -llofi_core
+        # The Rust toolchain emits the static lib under
+        # `target/aarch64-apple-darwin/<profile>/`; cargo's `release` and
+        # `debug` profiles are named differently from Xcode's, so we point
+        # at the right one per configuration.
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../target/aarch64-apple-darwin/release
+        # Allow Objective-C interop (NSPanel, NSTableView). Required for
+        # the AppKit-based UI.
+        CLANG_ENABLE_OBJC_ARC: "YES"
+      configs:
+        Debug:
+          # Cargo's "debug" profile lives in `target/<arch>/debug/`, so
+          # override the default release-only search path during local
+          # iteration.
+          LIBRARY_SEARCH_PATHS:
+            - $(SRCROOT)/../target/aarch64-apple-darwin/debug
+            - $(SRCROOT)/../target/aarch64-apple-darwin/release
+    preBuildScripts:
+      - name: Build lofi_core (Rust)
+        # Xcode Run Script Phases run with a minimal PATH that does NOT
+        # include Nix profiles; `build.sh` sets PATH explicitly before
+        # invoking cargo. `--rust-only` skips the xcodegen/xcodebuild
+        # stages so we don't recursively trigger another build.
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/build.sh" --rust-only
+        outputFiles:
+          - $(SRCROOT)/../target/aarch64-apple-darwin/release/liblofi_core.a
+          - $(SRCROOT)/../core/include/lofi_core.h
