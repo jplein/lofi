@@ -103,6 +103,10 @@ export class WindowManagerService {
         return windows.list();
     }
 
+    ListWindowsMRU(): Record<string, GLib.Variant>[] {
+        return windows.listMRU();
+    }
+
     GetActiveWindow(): Record<string, GLib.Variant> {
         return windows.active() ?? {};
     }

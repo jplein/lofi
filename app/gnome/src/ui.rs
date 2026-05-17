@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -17,6 +18,54 @@ const LIST_MARGIN: i32 = 4;
 const ROW_SPACING: i32 = 8;
 const ROW_MARGIN_H: i32 = 8;
 const ROW_MARGIN_V: i32 = 4;
+const RUNNING_DOT_SIZE: i32 = 6;
+const ICON_COLUMN_SPACING: i32 = 2;
+
+/// CSS for the running-indicator dot rendered under an Application's icon
+/// when `recent_window_id.is_some()`. `alpha(@theme_fg_color, ...)` adapts
+/// to light/dark themes; `border-radius: 9999px` forces a circle regardless
+/// of the box's actual dimensions.
+const RUNNING_DOT_CSS: &str = "\
+.running-indicator {
+    background-color: alpha(@theme_fg_color, 0.8);
+    border-radius: 9999px;
+    min-width: 6px;
+    min-height: 6px;
+}
+";
+
+/// Latch ensuring `install_styles` only registers our provider with the
+/// default display once per process. `build()` runs on every
+/// `connect_activate`, but re-registering the same provider is wasted work
+/// (and would stack identical priority entries).
+static STYLES_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Register the running-indicator CSS once per process. Called from `build()`
+/// because we need a live default `gdk::Display`, which only exists after
+/// `adw::Application::activate` fires. Guarded by `STYLES_INSTALLED` so
+/// repeat invocations are no-ops. Returns silently if there's no default
+/// display (headless tests, broken environment) — the dot just won't be
+/// styled and falls back to whatever the GTK default theme renders for an
+/// empty `gtk::Box`.
+fn install_styles() {
+    if STYLES_INSTALLED.get().is_some() {
+        return;
+    }
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    // `load_from_string` is gated behind gtk4's `v4_12` feature; we target
+    // the unfeatured baseline so use `load_from_data`, which is the same
+    // call with a different signature.
+    provider.load_from_data(RUNNING_DOT_CSS);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let _ = STYLES_INSTALLED.set(());
+}
 
 /// Internal launcher state. `entries` is the full gathered set; `visible`
 /// holds indices into `entries` in the order currently shown in the list.
@@ -29,6 +78,8 @@ struct UiState {
 /// caller hands us a fresh gather and we do not refresh it during the window's
 /// lifetime.
 pub fn build(app: &adw::Application, entries: Vec<Entry>) {
+    install_styles();
+
     let search_entry = gtk::SearchEntry::builder()
         .hexpand(true)
         .margin_top(LIST_MARGIN)
@@ -266,7 +317,12 @@ fn populate_list(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>, query: &
     ));
 }
 
-/// Build a single list row showing icon + name + kind.
+/// Build a single list row showing icon + name + kind. For running
+/// Applications (`recent_window_id.is_some()`) a small CSS-styled dot is
+/// drawn directly under the icon, mirroring the GNOME dock's
+/// running-indicator. The dot widget is always added but hidden via
+/// `set_visible(false)` for non-running entries so all rows share the same
+/// vertical layout and the icon column doesn't shift between rows.
 fn build_row(entry: &Entry) -> gtk::ListBoxRow {
     let hbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -277,13 +333,31 @@ fn build_row(entry: &Entry) -> gtk::ListBoxRow {
         .margin_bottom(ROW_MARGIN_V)
         .build();
 
+    let icon_column = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(ICON_COLUMN_SPACING)
+        .valign(gtk::Align::Center)
+        .build();
+
     let image = match entry.icon() {
         Some(s) if s.starts_with('/') => gtk::Image::from_file(Path::new(s)),
         Some(s) => gtk::Image::from_icon_name(s),
         None => gtk::Image::new(),
     };
     image.set_pixel_size(ICON_SIZE);
-    hbox.append(&image);
+    icon_column.append(&image);
+
+    let dot = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Center)
+        .build();
+    dot.add_css_class("running-indicator");
+    dot.set_size_request(RUNNING_DOT_SIZE, RUNNING_DOT_SIZE);
+    let is_running = matches!(entry, Entry::Application(a) if a.recent_window_id.is_some());
+    dot.set_visible(is_running);
+    icon_column.append(&dot);
+
+    hbox.append(&icon_column);
 
     let name_label = gtk::Label::builder()
         .label(entry.name())

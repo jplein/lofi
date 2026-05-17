@@ -1,5 +1,5 @@
 import GLib from 'gi://GLib';
-import type Meta from 'gi://Meta';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
 export type WindowDict = Record<string, GLib.Variant>;
@@ -35,25 +35,29 @@ function appIdFor(win: Meta.Window): string {
 interface AppInfo {
     name: string;
     icon: string;
+    desktop_id: string;
 }
 
 /**
- * Look up the Shell.App backing `win` and return its display name + icon.
- * Falls back to empty strings (which the Rust side coerces to `None`) when
- * Shell.WindowTracker has no app for the window — same defensive pattern as
- * `appIdFor`.
+ * Look up the Shell.App backing `win` and return its display name, icon, and
+ * canonical desktop id. Falls back to empty strings (which the Rust side
+ * coerces to `None`) when Shell.WindowTracker has no app for the window — same
+ * defensive pattern as `appIdFor`. The `desktop_id` here is the suffixed
+ * canonical form (e.g. `firefox.desktop`) suitable for direct equality against
+ * lofi-core's `Application.desktop_id`.
  */
 function resolveAppInfo(win: Meta.Window): AppInfo {
     const tracker = Shell.WindowTracker.get_default();
     const app = tracker.get_window_app(win);
     const maybeApp = app as Shell.App | null;
     if (maybeApp === null) {
-        return { name: '', icon: '' };
+        return { name: '', icon: '', desktop_id: '' };
     }
     const name = maybeApp.get_name() ?? '';
     const gicon = maybeApp.get_icon();
     const icon = gicon === null ? '' : gicon.to_string() ?? '';
-    return { name, icon };
+    const desktop_id = maybeApp.get_id() ?? '';
+    return { name, icon, desktop_id };
 }
 
 function workspaceIndex(win: Meta.Window): number {
@@ -78,6 +82,7 @@ export function serialize(win: Meta.Window): WindowDict {
         title: GLib.Variant.new_string(win.get_title() ?? ''),
         app_id: GLib.Variant.new_string(appIdFor(win)),
         app_name: GLib.Variant.new_string(info.name),
+        app_desktop_id: GLib.Variant.new_string(info.desktop_id),
         icon: GLib.Variant.new_string(info.icon),
         workspace: GLib.Variant.new_int32(workspaceIndex(win)),
         monitor: GLib.Variant.new_int32(win.get_monitor()),
@@ -96,6 +101,17 @@ export function serialize(win: Meta.Window): WindowDict {
 
 export function list(): WindowDict[] {
     return metaWindows().map(serialize);
+}
+
+/**
+ * Same shape as `list()`, but ordered most-recently-focused first — the
+ * order Alt+Tab cycles through. Driven by Mutter's per-display tab list,
+ * which is the canonical source of MRU ordering.
+ */
+export function listMRU(): WindowDict[] {
+    const display = global.display;
+    const list = display.get_tab_list(Meta.TabList.NORMAL_ALL, null);
+    return list.filter(w => !w.is_override_redirect()).map(serialize);
 }
 
 export function active(): WindowDict | null {

@@ -7,6 +7,10 @@
       <arg type="aa{sv}" name="windows" direction="out"/>
     </method>
 
+    <method name="ListWindowsMRU">
+      <arg type="aa{sv}" name="windows" direction="out"/>
+    </method>
+
     <method name="GetActiveWindow">
       <arg type="a{sv}" name="window" direction="out"/>
     </method>

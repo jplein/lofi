@@ -8,6 +8,12 @@ pub struct Application {
     pub name: String,
     pub desktop_id: String,
     pub icon: Option<String>,
+    /// Runtime-only state: when `Some(id)`, the application has at least one
+    /// open window and `id` is the most recently focused. Set by the platform
+    /// layer (`lofi-gnome::main`) after gathering windows from the extension;
+    /// not persisted, not part of `EntryRef`. `is_running` is equivalent to
+    /// `recent_window_id.is_some()`.
+    pub recent_window_id: Option<u64>,
 }
 
 /// An open window surfaced by the GNOME Shell extension over D-Bus. `app_name`
@@ -21,6 +27,13 @@ pub struct Window {
     pub app_name: Option<String>,
     pub icon: Option<String>,
     pub workspace: i32,
+    /// Canonical `.desktop`-suffixed id of the application backing this
+    /// window, as resolved by `Shell.WindowTracker.get_window_app(...).get_id()`
+    /// in the extension. `None` when the extension reported an empty string
+    /// (no Shell.App for this window — system surfaces, override-redirect
+    /// children). Used by the combine step in `lofi-gnome::main` to build the
+    /// MRU map keyed on the matching `Application.desktop_id`.
+    pub app_desktop_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,6 +98,21 @@ mod tests {
             name: name.to_string(),
             desktop_id: desktop_id.to_string(),
             icon: icon.map(str::to_string),
+            recent_window_id: None,
+        }
+    }
+
+    fn make_application_running(
+        name: &str,
+        desktop_id: &str,
+        icon: Option<&str>,
+        window_id: u64,
+    ) -> Application {
+        Application {
+            name: name.to_string(),
+            desktop_id: desktop_id.to_string(),
+            icon: icon.map(str::to_string),
+            recent_window_id: Some(window_id),
         }
     }
 
@@ -95,6 +123,7 @@ mod tests {
             app_name: app_name.map(str::to_string),
             icon: icon.map(str::to_string),
             workspace: 0,
+            app_desktop_id: None,
         }
     }
 
@@ -206,6 +235,89 @@ mod tests {
             no_icon.icon(),
             None,
             "Entry::icon should return None when the underlying Application has no icon"
+        );
+    }
+
+    #[test]
+    fn entry_application_running_round_trips() {
+        // An Application with a recent_window_id (i.e. "running") must behave
+        // identically to a non-running Application for all Entry accessors:
+        // name/icon/kind/reference. In particular, EntryRef::Application is
+        // still keyed solely by desktop_id — the runtime-only recent_window_id
+        // field must NOT affect the reference.
+        const RECENT_WINDOW_ID: u64 = 42;
+
+        let running = make_application_running(
+            "Firefox",
+            "firefox.desktop",
+            Some("firefox"),
+            RECENT_WINDOW_ID,
+        );
+        let stopped = make_application("Firefox", "firefox.desktop", Some("firefox"));
+
+        assert_eq!(
+            running.recent_window_id,
+            Some(RECENT_WINDOW_ID),
+            "make_application_running should set recent_window_id; got {:?}",
+            running.recent_window_id
+        );
+        assert_eq!(
+            stopped.recent_window_id, None,
+            "make_application should default recent_window_id to None; got {:?}",
+            stopped.recent_window_id
+        );
+
+        let running_entry = Entry::Application(running.clone());
+        let stopped_entry = Entry::Application(stopped.clone());
+
+        assert_eq!(
+            running_entry.name(),
+            stopped_entry.name(),
+            "Entry::name should be unaffected by recent_window_id; running={:?} stopped={:?}",
+            running_entry.name(),
+            stopped_entry.name()
+        );
+        assert_eq!(
+            running_entry.icon(),
+            stopped_entry.icon(),
+            "Entry::icon should be unaffected by recent_window_id; running={:?} stopped={:?}",
+            running_entry.icon(),
+            stopped_entry.icon()
+        );
+        assert_eq!(
+            running_entry.kind(),
+            stopped_entry.kind(),
+            "Entry::kind should be unaffected by recent_window_id; running={:?} stopped={:?}",
+            running_entry.kind(),
+            stopped_entry.kind()
+        );
+        assert_eq!(
+            running_entry.kind(),
+            EntryKind::Application,
+            "Entry::kind for a running Application should still be EntryKind::Application; got {:?}",
+            running_entry.kind()
+        );
+
+        // The reference must still be EntryRef::Application(desktop_id), with
+        // no influence from recent_window_id.
+        let running_ref = running_entry.reference();
+        let stopped_ref = stopped_entry.reference();
+        assert_eq!(
+            running_ref, stopped_ref,
+            "EntryRef for a running Application must equal the stopped one (recent_window_id is not part of EntryRef); running={running_ref:?} stopped={stopped_ref:?}"
+        );
+        assert_eq!(
+            running_ref,
+            EntryRef::Application("firefox.desktop".into()),
+            "EntryRef::Application should be keyed solely by desktop_id; got {running_ref:?}"
+        );
+
+        // resolve() must still find the running entry by its own reference.
+        let entries = vec![running_entry.clone()];
+        let resolved = resolve(&entries, &running_entry.reference());
+        assert!(
+            matches!(resolved, Some(r) if r == &running_entry),
+            "resolve should return Some(&running_entry) for its own reference; got {resolved:?}"
         );
     }
 

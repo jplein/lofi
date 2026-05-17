@@ -63,6 +63,7 @@ mod tests {
             name: name.into(),
             desktop_id: desktop_id.into(),
             icon: None,
+            recent_window_id: None,
         })
     }
 
@@ -75,6 +76,7 @@ mod tests {
             app_name: app_name.map(str::to_string),
             icon: None,
             workspace: 0,
+            app_desktop_id: None,
         })
     }
 

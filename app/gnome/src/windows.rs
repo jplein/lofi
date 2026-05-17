@@ -37,6 +37,16 @@ trait WindowManager {
     /// an `a{sv}` dict per window.
     fn list_windows(&self) -> zbus::Result<Vec<DbusWindow>>;
 
+    /// Same shape as `list_windows`, but ordered most-recently-focused first
+    /// (the order Alt+Tab cycles through). Backed by Mutter's per-display
+    /// tab list, which is the canonical MRU source.
+    ///
+    /// The extension exports this method as `ListWindowsMRU` (capital MRU
+    /// acronym). heck's PascalCase conversion would produce `ListWindowsMru`,
+    /// so we override the wire name explicitly to match the service.
+    #[zbus(name = "ListWindowsMRU")]
+    fn list_windows_mru(&self) -> zbus::Result<Vec<DbusWindow>>;
+
     /// Raise the window with `id` and switch to its workspace.
     fn focus_window(&self, id: u64) -> zbus::Result<()>;
 }
@@ -51,6 +61,7 @@ struct DbusWindow {
     id: u64,
     title: String,
     app_name: String,
+    app_desktop_id: String,
     icon: String,
     workspace: i32,
 }
@@ -76,19 +87,26 @@ fn map_dbus_window(w: DbusWindow) -> Window {
     } else {
         Some(w.icon)
     };
+    let app_desktop_id = if w.app_desktop_id.is_empty() {
+        None
+    } else {
+        Some(w.app_desktop_id)
+    };
     Window {
         id: w.id,
         title: w.title,
         app_name,
         icon,
         workspace: w.workspace,
+        app_desktop_id,
     }
 }
 
-/// Ask the extension for the current window list. Any D-Bus failure
-/// (connection refused, no name owner, malformed reply) yields an empty Vec
-/// after an `eprintln!`. The launcher then shows only Application entries —
-/// degraded but functional.
+/// Ask the extension for the current window list in MRU order, most recent
+/// first (the order Alt+Tab cycles through). Any D-Bus failure (connection
+/// refused, no name owner, malformed reply) yields an empty Vec after an
+/// `eprintln!`. The launcher then shows only Application entries — degraded
+/// but functional.
 pub fn gather_windows() -> Vec<Window> {
     let connection = match connect() {
         Ok(c) => c,
@@ -106,10 +124,10 @@ pub fn gather_windows() -> Vec<Window> {
         }
     };
 
-    let raw = match proxy.list_windows() {
+    let raw = match proxy.list_windows_mru() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("lofi: list_windows failed: {e}");
+            eprintln!("lofi: list_windows_mru failed: {e}");
             return Vec::new();
         }
     };

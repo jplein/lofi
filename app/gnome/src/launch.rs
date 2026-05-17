@@ -5,12 +5,21 @@ use lofi_core::Entry;
 
 use crate::windows;
 
-/// Launch the application backing `entry` via gio. Errors are logged to stderr
-/// and swallowed because there is no meaningful caller-side recovery from
-/// "the desktop file vanished between gather and click".
+/// Activate the entry. For an `Entry::Application` that has a
+/// `recent_window_id` (i.e. is currently running), focus that window over
+/// D-Bus instead of launching a fresh instance — mirroring the GNOME dock's
+/// "click running app = raise existing window" behaviour. Otherwise launch
+/// via gio. Window entries focus by id as before. Errors are logged to
+/// stderr and swallowed because there is no meaningful caller-side recovery
+/// from "the desktop file vanished between gather and click".
 pub fn activate(entry: &Entry) {
     match entry {
         Entry::Application(app) => {
+            if let Some(window_id) = app.recent_window_id {
+                windows::focus_window(window_id);
+                return;
+            }
+
             let info = match DesktopAppInfo::new(&app.desktop_id) {
                 Some(i) => i,
                 None => {

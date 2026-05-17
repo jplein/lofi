@@ -45,6 +45,7 @@ fields can be added without breaking the wire format.
 | `title`             | `s`  | Empty string if Mutter returns null.               |
 | `app_id`            | `s`  | From `Shell.WindowTracker`; empty if not resolved. |
 | `app_name`          | `s`  | Human-readable app name from `Shell.WindowTracker`; empty if unresolved. |
+| `app_desktop_id`    | `s`  | Canonical `.desktop`-suffixed id of the owning app, as returned by `Shell.App.get_id()`; empty if `Shell.WindowTracker` couldn't resolve a `Shell.App`. Same lookup as `app_id`/`app_name`, exposed as a separate field so the Rust side can match windows directly against `lofi_core::Application::desktop_id` without re-doing the `.desktop` suffix dance. |
 | `icon`              | `s`  | Freedesktop icon identifier (themed name or absolute path) from the tracked `Shell.App.get_icon()`; empty if unresolved. |
 | `workspace`         | `i`  | Workspace index, `-1` if sticky / on-all.          |
 | `monitor`           | `i`  | Monitor index.                                     |
@@ -56,7 +57,7 @@ fields can be added without breaking the wire format.
 | `fullscreen`        | `b`  |                                                    |
 | `on_all_workspaces` | `b`  | "Sticky" in mutter parlance.                       |
 
-`app_name` and `icon` are derived from the same `Shell.WindowTracker.get_window_app(win)` lookup that produces `app_id` — the canonical app-to-window mapping GNOME's own overview uses — so all three fields are populated or empty together. The launcher consumes both to render window rows that visually match their owning application without re-doing the lookup on the Rust side.
+`app_name`, `app_desktop_id`, and `icon` are derived from the same `Shell.WindowTracker.get_window_app(win)` lookup that produces `app_id` — the canonical app-to-window mapping GNOME's own overview uses — so all four fields are populated or empty together. The launcher consumes them to render window rows that visually match their owning application, and (via `app_desktop_id`) to build the app-to-most-recent-window map that powers the running-indicator dot and focus-instead-of-launch behaviour.
 
 ### Workspace dict (`a{sv}`)
 
@@ -83,7 +84,8 @@ fields can be added without breaking the wire format.
 
 Reads:
 
-- `ListWindows() -> aa{sv}` — filters out `is_override_redirect()` windows.
+- `ListWindows() -> aa{sv}` — filters out `is_override_redirect()` windows. Order is `global.get_window_actors()` order (Mutter's stacking order).
+- `ListWindowsMRU() -> aa{sv}` — same dict shape and override-redirect filter as `ListWindows`, but sorted most-recently-focused first (the order Alt+Tab cycles through). Backed by `global.display.get_tab_list(Meta.TabList.NORMAL_ALL, null)`, which is Mutter's canonical MRU source. The Rust launcher consumes this method exclusively today (see `app/gnome/src/windows.rs`); `ListWindows` is kept alongside it because the stacking-order list is a useful read for ad-hoc `gdbus` probing and any future caller that wants z-order rather than focus order.
 - `GetActiveWindow() -> a{sv}` — empty dict if no focused window.
 - `ListWorkspaces() -> aa{sv}`
 - `ListDisplays() -> aa{sv}`
