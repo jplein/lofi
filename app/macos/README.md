@@ -4,7 +4,7 @@ The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app
 
 ## Status
 
-Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The panel now has a focused search field at the top that fuzzy-filters as the user types, and each row renders as `[icon] Name … [Category]` with the category dimmed and trailing-aligned. Still pending: no global hotkey, no launching, no MRU yet (see *Out of scope* below).
+Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/System/Applications`, `/Applications`, and `~/Applications`. The panel now has a focused search field at the top that fuzzy-filters as the user types, and each row renders as `[icon] Name … [Category]` with the category dimmed and trailing-aligned. Still pending: no global hotkey, no launching, no MRU yet (see *Out of scope* below).
 
 ## Why a separate frontend
 
@@ -16,7 +16,7 @@ The two frontends share nothing at the windowing-system level, so they're separa
 
 Same pattern as `app/gnome/`: the platform layer is the gatherer, the core is the canonical store.
 
-- `AppDiscovery.discover()` walks `/Applications` and `~/Applications`, dedups by bundle identifier (first-wins), and returns a sorted list. Mirrors GNOME's `app/gnome/src/apps.rs` first-dir-wins policy.
+- `AppDiscovery.discover()` walks `/System/Applications`, `/Applications`, and `~/Applications`, dedups by bundle identifier (first-wins, in that root order so Apple's stock apps shadow any same-bundle-id third-party installs), and returns a sorted list. Mirrors GNOME's `app/gnome/src/apps.rs` first-dir-wins policy.
 - `AppDelegate` pushes each discovered `.app` into the Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After that point the list belongs to Rust; Swift only reads it back through `lofi_entries_len` / `lofi_entries_get_name`.
 
 This shape leaves the matcher, MRU, and future activation logic on the Rust side without having to expose `Application`/`Entry` as Swift types. Adding an `EntryRef`-based MRU lookup in a future slice is a Rust change, not a Swift one.
@@ -37,7 +37,7 @@ Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
   PanelController.swift NSPanel subclass + show/center
-  AppDiscovery.swift    /Applications + ~/Applications enumeration
+  AppDiscovery.swift    /System/Applications + /Applications + ~/Applications enumeration
   AppListController.swift  NSTableView data source + delegate
   RustBridge.swift      Swift wrapper around the C ABI; `import LoFiCore`
 Resources/
@@ -97,4 +97,3 @@ Each is a follow-up:
 - MRU persistence.
 - Launching the selected app.
 - Window / workspace / power commands.
-- `/System/Applications` discovery.

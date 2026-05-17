@@ -1,10 +1,10 @@
-// Enumerates installed `.app` bundles under the two user-visible
-// applications roots. Mirrors the GNOME side's "platform discovers,
-// Rust holds" data-flow: the Swift layer produces a sorted, deduped
-// list and pushes it into the Rust core (see `AppDelegate`).
+// Enumerates installed `.app` bundles under the three applications
+// roots a macOS user expects to find launchable apps in. Mirrors the
+// GNOME side's "platform discovers, Rust holds" data-flow: the Swift
+// layer produces a sorted, deduped list and pushes it into the Rust
+// core (see `AppDelegate`).
 //
 // Out of scope this slice (each is a follow-up):
-//   - `/System/Applications` (system-provided apps).
 //   - Async / progressive enumeration.
 
 import AppKit
@@ -25,18 +25,22 @@ struct DiscoveredApp {
 }
 
 enum AppDiscovery {
-    /// Walk `/Applications` and `~/Applications` for `.app` bundles and
-    /// return them deduped by bundle id (first-wins) and sorted by
-    /// lowercased name. Synchronous: the panel is shown after this
-    /// returns, so the first paint is fully populated.
+    /// Walk `/System/Applications`, `/Applications`, and `~/Applications`
+    /// for `.app` bundles and return them deduped by bundle id
+    /// (first-wins) and sorted by lowercased name. Synchronous: the
+    /// panel is shown after this returns, so the first paint is fully
+    /// populated.
     static func discover() -> [DiscoveredApp] {
         let fm = FileManager.default
 
-        // Two roots, in the order the user would expect them to win
-        // collisions: system-level `/Applications` first, then the
-        // per-user `~/Applications`. Matches the GNOME first-dir-wins
-        // policy in `app/gnome/src/apps.rs`.
+        // Three roots, in the order the user would expect them to win
+        // collisions: Apple's stock apps first (`/System/Applications`,
+        // where modern macOS puts Calculator, Safari, etc.), then the
+        // third-party install root (`/Applications`), then per-user
+        // (`~/Applications`). Matches the GNOME first-dir-wins policy
+        // in `app/gnome/src/apps.rs`.
         let roots: [URL] = [
+            URL(fileURLWithPath: "/System/Applications"),
             URL(fileURLWithPath: "/Applications"),
             fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
         ]

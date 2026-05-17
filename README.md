@@ -38,4 +38,4 @@ What it can do:
 - Xcode 26 (for the Swift toolchain)
 - Nix + direnv (provides Bazel and the Rust toolchain via the flake)
 
-The macOS frontend at `app/macos/` is built by Bazel — `rules_rust` produces `liblofi_core.a`, `rules_swift` + `rules_apple` produce `LoFi.app`. `bazel run //app/macos:launch` floats an `NSPanel` listing every `.app` bundle under `/Applications` and `~/Applications`. It does not yet support search, MRU, launching, icons, or a global hotkey — see `app/macos/README.md` for the slice-by-slice rollout plan.
+The macOS frontend at `app/macos/` is built by Bazel — `rules_rust` produces `liblofi_core.a`, `rules_swift` + `rules_apple` produce `LoFi.app`. `bazel run //app/macos:launch` floats an `NSPanel` listing every `.app` bundle under `/System/Applications`, `/Applications`, and `~/Applications`, with a fuzzy-filtering search field. It does not yet support MRU, launching, or a global hotkey — see `app/macos/README.md` for the slice-by-slice rollout plan.
