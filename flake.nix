@@ -217,16 +217,17 @@
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         in {
           devShells.default = pkgs.mkShell {
-            # `xcodegen` generates the macOS `LoFi.xcodeproj` from
-            # `app/macos/project.yml`. Swift itself is not in the shell —
-            # Nix on Darwin does not ship a usable Swift toolchain, so
-            # that comes from the user's Xcode / Command Line Tools.
-            #
             # `bazelisk` is the Bazel version dispatcher; it reads
             # `.bazelversion` at the repo root and downloads the matching
-            # Bazel release on first invocation. Darwin-only for now —
-            # the Linux GNOME crate still goes through Cargo + Crane.
-            nativeBuildInputs = [ rustToolchain pkgs.xcodegen pkgs.bazelisk ];
+            # Bazel release on first invocation. Bazel is the macOS
+            # build's single front door — `cargo` is included for
+            # editor tooling (rust-analyzer, ad-hoc one-offs), not for
+            # producing artefacts.
+            #
+            # Swift itself is not in the shell — Nix on Darwin does not
+            # ship a usable Swift toolchain, so that comes from the
+            # user's Xcode / Command Line Tools.
+            nativeBuildInputs = [ rustToolchain pkgs.bazelisk ];
           };
         });
     in

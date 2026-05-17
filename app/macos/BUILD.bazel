@@ -1,18 +1,39 @@
-# Bazel entry points for the macOS app.
+# Bazel build for the macOS frontend.
 #
-# Both targets just shell out to the canonical `build.sh` / `run.sh`
-# scripts via a thin wrapper. Bazel is the front-door driver here; the
-# real work still happens in cargo / xcodegen / xcodebuild. A future
-# slice could replace the wrappers with rules_rust + rules_apple
-# targets, but the wrap-the-script approach keeps the Cargo and Xcode
-# build paths unchanged while giving us a single `bazel run …` UX.
+# Two layers:
+#
+#   :LoFiLib       swift_library compiling Sources/LoFi/*.swift; depends
+#                  on the Clang module exposed by //app/core:lofi_core_cc
+#                  so Swift can `import LoFiCore`.
+#
+#   :LoFi          macos_application bundling the swift_library together
+#                  with Info.plist + entitlements into LoFi.app.
+#
+# `:launch` is a tiny sh_binary that opens the built bundle so
+# `bazel run //app/macos:launch` is a one-step dev cycle.
 
-sh_binary(
-    name = "build",
-    srcs = ["bazel/build.sh"],
+load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
+load("@build_bazel_rules_apple//apple:macos.bzl", "macos_application")
+
+swift_library(
+    name = "LoFiLib",
+    module_name = "LoFi",
+    srcs = glob(["Sources/LoFi/*.swift"]),
+    deps = ["//app/core:lofi_core_cc"],
+)
+
+macos_application(
+    name = "LoFi",
+    bundle_id = "dev.jplein.lofi",
+    bundle_name = "LoFi",
+    infoplists = ["Resources/Info.plist"],
+    entitlements = "Resources/LoFi.entitlements",
+    minimum_os_version = "15.0",
+    deps = [":LoFiLib"],
 )
 
 sh_binary(
     name = "launch",
     srcs = ["bazel/launch.sh"],
+    data = [":LoFi"],
 )

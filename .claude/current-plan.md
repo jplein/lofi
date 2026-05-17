@@ -1,197 +1,130 @@
-# macOS port — first slice: NSPanel + `.app` list backed by Rust core
+# Bazel migration — option 2 (native rules)
 
 ## Context
 
-LoFi today is a GNOME launcher built from a platform-clean Rust core (`app/core/`) and a GTK4/D-Bus frontend (`app/gnome/`). We are adding a Swift/AppKit macOS frontend at `app/macos/` that, eventually, will have the same behaviour as the GNOME one.
+The first Bazel pass wrapped `build.sh` and `run.sh` as `sh_binary` targets — a beachhead, but it bought nothing beyond a nicer command surface. This slice replaces that with real Bazel rules so we get caching, incrementality, hermeticity, and a real build graph.
 
-This slice is the smallest meaningful step that proves the seam: a Swift/AppKit app that renders a floating `NSPanel` showing the list of `.app` bundles discovered under `/Applications` and `~/Applications` (recursively). The **Rust core owns the canonical list**; Swift talks to it over a C ABI. The mechanics put in place here (FFI, build, panel, discovery) become the spine for future slices (search, MRU, hotkey, launching, icons).
+Scope is **macOS only**. The Linux/GNOME build keeps its `cargo build -p lofi-gnome` path through Crane in `flake.nix`. Bazel reads `app/Cargo.lock` via `crate_universe` so dependency versions stay coherent between the two paths.
 
-**Out of scope this slice** (each is a follow-up): global hotkey, search field + matcher integration, MRU persistence, launching the selected app, icon rendering, window/workspace/power commands, `/System/Applications` discovery.
+## Decisions baked in
 
-## Decisions (confirmed with user before implementation)
+- **rules_rust + crate_universe** for Rust deps. Reads `app/Cargo.lock`.
+- **rules_swift + rules_apple** for Swift and the `.app` bundle.
+- **cbindgen runs as a Bazel rule**, not via `build.rs`. The cbindgen binary itself is built from `Cargo.lock` (it's already a build-dependency of `lofi-core`).
+- **Retire `build.sh` / `run.sh` / `project.yml` / xcodegen / xcodebuild.** One front door (Bazel).
+- **No `rules_xcodeproj` yet** — opening the project in Xcode for debugging is a follow-up. Day-to-day editing happens in the editor of choice; building happens via `bazel build`.
 
-- **UI:** pure AppKit `NSTableView` (not SwiftUI in `NSHostingView`).
-- **FFI:** manual C-ABI on the existing `lofi-core` crate (not uniffi).
-- **Xcode project:** XcodeGen (YAML in git; `.xcodeproj` generated, gitignored).
-- **Direction of data flow:** Swift discovers, pushes into Rust; Rust holds the canonical entry list. Mirrors the GNOME pattern where `app/gnome/src/apps.rs` does platform discovery and `lofi-core` owns the `Vec<Application>`.
+## Architecture
 
-## Rust changes — `app/core/`
+### `MODULE.bazel`
 
-### `app/core/Cargo.toml`
-- Add `crate-type = ["staticlib", "rlib"]`.
-- Add `[features] ffi = []` (default off).
-- Add `[build-dependencies] cbindgen = "0.27"`.
+Add bazel_deps:
+- `rules_rust` (latest stable; check release notes for compatible version)
+- `rules_swift`
+- `rules_apple`
+- `rules_cc`
 
-### `app/core/build.rs` (new)
-- When the `ffi` feature is on, run cbindgen and emit `app/core/include/lofi_core.h`. Otherwise no-op.
+Configure `crate_universe`:
+- `from_cargo` extension pointing at `app/Cargo.lock` and `app/Cargo.toml`
+- Generate a lockfile `MODULE.bazel.lock` plus a `Cargo.Bazel.lock` for crate_universe's regeneration step
+- Define an alias for the `cbindgen` binary so we can `bazel run @crates//:cbindgen__cli` (or whatever the conventional name is)
 
-### `app/core/cbindgen.toml` (new)
-- C language, `#pragma once`, `lofi_` prefix, opaque pointer for `EntryList`.
+### `app/core/BUILD.bazel`
 
-### `app/core/include/` (new dir, gitignored)
-- Generated header lives here.
+- `rust_static_library` for `lofi_core`
+  - `srcs` glob over `src/**/*.rs`
+  - `crate_features = ["ffi"]`
+  - `edition = "2024"`
+  - `deps = ["@crates//:serde", "@crates//:serde_json", "@crates//:fuzzy-matcher", "@crates//:rusqlite"]` (exact target names per crate_universe output)
+  - Skip the existing `build.rs` — cbindgen runs separately as a genrule, and Cargo build script directives don't apply under Bazel
+- `genrule` to run cbindgen
+  - `tools = ["@crates//:cbindgen__cli"]`
+  - `srcs` = `glob(["src/**/*.rs"])` + `cbindgen.toml`
+  - `outs = ["include/lofi_core.h"]`
+  - `cmd = "$(execpath @crates//:cbindgen__cli) --config $(execpath cbindgen.toml) --crate lofi-core --output $@ $(execpath src/lib.rs)"`
+- `cc_library` named `lofi_core_cc`
+  - `hdrs = [":include/lofi_core.h"]` (the genrule's output)
+  - `includes = ["include"]`
+  - `linkstatic = True`
+  - `srcs` includes the `liblofi_core.a` produced by the `rust_static_library` (via `:lofi_core.a` or a filegroup)
+- `rust_test` for `tests/ffi.rs`
+  - `crate_features = ["ffi"]`
+  - Same deps as `lofi_core` plus `lofi_core` itself
 
-### `app/core/src/lib.rs`
-- Add `#[cfg(feature = "ffi")] pub mod ffi;`.
+### `app/macos/BUILD.bazel`
 
-### `app/core/src/ffi/mod.rs` and `app/core/src/ffi/entries.rs` (new)
+- `swift_library` named `LoFiLib`
+  - `srcs = glob(["Sources/LoFi/*.swift"])`
+  - `module_name = "LoFi"`
+  - `objc_copts = []` and `swiftc_inputs` if needed for the bridging header
+  - `deps = ["//app/core:lofi_core_cc"]`
+  - `swift_settings = { "OBJC_BRIDGING_HEADER": "Sources/LoFi/LoFi-Bridging-Header.h" }` (exact attr per rules_swift conventions)
+- `macos_application` named `LoFi`
+  - `bundle_id = "dev.jplein.lofi"`
+  - `infoplists = ["Resources/Info.plist"]`
+  - `entitlements = "Resources/LoFi.entitlements"`
+  - `minimum_os_version = "15.0"`
+  - `deps = [":LoFiLib"]`
+- `sh_binary` named `launch`
+  - `srcs = ["bazel/launch.sh"]` (rewrite to invoke the Bazel-built `.app` from `bazel-bin/...`)
 
-Minimum FFI surface for this slice (everything `#[no_mangle] extern "C"`):
+### Files to delete
 
-- `lofi_entries_new() -> *mut EntryList`
-- `lofi_entries_free(*mut EntryList)`
-- `lofi_entries_push_application(list: *mut EntryList, name: *const c_char, bundle_id: *const c_char, icon: *const c_char /* nullable */) -> bool`
-- `lofi_entries_len(list: *const EntryList) -> usize`
-- `lofi_entries_get_name(list: *const EntryList, idx: usize) -> *const c_char` (borrow valid until next mutation or `free`)
+- `app/macos/build.sh`
+- `app/macos/run.sh`
+- `app/macos/project.yml`
+- `app/macos/bazel/build.sh` (the existing thin wrapper)
+- `app/macos/LoFi.xcodeproj` (generated; was gitignored anyway)
+- `app/core/build.rs` (only ran cbindgen)
+- `app/core/cbindgen.toml` — *keep* (Bazel cbindgen genrule still uses it)
 
-`EntryList` is an opaque newtype wrapping `Vec<Entry>` behind a heap `Box`. `push_application` constructs `Application` from the provided UTF-8 C strings (copy in) and wraps in `Entry::Application(...)`. Null `icon` argument maps to `None`. Returns `false` if any required pointer is null or invalid UTF-8.
+### Files to update
 
-**`desktop_id` policy on macOS (temporary):** store the macOS bundle identifier (e.g. `com.apple.Terminal`) verbatim in `Application::desktop_id`. The GNOME `.desktop`-suffix invariant does not apply on macOS; the field is just an opaque stable identifier. Document in `app/core/README.md` so future MRU work revisits it.
+- `flake.nix` — remove `xcodegen` from the Darwin devShell (no longer used). Keep `bazelisk`.
+- `app/core/Cargo.toml` — remove `cbindgen` from `[build-dependencies]` if we want a clean separation, OR keep it for the (now-defunct) build.rs and let cargo+crane ignore it. **Decision: keep** so `cargo build -p lofi-core --features ffi` still produces a header for anyone who wants to use the Cargo path (e.g. when porting to a non-Bazel environment). The Bazel build will use its own cbindgen invocation.
+- `app/core/build.rs` — keep but gate the cbindgen call so Bazel doesn't trigger it (Bazel doesn't run build.rs for the workspace-root crate; this is moot)
+- `app/macos/README.md` — rewrite the build/run section, document what changed.
+- `app/core/README.md` — note the Bazel build path.
+- `app/README.md` — note that macOS frontend is now Bazel-driven.
+- Root `README.md` — mention the Bazel build for macOS.
 
-### `app/core/README.md` (update)
-Add an "FFI surface" section: the `staticlib`+`ffi` feature, the opaque-handle pattern, the push-based ownership model (Swift produces, Rust holds), and the `desktop_id`-as-bundle-id temporary policy. Also note that `rusqlite` keeps its `bundled` feature on Mac and Swift must not link `libsqlite3.tbd` (avoids duplicate-symbol errors).
+## Build script tour for cbindgen under Bazel
 
-## Swift project — `app/macos/`
+cbindgen needs:
+- The crate's source tree (`src/**/*.rs`)
+- A config file (`cbindgen.toml`)
+- Knowledge of the `ffi` feature being on (cbindgen has `--features ffi` flag)
 
-### Layout
-```
-app/macos/
-  README.md
-  project.yml                # XcodeGen spec
-  build.sh                   # cargo + xcodegen + xcodebuild
-  run.sh                     # opens the built .app
-  .gitignore                 # LoFi.xcodeproj, build/, DerivedData/
-  Sources/LoFi/
-    main.swift               # NSApplication.shared.run() boot
-    AppDelegate.swift        # creates PanelController on launch
-    PanelController.swift    # NSPanel subclass + show/hide
-    AppDiscovery.swift       # .app enumeration + Info.plist read
-    AppListController.swift  # NSTableView delegate + data source
-    RustBridge.swift         # Swift wrapper around C API
-    LoFi-Bridging-Header.h   # #include "lofi_core.h"
-  Resources/
-    Info.plist               # LSUIElement=YES, bundle id, version
-    LoFi.entitlements        # empty for now
-```
+Output: `lofi_core.h`.
 
-### `project.yml`
-- One macOS app target `LoFi`, deployment target Tahoe (macOS 15.0+).
-- `LSUIElement = YES`.
-- Header search path: `$(SRCROOT)/../core/include`.
-- Library search paths: `$(SRCROOT)/../target/aarch64-apple-darwin/release` (Release), `…/debug` (Debug).
-- `OTHER_LDFLAGS = -llofi_core`.
-- Bridging header: `Sources/LoFi/LoFi-Bridging-Header.h`.
-- Pre-build Run Script Phase invokes `../macos/build.sh --rust-only`.
-
-### `PanelController.swift` — NSPanel setup
-- Subclass `NSPanel`, style mask `[.borderless, .nonactivatingPanel]`.
-- `level = .floating`.
-- `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]`.
-- `isMovableByWindowBackground = false`, `hidesOnDeactivate = true`.
-- **Override `canBecomeKey` to return `true`** (borderless panels return false by default — this silently breaks event delivery).
-- Fixed size 640×400, centered via `self.center()` after sizing.
-- On `applicationDidFinishLaunching`: call `NSApp.activate(ignoringOtherApps: true)` then `panel.makeKeyAndOrderFront(nil)`. Without `activate`, an `LSUIElement` app starts background-only.
-
-### `AppDiscovery.swift`
-- `FileManager.default.enumerator(at:includingPropertiesForKeys:options:)` with `[.skipsPackageDescendants, .skipsHiddenFiles]`.
-- Roots: `/Applications` and `FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")`.
-- For each URL with `pathExtension == "app"`: `Bundle(url:)`, read `CFBundleDisplayName` → `CFBundleName` → basename fallback. Read `CFBundleIdentifier`; skip if absent.
-- Dedup by bundle identifier (first-wins, mirrors GNOME first-dir-wins in `app/gnome/src/apps.rs:51-119`).
-- Synchronous on launch (gather, then show panel). Async/progressive is a future slice.
-
-### `RustBridge.swift`
-- `final class EntryList` wrapping `OpaquePointer`. `init()` → `lofi_entries_new()`. `deinit` → `lofi_entries_free`.
-- `pushApplication(name:bundleId:icon:)` bridges Swift `String` via `withCString`. Optional `icon` becomes `nil` C pointer.
-- `count` and `name(at:)` mirror the C accessors. `name(at:)` copies the borrowed `*const c_char` into a Swift `String` so callers never see the borrow.
-
-### `AppListController.swift`
-- Single-column `NSTableView` inside an `NSScrollView` filling the panel `contentView`.
-- `NSTableViewDataSource.numberOfRows(in:)` reads `entryList.count`.
-- `NSTableViewDelegate.tableView(_:viewFor:row:)` returns an `NSTableCellView` with an `NSTextField` showing `entryList.name(at: row)`. No icons this slice.
-
-### `LoFi-Bridging-Header.h`
-- `#include "lofi_core.h"`.
-
-### `Info.plist`
-- `LSUIElement = YES`, bundle id `dev.jplein.lofi` (or analogous; align with `lofi-shell@jplein.dev` style).
-- `CFBundleShortVersionString` matches workspace version.
-
-### `LoFi.entitlements`
-- Empty `<dict/>` for now; entitlements come with later slices (Accessibility for global hotkey, etc.).
-
-## Build wiring
-
-### `app/macos/build.sh`
-Stages (gateable by `--rust-only`, `--no-rust`, etc.):
-1. `cargo build --release -p lofi-core --features ffi --target aarch64-apple-darwin` (from repo root).
-2. `xcodegen generate` (in `app/macos/`).
-3. `xcodebuild -scheme LoFi -configuration Debug -derivedDataPath build build`.
-
-**PATH gotcha:** Xcode Run Script Phase runs with a minimal `PATH` and won't find Nix-installed `cargo`/`cbindgen`. `build.sh` must set `PATH` explicitly (e.g. prepend `$HOME/.nix-profile/bin` and `/run/current-system/sw/bin` if present). Cover this in `app/macos/README.md`.
-
-### `flake.nix` — Darwin devShell
-Add `xcodegen` to the `aarch64-darwin` devShell's `nativeBuildInputs`. Swift itself stays out of the Nix devShell — it comes from the user's Xcode/Command Line Tools install.
-
-## READMEs (per CLAUDE.md: READMEs are source of truth)
-
-- **New** `app/macos/README.md`: layout; Swift-pushes-into-Rust data-flow rationale; XcodeGen rationale; the Nix-doesn't-provide-Swift seam; build/run; out-of-scope items; NSPanel design (style mask, `canBecomeKey` override, `NSApp.activate` requirement); the Xcode Run Script PATH gotcha.
-- **Update** `app/core/README.md`: FFI section.
-- **Update** `app/README.md`: macOS frontend exists; data flow note.
-- **Update** root `README.md`: macOS section moves from "(Planned)" to "Experimental".
-
-## Critical files
-
-**Modify:**
-- `/Users/jplein/Git/jplein/lofi/app/core/Cargo.toml`
-- `/Users/jplein/Git/jplein/lofi/app/core/src/lib.rs`
-- `/Users/jplein/Git/jplein/lofi/app/core/README.md`
-- `/Users/jplein/Git/jplein/lofi/app/README.md`
-- `/Users/jplein/Git/jplein/lofi/README.md`
-- `/Users/jplein/Git/jplein/lofi/flake.nix`
-
-**Create (Rust):**
-- `/Users/jplein/Git/jplein/lofi/app/core/build.rs`
-- `/Users/jplein/Git/jplein/lofi/app/core/cbindgen.toml`
-- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/mod.rs`
-- `/Users/jplein/Git/jplein/lofi/app/core/src/ffi/entries.rs`
-- `/Users/jplein/Git/jplein/lofi/app/core/.gitignore` (for `include/`)
-
-**Create (Swift):** see `app/macos/` tree above.
-
-## Testing strategy
-
-- **Rust:** integration tests at `app/core/tests/ffi.rs` that exercise the FFI surface from a separate `extern "C"` perspective. Cover: round-trip push + len + get_name; null-handling for the `icon` argument; null-handling for required args (returns `false`); UTF-8 invalid bytes return `false`; multiple-push ordering preserved; free does not crash.
-- **Swift:** not unit-testable without an XCTest target. Manual end-to-end run is the verification.
-- **GNOME regression:** existing tests must still pass after the `crate-type`/`feature` changes.
-
-## Risks / gotchas
-
-1. **`NSPanel.canBecomeKey` returns false** for borderless panels by default — must override. Combined with `LSUIElement=YES`, the process is background-only at launch; must call `NSApp.activate(ignoringOtherApps: true)` before showing the panel.
-2. **`rusqlite` bundled SQLite symbols** — once `lofi-core` ships as `.a` and Swift links it, Swift code must not link `libsqlite3.tbd` (duplicate symbols). Note in `app/core/README.md`.
-3. **Xcode Run Script PATH** doesn't include Nix paths. `build.sh` sets PATH; document.
-4. **`crate-type = ["staticlib", "rlib"]`** can change link behavior workspace-wide; verify GNOME build still works.
+The `genrule` reads sources, runs cbindgen, emits the header into Bazel's output tree. The `cc_library` exposes it to Swift via `hdrs` + `includes`.
 
 ## Verification
 
-1. GNOME regression: `cargo build -p lofi-gnome` on Linux still succeeds.
-2. Rust artifacts on macOS: `cargo build --release -p lofi-core --features ffi --target aarch64-apple-darwin` produces `liblofi_core.a` and `app/core/include/lofi_core.h`.
-3. FFI tests pass: `cargo test -p lofi-core --features ffi`.
-4. `./app/macos/build.sh` exits 0; `LoFi.app` exists in build output.
-5. `./app/macos/run.sh` launches: borderless floating panel centered; list shows `Safari`, `Terminal` (under `Utilities/`), `Calculator`, and any third-party apps in `~/Applications`.
-6. `Cmd-Q` exits cleanly (`lofi_entries_free` deinit path exercised).
-7. Running twice produces the same set of apps in the same order.
+1. `nix develop` on Darwin, then `bazel build //app/macos:LoFi` — produces `bazel-bin/app/macos/LoFi.app`.
+2. `bazel run //app/macos:launch` — opens the bundle.
+3. `bazel test //app/core:ffi_test` — runs the 12 FFI integration tests; expect all pass.
+4. Linux regression: `cargo build -p lofi-gnome` from inside the existing Crane-driven shell still succeeds (Bazel changes do not touch GNOME).
+5. Open `LoFi.app` from Finder — same UI behaviour as the xcodebuild path produced.
+
+## Risks / gotchas
+
+1. **rusqlite-bundled compiles SQLite from C source** at build time via its build.rs. rules_rust's `cargo_build_script` machinery has to find a cc toolchain — Xcode CLT should provide it on macOS, but the cross-platform-target dance (`x86_64-apple-darwin` vs `aarch64-apple-darwin`) sometimes trips it.
+2. **rules_apple version drift** — code signing defaults have changed between minor versions. With `LoFi.entitlements` empty and `LSUIElement=YES`, we're not exercising the harder cases, but pin the version.
+3. **edition = "2024"** — confirm the chosen `rules_rust` version supports edition 2024 (introduced in Rust 1.85). Older rules_rust versions cap at 2021.
+4. **cbindgen's `--features` arg** must be plumbed through so the FFI module is visible to the parser. The current build.rs handles this implicitly via cargo's `CARGO_FEATURE_FFI`; the Bazel genrule must pass it explicitly.
+5. **Bridging header path** — Swift sees Rust types via `LoFi-Bridging-Header.h`, which `#include "lofi_core.h"`. The cc_library's `includes` attribute has to put the genrule's output dir on the search path so `#include "lofi_core.h"` resolves.
 
 ## Workflow status
 
-- [x] Initial plan written to `.claude/current-plan.md`
-- [x] Test-writer pass 1 — 10 FFI tests
-- [x] Coder pass 1 — Rust FFI + Swift project + build wiring; 67 tests pass; macOS staticlib + header generated
-- [x] Reviewer pass — approved with minor notes (no blockers)
-- [x] Test-writer pass 2 — `extern crate lofi_core as _;` + 2 more UTF-8 tests (bundle_id, icon)
-- [x] Coder pass 2 — simplified `build.rs` (dropped nested staticlib build); 12/12 FFI tests pass
-- [x] Technical-writer pass — READMEs reconciled with the simplified build.rs; "Status: implemented but Xcode build unverified in agent env" added to macOS README
+- [x] MODULE.bazel + crate_universe wiring (versions pinned against actual BCR registry)
+- [x] app/core/BUILD.bazel (rust_static_library + cbindgen genrule + cc_library + swift_interop_hint + rust_test)
+- [x] app/macos/BUILD.bazel (swift_library + macos_application + launch)
+- [x] Delete script-driven path (build.sh, run.sh, project.yml; xcodegen removed from flake)
+- [x] Verify: `bazel build //app/macos:LoFi` (succeeds), `bazel run //app/macos:launch` (panel renders with 51 apps), `bazel test //app/core:ffi_test` (12/12 pass)
+- [x] README updates (root, app/, app/core/, app/macos/)
 
 Remaining (not blocking this slice):
-- Manual end-to-end verification: user runs `./app/macos/build.sh` and `./app/macos/run.sh` to confirm the panel renders the list.
-- GNOME regression check: user runs `cargo build -p lofi-gnome` on Linux to confirm the `crate-type = ["staticlib", "rlib"]` change didn't break the GNOME side.
-- Optional: add the cbindgen-0.29 rationale to `app/core/README.md` Dependencies line so a future version bump doesn't downgrade and silently break header generation.
+- Linux GNOME regression check: `cargo build -p lofi-gnome` from inside the Linux Crane shell still succeeds. Not verifiable from the macOS environment; flag for the next time the user is on Linux.
+- `DEVELOPER_DIR` override in `.envrc` so Bazel doesn't pick up the Nix-provided partial SDK. (Done.)
+- Optional follow-up slice: `rules_xcodeproj` to regenerate a debuggable Xcode project from the Bazel graph.

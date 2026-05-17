@@ -1,0 +1,9 @@
+# This file exists so Bazel treats `//app` as a package and can reach
+# `app/Cargo.lock` / `app/Cargo.toml` from `MODULE.bazel`'s crate_universe
+# extension. No targets are defined here — the per-crate BUILD files
+# live one level down (`//app/core`, `//app/macos`).
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])

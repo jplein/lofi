@@ -6,12 +6,13 @@
 // C API is honored by copying every name into a Swift `String` before
 // returning.
 //
-// The C functions are pulled in via the bridging header
-// (`LoFi-Bridging-Header.h`); cbindgen emits the prototypes from
-// `app/core/src/ffi/entries.rs`. The opaque `EntryList` struct lands as
-// `OpaquePointer` in Swift.
+// The C functions are pulled in via the `LoFiCore` Clang module
+// declared in `app/core/include/module.modulemap`; cbindgen emits the
+// prototypes from `app/core/src/ffi/entries.rs`. The opaque `EntryList`
+// struct lands as `OpaquePointer` in Swift.
 
 import Foundation
+import LoFiCore
 
 final class EntryList {
     /// Underlying C handle. `lofi_entries_new` never returns null in

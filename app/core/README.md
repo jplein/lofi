@@ -232,17 +232,17 @@ Display fields drift between sessions: locale changes the display name, the user
 
 ## FFI surface (`feature = "ffi"`)
 
-The macOS frontend (`app/macos/`) consumes `lofi-core` as a static library through a C ABI. The Rust-side surface lives under `src/ffi/`; the generated C header is `include/lofi_core.h` (gitignored — Rust is the source of truth, cbindgen the regenerator).
+The macOS frontend (`app/macos/`) consumes `lofi-core` as a static library through a C ABI. The Rust-side surface lives under `src/ffi/`; the generated C header is `include/lofi_core.h` (gitignored — Rust is the source of truth, cbindgen the regenerator). Bazel's `//app/core:lofi_core_cc` target exposes the header to Swift as the `LoFiCore` Clang module; Swift `import LoFiCore` rather than going through an Xcode-style bridging header.
 
 Why a hand-written C ABI rather than uniffi:
 
 - The surface is tiny (five functions today, growing slowly with each slice). A uniffi binding would generate hundreds of lines of glue we'd then have to read every time something broke.
-- We control both sides — Swift calls the C functions through a bridging header, no Kotlin / Python / etc. The marginal benefit of uniffi's multi-language support is zero here.
+- We control both sides — Swift calls the C functions directly, no Kotlin / Python / etc. The marginal benefit of uniffi's multi-language support is zero here.
 - The opaque-handle pattern (`EntryList`) is easier to reason about as plain Rust than as a uniffi `Object`.
 
 ### Crate types
 
-`[lib] crate-type = ["staticlib", "rlib"]`. The `rlib` is what the GNOME crate (and the workspace's other consumers) link against. The `staticlib` is `liblofi_core.a`, which the macOS Xcode project links via `OTHER_LDFLAGS = -llofi_core`. Both are emitted unconditionally — adding a feature flag to gate the staticlib would only complicate the build pipeline; the unused output is cheap.
+`[lib] crate-type = ["staticlib", "rlib"]`. The `rlib` is what the GNOME crate (and the workspace's other consumers) link against. The `staticlib` is `liblofi_core.a`, which Bazel's `cc_library` wraps and `swift_library` links into the macOS app. Both are emitted unconditionally — adding a feature flag to gate the staticlib would only complicate the build pipeline; the unused output is cheap.
 
 ### Ownership model — Swift produces, Rust holds
 
@@ -262,10 +262,15 @@ On macOS we store the bundle identifier (e.g. `com.apple.Terminal`) verbatim in 
 
 `rusqlite`'s `bundled` feature is still on — the macOS Swift code must not also link `libsqlite3.tbd` from the macOS SDK or the link step fails with duplicate-symbol errors on `sqlite3_*`. If you ever need SQLite from Swift on macOS, do it through the Rust core, not directly.
 
-### Build script (`build.rs`)
+### Header generation paths
 
-When `feature = "ffi"` is on, `build.rs` runs cbindgen and writes `include/lofi_core.h`. With the feature off it returns immediately so the GNOME build (and the default `cargo test -p lofi-core` invocation) doesn't depend on cbindgen at all.
+Two ways the header gets produced, depending on the driving build system:
 
-### How `cargo test -p lofi-core --features ffi` links the FFI symbols
+- **Bazel** (the macOS path): a `genrule` in `app/core/BUILD.bazel` runs the cbindgen binary (built from the same `Cargo.lock` via `crate_universe`) and writes the header into Bazel's output tree. `build.rs` is *not* invoked.
+- **Cargo** (the `cargo build -p lofi-core --features ffi` path, useful for non-Bazel environments): `build.rs` runs cbindgen at compile time and writes `include/lofi_core.h` into the source tree.
 
-The integration test in `tests/ffi.rs` reaches each FFI function through an `extern "C"` declaration. With no Rust-side reference into `lofi_core::*`, rustc would otherwise drop the rlib from the linker's input list and the `lofi_entries_*` symbols would come out undefined. The test file pulls the rlib in explicitly with `extern crate lofi_core as _;` at the top, which is enough — no nested staticlib build, no `rustc-link-arg-tests` directive, no out-of-tree target directory. This is why the build script can stay as small as it is.
+cbindgen itself enables all features by default via its internal `cargo metadata --all-features` call, so neither path needs to thread `--features ffi` through to cbindgen explicitly. The `ffi` feature toggle only gates whether the `pub mod ffi` declaration is compiled and whether `build.rs` runs cbindgen for non-Bazel consumers.
+
+### How the FFI integration tests link the symbols
+
+The integration test in `tests/ffi.rs` reaches each FFI function through an `extern "C"` declaration. With no Rust-side reference into `lofi_core::*`, rustc would drop the rlib from the linker's input list and the `lofi_entries_*` symbols would come out undefined. The test file pulls the rlib in explicitly with `extern crate lofi_core as _;` at the top — works under both `bazel test //app/core:ffi_test` and `cargo test -p lofi-core --features ffi`. No nested staticlib build, no `rustc-link-arg-tests` directive, no out-of-tree target directory.

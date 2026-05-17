@@ -1,14 +1,14 @@
 # app/macos
 
-The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app/core/`) via a C ABI.
+The macOS frontend for LoFi. Swift + AppKit on top of the shared Rust core (`app/core/`) via a C ABI, built by Bazel.
 
 ## Status
 
-Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `./build.sh` produces `LoFi.app`; `./run.sh` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The slice is intentionally a static list — no global hotkey, no search, no launching, no MRU yet (see *Out of scope* below).
+Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazel run //app/macos:launch` floats a borderless panel listing every `.app` under `/Applications` and `~/Applications`. The slice is intentionally a static list — no global hotkey, no search, no launching, no MRU yet (see *Out of scope* below).
 
 ## Why a separate frontend
 
-The cross-platform core (`lofi-core`) holds the data model and pure logic — `Application`, `Entry`, `EntryRef`, fuzzy matcher, MRU store. Anything that depends on a particular window system or app-discovery mechanism lives in the platform crate. On GNOME that's `app/gnome/` (GTK4 + libadwaita + D-Bus to the Shell extension); on macOS that's this directory (AppKit + a bridging header to a `liblofi_core.a` static library).
+The cross-platform core (`lofi-core`) holds the data model and pure logic — `Application`, `Entry`, `EntryRef`, fuzzy matcher, MRU store. Anything that depends on a particular window system or app-discovery mechanism lives in the platform crate. On GNOME that's `app/gnome/` (GTK4 + libadwaita + D-Bus to the Shell extension); on macOS that's this directory (AppKit linking the `liblofi_core.a` produced by `rules_rust`, with `lofi_core.h` exposed as a Clang module via `rules_swift`).
 
 The two frontends share nothing at the windowing-system level, so they're separate projects. Sharing the data model and logic (in `core/`) is what keeps fuzzy match, MRU, and command activation behaviour consistent between platforms.
 
@@ -21,30 +21,25 @@ Same pattern as `app/gnome/`: the platform layer is the gatherer, the core is th
 
 This shape leaves the matcher, MRU, and future activation logic on the Rust side without having to expose `Application`/`Entry` as Swift types. Adding an `EntryRef`-based MRU lookup in a future slice is a Rust change, not a Swift one.
 
-## Why XcodeGen
+## Why Bazel
 
-`.xcodeproj` is generated locally, gitignored, and reviewed via the `project.yml` source of truth. Hand-maintained Xcode project files explode into merge conflicts even on trivial changes — a YAML spec keeps diffs tractable.
+Bazel owns the macOS build graph end to end. `rules_rust` + `crate_universe` consume `app/Cargo.lock` and produce `liblofi_core.a`; a `genrule` runs the (Bazel-built) `cbindgen` binary to emit `lofi_core.h`; `cc_library` + `swift_interop_hint` expose the header to Swift as the `LoFiCore` Clang module; `rules_swift` compiles the `.swift` sources; `rules_apple`'s `macos_application` packages everything into `LoFi.app`.
 
-XcodeGen comes from the Nix devShell (`xcodegen` is in `nativeBuildInputs` for the `aarch64-darwin` shell in `flake.nix`); Swift itself comes from the user's Xcode / Command Line Tools install. Nix on Darwin does not currently provide a usable Swift toolchain, which is why the build splits across two providers.
+The earlier xcodegen + xcodebuild + cargo + bash-script pipeline is gone — one front door (Bazel), one build graph, one set of incrementality rules. The Linux GNOME crate still goes through Cargo + Crane in `flake.nix`; Bazel is macOS-only for now. Both paths read the same `Cargo.lock` so dependency versions stay coherent.
 
 ## Layout
 
 ```
-project.yml             XcodeGen spec; .xcodeproj is regenerated from this
-build.sh                cargo + xcodegen + xcodebuild driver
-run.sh                  opens the most recent .app bundle
-BUILD.bazel             sh_binary targets :build and :launch
+BUILD.bazel             swift_library + macos_application + launch
 bazel/
-  build.sh              wrapper that execs ../build.sh under bazel run
-  launch.sh             wrapper that execs ../run.sh under bazel run
+  launch.sh             extracts the bundle from LoFi.zip and `open`s it
 Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
   PanelController.swift NSPanel subclass + show/center
   AppDiscovery.swift    /Applications + ~/Applications enumeration
   AppListController.swift  NSTableView data source + delegate
-  RustBridge.swift      Swift wrapper around the C ABI
-  LoFi-Bridging-Header.h  #include "lofi_core.h"
+  RustBridge.swift      Swift wrapper around the C ABI; `import LoFiCore`
 Resources/
   Info.plist            LSUIElement=YES, bundle id, version
   LoFi.entitlements     empty for now
@@ -52,25 +47,17 @@ Resources/
 
 ## Build / run
 
-Two equivalent front doors. Pick whichever fits your habits.
-
-**Direct shell scripts:**
-
 ```sh
-./build.sh    # cargo build + xcodegen + xcodebuild
-./run.sh      # open the .app
+bazel build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
+bazel run   //app/macos:launch     # unzip + `open` the bundle
+bazel test  //app/core:ffi_test    # run the 12 FFI integration tests
 ```
 
-`build.sh --rust-only` is what the Xcode pre-build phase invokes; `build.sh --no-rust` skips the Rust stage for fast incremental Swift iteration when the staticlib hasn't changed.
+`bazel run //app/macos:LoFi` also "works" — it invokes rules_apple's stock launcher script, which extracts the bundle to `/tmp` and execs the binary directly. The downside is it bypasses Launch Services, so `LSUIElement=YES` activation can behave subtly differently. `:launch` routes through `open`, which matches the production launch path.
 
-**Bazel:**
+First-time build downloads Bazel (per `.bazelversion`), then the rule stacks, then resolves the Cargo lockfile via `crate_universe`. Subsequent builds hit the action cache and finish in seconds.
 
-```sh
-bazel run //app/macos:build     # same as ./build.sh
-bazel run //app/macos:launch    # same as ./run.sh
-```
-
-The Bazel targets are thin `sh_binary` wrappers that exec the canonical scripts (see `app/macos/bazel/`). Cargo and Xcode still do the real work — Bazel is just the entry-point driver. A future slice could swap this for `rules_rust` + `rules_apple` targets, but the wrap-the-script shape stays drop-in compatible with everything else in the repo. Bazelisk is provided by the Darwin Nix devShell; `.bazelversion` at the repo root pins the Bazel release.
+`DEVELOPER_DIR` must point at the user's Xcode install (`/Applications/Xcode.app/Contents/Developer`) before invoking Bazel — `.envrc` does this. Without that override the Nix devShell leaves `DEVELOPER_DIR` pointing at a partial nix-store SDK and `rules_swift` bails with "Could not determine Xcode version at all."
 
 ## Gotchas worth calling out
 
@@ -83,16 +70,19 @@ Each cost real time to figure out the first time; each is permanent in the code 
 3. **`LSUIElement=YES` also suppresses the system Application menu, so Cmd-Q has no handler.** `AppDelegate.installHiddenMenu()` installs a minimal `NSMenu` containing only a `Quit` item with `keyEquivalent: "q"`. The menu never becomes visible (still LSUIElement), but its key equivalent fires.
 4. **`NSScrollView` does not auto-resize its `documentView`.** A bare `NSTableView()` set as `documentView` sits at 0×0 inside the scroll view and never asks for cell views — the table is alive (clicks select rows, the scroll wheel "scrolls") but draws nothing. `AppListController` constructs the table with an explicit non-zero `frame` and pairs it with `columnAutoresizingStyle = .uniformColumnAutoresizingStyle`.
 5. **`NSTableView.dataSource` and `.delegate` are weak.** If the only strong reference to the list controller is a local variable inside `applicationDidFinishLaunching`, the controller deallocates when that method returns and the table silently stops calling `viewFor:row:` — rows scroll and select normally because `numberOfRows` is cached, but cells render blank. `AppDelegate` keeps a strong `listController` property; do not "simplify" it away.
-6. **`?? `does not fall through empty strings, only `nil`.** Some apps set `CFBundleDisplayName` to `""` rather than omitting the key, which a naive `(displayName as? String) ?? (bundleName as? String) ?? basename` accepts as a valid empty string. `AppDiscovery.discover()` uses a `nonEmpty()` helper to coerce empty-string Info.plist values to `nil` so the fallback chain works.
+6. **`??` does not fall through empty strings, only `nil`.** Some apps set `CFBundleDisplayName` to `""` rather than omitting the key, which a naive `(displayName as? String) ?? (bundleName as? String) ?? basename` accepts as a valid empty string. `AppDiscovery.discover()` uses a `nonEmpty()` helper to coerce empty-string Info.plist values to `nil` so the fallback chain works.
 
-### Build / toolchain
+### Bazel
 
-7. **Xcode Run Script Phases run with a stripped-down `PATH`** that doesn't include `$HOME/.nix-profile/bin`. `build.sh` explicitly prepends Nix and Homebrew paths so cargo / cbindgen / xcodegen all resolve regardless of how the script is invoked.
-8. **Xcode 26 / MacOSX26.5 SDK invokes `ld` directly with clang-driver flags it does not understand** (`-Xlinker`, `-isysroot`, `-dynamiclib`, `-rdynamic`, `-fobjc-link-runtime`), and the link fails. `project.yml` pins `LD: $(DT_TOOLCHAIN_DIR)/usr/bin/clang` so clang is the link driver, which translates those flags before invoking the actual linker. Related: `ENABLE_DEBUG_DYLIB: "NO"` opts out of the Xcode 15.3+ debug-dylib split-binary flow that triggered the same family of breakage on first contact.
+7. **`DEVELOPER_DIR` set by the Nix devShell points at a partial Darwin SDK** in the nix store, which doesn't contain a usable Swift toolchain. `rules_swift` walks `xcrun --find swiftc` against `DEVELOPER_DIR` and bails. `.envrc` explicitly re-exports `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` after `use flake` to override.
+8. **`apple_support` must appear above `rules_cc` in `MODULE.bazel`.** Module ordering determines toolchain registration order; if `rules_cc` registers first, rules_swift picks up the generic CC toolchain (target triple "local") and fails. Reordering is non-obvious from the error message.
+9. **`swift_interop_hint` auto-generates the Clang module map** — do not also put a hand-written `module.modulemap` in `cc_library.hdrs`. It gets included as a C header in the auto-generated map and the parser barfs on module-map syntax.
+10. **`crate_universe`'s binary targets are named `<crate>__<bin>`**, e.g. `@crates//:cbindgen__cbindgen`, not `__cli` or `__bin`. `gen_binaries` takes a list of binary names, not a `True` boolean.
+11. **cbindgen 0.29 has no `--features` CLI flag** — features are discovered by running `cargo metadata --all-features` internally. Passing `--features ffi` to the binary errors out; the right approach is to let cbindgen compute it.
 
 ### Temporary for this slice
 
-9. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
+12. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
 
 ## Out of scope this slice
 
@@ -105,3 +95,4 @@ Each is a follow-up:
 - Icon rendering.
 - Window / workspace / power commands.
 - `/System/Applications` discovery.
+- Xcode project generation (e.g. via `rules_xcodeproj`) so you can build/debug in Xcode.

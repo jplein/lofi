@@ -1,0 +1,3 @@
+# Workspace-root BUILD file. Empty by design — the actual targets live
+# under `//app/...`. crate_universe needs `//:MODULE.bazel` to be inside
+# a Bazel package, which requires this file's existence.

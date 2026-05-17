@@ -35,5 +35,7 @@ What it can do:
 (Experimental)
 
 - macOS Tahoe (15+)
+- Xcode 26 (for the Swift toolchain)
+- Nix + direnv (provides Bazel and the Rust toolchain via the flake)
 
-The macOS frontend at `app/macos/` is implemented but unverified end-to-end: the build pipeline (cargo + xcodegen + xcodebuild) and the Swift sources are in place, the Rust FFI integration tests pass, but the Xcode build itself has not yet been run on a Mac. When it runs, the `.app` floats an `NSPanel` listing every `.app` bundle under `/Applications` and `~/Applications`. It does not yet support search, MRU, launching, icons, or a global hotkey — see `app/macos/README.md` for the slice-by-slice rollout plan.
+The macOS frontend at `app/macos/` is built by Bazel — `rules_rust` produces `liblofi_core.a`, `rules_swift` + `rules_apple` produce `LoFi.app`. `bazel run //app/macos:launch` floats an `NSPanel` listing every `.app` bundle under `/Applications` and `~/Applications`. It does not yet support search, MRU, launching, icons, or a global hotkey — see `app/macos/README.md` for the slice-by-slice rollout plan.
