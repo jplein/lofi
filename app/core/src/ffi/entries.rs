@@ -494,9 +494,8 @@ pub unsafe extern "C" fn lofi_entries_get_category(
 }
 
 /// Return a borrowed pointer to the entry-at-`idx`'s icon identifier. For
-/// `Entry::Application` this is the `icon` field as pushed in (or null when
-/// `None`); for every other variant the result is null today. (When Window
-/// etc. land, the match here grows to return their icon field analogously.)
+/// `Entry::Application` and `Entry::Window` this is the `icon` field as pushed
+/// in (or null when `None`); for every other variant the result is null today.
 ///
 /// `idx` is the *filtered* index. Borrow lifetime: same as `get_name`.
 ///
@@ -520,13 +519,12 @@ pub unsafe extern "C" fn lofi_entries_get_icon(
     };
 
     // Exhaustive match so future variants are a compile error until this is
-    // updated. Only Application carries a caller-supplied icon string today.
+    // updated. Application and Window both carry a caller-supplied icon
+    // identifier; the other variants don't have one today.
     let icon: Option<&str> = match &list_ref.entries[real_idx] {
         Entry::Application(app) => app.icon.as_deref(),
-        Entry::Window(_)
-        | Entry::Workspace(_)
-        | Entry::Command(_)
-        | Entry::PowerCommand(_) => None,
+        Entry::Window(w) => w.icon.as_deref(),
+        Entry::Workspace(_) | Entry::Command(_) | Entry::PowerCommand(_) => None,
     };
 
     let mut cache = list_ref.icon_cache.borrow_mut();

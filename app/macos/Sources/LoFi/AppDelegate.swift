@@ -39,6 +39,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // through to Rust, so `launchRow` can look it up by id at activation
     // time.
     private var windowAux: [UInt64: (pid: pid_t, title: String)] = [:]
+    // Set true when we triggered a TCC prompt on this launch. The
+    // prompt is a system-owned window; if we then call
+    // `NSApp.activate(ignoringOtherApps: true)` our borderless panel
+    // covers it and the user can't grant the permission they were just
+    // asked for.
+    private var promptedForPermission = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
@@ -90,6 +96,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // permission.
             if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
             if !Permissions.accessibility() { Permissions.requestAccessibility() }
+            // The TCC prompt is system-owned. Without this flag clear we'd
+            // call `NSApp.activate(ignoringOtherApps: true)` below and
+            // shove our borderless panel in front of the prompt — the
+            // user then can't see (or click) the grant button. Skip the
+            // aggressive activation on this launch; the panel will still
+            // render, and the user can relaunch once they've granted.
+            promptedForPermission = true
         }
 
         // After every entry is pushed, apply the persistent MRU order so
@@ -119,7 +132,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the process to the foreground; without it the panel renders
         // but never becomes key, so keyboard events go to whatever app
         // was previously focused.
-        NSApp.activate(ignoringOtherApps: true)
+        //
+        // Suppress the `ignoringOtherApps` flag when we just fired a
+        // TCC prompt — the prompt is a system-owned window and our
+        // borderless panel would otherwise cover it. The panel still
+        // shows (so the user can use the app list); they just need to
+        // click out to the prompt to grant the permission.
+        NSApp.activate(ignoringOtherApps: !promptedForPermission)
         controller.show()
     }
 

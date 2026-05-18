@@ -1369,7 +1369,7 @@ fn push_window_round_trips() {
                 WINDOW_ID,
                 "Untitled — TextEdit",
                 Some("TextEdit"),
-                None,
+                Some("/Applications/TextEdit.app"),
                 Some("com.apple.TextEdit"),
             ),
             "push_window with all-valid args should return true"
@@ -1394,6 +1394,23 @@ fn push_window_round_trips() {
             lofi_entries_get_window_id(list, 0),
             WINDOW_ID,
             "get_window_id should round-trip the pushed CGWindowID"
+        );
+
+        // The Window icon field carries an icon-resolution input (on macOS
+        // the owning .app's bundle path); get_icon must round-trip it so
+        // the UI can resolve a real icon at draw time. Regression guard:
+        // an earlier pass through `lofi_entries_get_icon` only matched
+        // `Entry::Application` and silently dropped Window icons,
+        // producing iconless rows in the launcher.
+        let icon_ptr = lofi_entries_get_icon(list, 0);
+        assert!(
+            !icon_ptr.is_null(),
+            "get_icon should return non-null for a Window pushed with an icon"
+        );
+        let icon = CStr::from_ptr(icon_ptr).to_str().expect("UTF-8 icon");
+        assert_eq!(
+            icon, "/Applications/TextEdit.app",
+            "get_icon should return the pushed Window icon path verbatim"
         );
 
         lofi_entries_free(list);

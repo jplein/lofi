@@ -60,7 +60,11 @@ enum WindowDiscovery {
     /// Caller must hold both Screen Recording and Accessibility
     /// permissions; this function does not gate on them.
     static func discover() -> [DiscoveredWindow] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        // No `optionOnScreenOnly` — that flag restricts the result to
+        // windows on the *current* macOS Space. Dropping it picks up
+        // windows on every Space (and minimized windows, which the
+        // user reasonably expects to be able to switch to).
+        let options: CGWindowListOption = [.excludeDesktopElements]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
             return []
         }
@@ -108,7 +112,17 @@ enum WindowDiscovery {
             // system processes.
             let runningApp = NSRunningApplication(processIdentifier: pidValue)
             let bundleId = runningApp?.bundleIdentifier
-            let bundlePath = runningApp?.bundleURL?.path
+            // Path first, bundle-id fallback. `bundleURL` is normally
+            // populated for ordinary apps; the fallback covers edge cases
+            // where the running-app lookup gives us a bundle id but no
+            // URL (some system processes), in which case we ask
+            // LaunchServices to translate the bundle id to a path.
+            let bundlePath: String? = runningApp?.bundleURL?.path
+                ?? bundleId.flatMap {
+                    NSWorkspace.shared.urlForApplication(
+                        withBundleIdentifier: $0
+                    )?.path
+                }
 
             results.append(
                 DiscoveredWindow(
