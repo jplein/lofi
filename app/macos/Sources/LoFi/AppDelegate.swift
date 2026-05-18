@@ -31,6 +31,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // `bumpMru` on activation. `nil` when `MruStore.init?` failed —
     // the launcher proceeds without MRU ordering in that case.
     private var mruStore: MruStore?
+    // Activation-side state for Window entries. The Rust `Window` shape
+    // doesn't have a PID field (cross-platform layer keeps it window-id-
+    // and-title only); macOS-side `WindowActivation.raise(pid:title:)`
+    // needs both pid and the title we discovered the window with. This
+    // map carries that pair, keyed by the same `CGWindowID` we hand
+    // through to Rust, so `launchRow` can look it up by id at activation
+    // time.
+    private var windowAux: [UInt64: (pid: pid_t, title: String)] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
@@ -50,6 +58,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        // Window enumeration is gated on TWO permissions: Screen
+        // Recording (to read `kCGWindowName`) and Accessibility (to
+        // raise specific windows via AX). Both deny? Skip windows
+        // entirely for this session — listing entries we can't activate
+        // is a worse experience than silently omitting them. Both are
+        // captured at process start by TCC, so freshly-granted
+        // permissions only take effect on the next launch.
+        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
+        if canSeeWindows {
+            for w in WindowDiscovery.discover() {
+                // `icon` is the icon-resolution input the Swift UI hands
+                // to `NSWorkspace.shared.icon(forFile:)` at draw time —
+                // it must be a *path*, not a bundle identifier.
+                // `appDesktopId` is the stable identifier and stays the
+                // bundle id. See `DiscoveredWindow` for the field split.
+                _ = entries.pushWindow(
+                    id: UInt64(w.id),
+                    title: w.title,
+                    appName: w.ownerName,
+                    icon: w.ownerBundlePath,
+                    workspace: w.workspace,
+                    appDesktopId: w.ownerBundleId
+                )
+                windowAux[UInt64(w.id)] = (w.ownerPid, w.title)
+            }
+        } else {
+            // Trigger the system dialogs once. The state captured by
+            // `CGPreflightScreenCaptureAccess` is set at process start,
+            // so the user has to relaunch to pick up a freshly-granted
+            // permission.
+            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
+            if !Permissions.accessibility() { Permissions.requestAccessibility() }
+        }
+
         // After every entry is pushed, apply the persistent MRU order so
         // the most-recently-launched app shows up at the top. A failed
         // open (permission denied, disk full, ...) leaves `mruStore` nil;
@@ -60,7 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             entries.applyMru(store: store)
         }
 
-        let listController = AppListController(entries: entries, mruStore: mruStore)
+        let listController = AppListController(
+            entries: entries,
+            mruStore: mruStore,
+            windowAux: windowAux
+        )
         self.listController = listController
         let controller = PanelController(
             searchField: listController.searchField,

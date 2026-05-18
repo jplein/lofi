@@ -31,5 +31,13 @@
 
     <key>NSHighResolutionCapable</key>
     <true/>
+
+    <!-- Wording shown by the system the first time LoFi calls a
+         Screen-Recording-gated API (e.g. CGRequestScreenCaptureAccess).
+         Must be present before the first call or the prompt falls back
+         to a generic system message. Window titles in CGWindowList are
+         gated on this permission. -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>LoFi lists your open windows so you can switch to one. Window titles are only readable with Screen Recording access.</string>
 </dict>
 </plist>

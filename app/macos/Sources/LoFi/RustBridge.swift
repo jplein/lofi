@@ -121,6 +121,57 @@ final class EntryList {
         }
     }
 
+    /// Push a window onto the list. Returns `false` on null `title` /
+    /// invalid-UTF-8 (neither reachable from a Swift `String` in
+    /// practice). The three optional args (`appName`, `icon`,
+    /// `appDesktopId`) collapse to `nil` C pointers when nil on the
+    /// Swift side; the Rust core represents them as `Option<String>`.
+    ///
+    /// Same nested-`withCString` shape as `pushApplication`, just deeper
+    /// because three of the args are optional. Each layer of nesting
+    /// keeps the previous pointer alive across the next closure call so
+    /// every pointer handed to `lofi_entries_push_window` is valid for
+    /// the full duration of that single call.
+    @discardableResult
+    func pushWindow(
+        id: UInt64,
+        title: String,
+        appName: String?,
+        icon: String?,
+        workspace: Int32,
+        appDesktopId: String?
+    ) -> Bool {
+        return title.withCString { titlePtr in
+            let withApp: (UnsafePointer<CChar>?) -> Bool = { appPtr in
+                let withIcon: (UnsafePointer<CChar>?) -> Bool = { iconPtr in
+                    let withBundle: (UnsafePointer<CChar>?) -> Bool = { bundlePtr in
+                        lofi_entries_push_window(
+                            self.handle,
+                            id,
+                            titlePtr,
+                            appPtr,
+                            iconPtr,
+                            workspace,
+                            bundlePtr
+                        )
+                    }
+                    if let appDesktopId = appDesktopId {
+                        return appDesktopId.withCString { withBundle($0) }
+                    }
+                    return withBundle(nil)
+                }
+                if let icon = icon {
+                    return icon.withCString { withIcon($0) }
+                }
+                return withIcon(nil)
+            }
+            if let appName = appName {
+                return appName.withCString { withApp($0) }
+            }
+            return withApp(nil)
+        }
+    }
+
     var count: Int {
         Int(lofi_entries_len(handle))
     }
@@ -185,6 +236,17 @@ final class EntryList {
             return nil
         }
         return String(cString: cstr)
+    }
+
+    /// Read the `CGWindowID` for the `Entry::Window` at the filtered
+    /// `idx`. Returns `0` for non-Window entries, out-of-bounds indices,
+    /// or any other error — the Rust side uses the `0` sentinel because
+    /// real `CGWindowID`s on macOS are always strictly greater than 0
+    /// for regular application windows. Callers should gate on
+    /// `category(at:) == "Window"` before reading; this is a robustness
+    /// fallback rather than the primary signal.
+    func windowId(at idx: Int) -> UInt64 {
+        lofi_entries_get_window_id(handle, UInt(idx))
     }
 
     /// Reorder the underlying entries by recency (most-recently-used

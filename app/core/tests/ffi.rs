@@ -69,6 +69,36 @@ unsafe extern "C" {
         idx: usize,
     ) -> bool;
     fn lofi_entries_apply_mru(list: *mut EntryList, store: *const MruStore) -> bool;
+
+    // Window FFI surface (added in the macOS windows slice). Mirrors the C
+    // signatures cbindgen emits for the two new symbols in
+    // `lofi_core::ffi::entries`:
+    //
+    //     bool     lofi_entries_push_window(struct EntryList *list,
+    //                                        uint64_t id,
+    //                                        const char *title,
+    //                                        const char *app_name,
+    //                                        const char *icon,
+    //                                        int32_t workspace,
+    //                                        const char *app_desktop_id);
+    //     uint64_t lofi_entries_get_window_id(const struct EntryList *list,
+    //                                          uintptr_t idx);
+    //
+    // `app_name`, `icon`, and `app_desktop_id` are nullable per the plan;
+    // `title` is required. Invalid UTF-8 in any non-null string causes
+    // push_window to return false. get_window_id returns 0 for null list,
+    // non-Window variant, or out-of-bounds idx — 0 is a safe sentinel
+    // because real CGWindowIDs on macOS are always > 0 for app windows.
+    fn lofi_entries_push_window(
+        list: *mut EntryList,
+        id: u64,
+        title: *const c_char,
+        app_name: *const c_char,
+        icon: *const c_char,
+        workspace: i32,
+        app_desktop_id: *const c_char,
+    ) -> bool;
+    fn lofi_entries_get_window_id(list: *const EntryList, idx: usize) -> u64;
 }
 
 /// Opaque type matching the Rust-side `MruStore` newtype the FFI hands out
@@ -1271,6 +1301,331 @@ fn push_recomputes_filter() {
             name_at(list, 0),
             "Chrome",
             "the visible entry after push should be the freshly pushed Chrome"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+/// Test helper: push a Window with all-valid UTF-8 strings for the required
+/// `title` and the three optional string fields. Mirrors `push_app` for
+/// terseness in the Window FFI tests. `workspace` is always 0 (macOS has no
+/// Mutter-style workspaces; the field exists for cross-platform parity).
+fn push_window_named(
+    list: *mut EntryList,
+    id: u64,
+    title: &str,
+    app_name: Option<&str>,
+    icon: Option<&str>,
+    app_desktop_id: Option<&str>,
+) -> bool {
+    let title_c = CString::new(title).expect("title must be valid for CString");
+    let app_name_c = app_name.map(|s| CString::new(s).expect("app_name must be valid for CString"));
+    let icon_c = icon.map(|s| CString::new(s).expect("icon must be valid for CString"));
+    let app_desktop_id_c = app_desktop_id
+        .map(|s| CString::new(s).expect("app_desktop_id must be valid for CString"));
+    let app_name_ptr: *const c_char = match &app_name_c {
+        Some(s) => s.as_ptr(),
+        None => ptr::null(),
+    };
+    let icon_ptr: *const c_char = match &icon_c {
+        Some(s) => s.as_ptr(),
+        None => ptr::null(),
+    };
+    let app_desktop_id_ptr: *const c_char = match &app_desktop_id_c {
+        Some(s) => s.as_ptr(),
+        None => ptr::null(),
+    };
+    // SAFETY: every `CString` is owned by this function and lives across the
+    // FFI call; the FFI is documented to copy what it needs out before
+    // returning. `workspace = 0` is the cross-platform-default sentinel.
+    unsafe {
+        lofi_entries_push_window(
+            list,
+            id,
+            title_c.as_ptr(),
+            app_name_ptr,
+            icon_ptr,
+            0,
+            app_desktop_id_ptr,
+        )
+    }
+}
+
+#[test]
+fn push_window_round_trips() {
+    // Push a fully populated window. Title is the user-visible row label
+    // (matches `Entry::name()` for the Window variant); category is the
+    // stable English "Window"; window_id round-trips the pushed u64.
+    const WINDOW_ID: u64 = 42;
+
+    // SAFETY: standard FFI lifecycle: new -> push -> read -> free.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(
+            push_window_named(
+                list,
+                WINDOW_ID,
+                "Untitled — TextEdit",
+                Some("TextEdit"),
+                None,
+                Some("com.apple.TextEdit"),
+            ),
+            "push_window with all-valid args should return true"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "len should be 1 after one successful push_window"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Untitled — TextEdit",
+            "Window's get_name should return the title verbatim"
+        );
+        assert_eq!(
+            category_at(list, 0),
+            "Window",
+            "Window entries should report category \"Window\""
+        );
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            WINDOW_ID,
+            "get_window_id should round-trip the pushed CGWindowID"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_window_with_nil_optionals() {
+    // Null app_name, null icon, null app_desktop_id — all explicitly allowed
+    // and mapped to None on the Rust side. Title is still required and
+    // present. The four accessors that need to work on Window entries
+    // (name, category, window_id, icon) must all behave correctly:
+    // - name returns the title
+    // - category returns "Window"
+    // - window_id returns the pushed id
+    // - icon returns null (no silent empty-string substitution; mirrors the
+    //   existing get_icon_returns_pushed_value contract for Applications)
+    const WINDOW_ID: u64 = 7;
+
+    // SAFETY: standard FFI lifecycle; the three optional pointers are null.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(
+            push_window_named(list, WINDOW_ID, "Hello", None, None, None),
+            "push_window with nil optionals should return true"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "len should be 1 after one successful push_window"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Hello",
+            "get_name should still return the title when optionals are null"
+        );
+        assert_eq!(
+            category_at(list, 0),
+            "Window",
+            "category should be \"Window\" regardless of optional fields"
+        );
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            WINDOW_ID,
+            "get_window_id should round-trip the pushed CGWindowID"
+        );
+
+        let icon_ptr = lofi_entries_get_icon(list, 0);
+        assert!(
+            icon_ptr.is_null(),
+            "get_icon should return null for a Window pushed with a null icon"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_window_null_title_returns_false() {
+    // Null `title` is the required-args contract: push_window must return
+    // false and not mutate the list. Other args are valid C strings so we're
+    // testing the title-null path specifically, not a multi-null short-circuit.
+    const WINDOW_ID: u64 = 11;
+
+    // SAFETY: deliberately pass a null `title` pointer; FFI must short-circuit
+    // to false without crashing.
+    unsafe {
+        let list = lofi_entries_new();
+
+        let app_name = CString::new("TextEdit").expect("app_name valid");
+        let app_desktop_id = CString::new("com.apple.TextEdit").expect("app_desktop_id valid");
+
+        let ok = lofi_entries_push_window(
+            list,
+            WINDOW_ID,
+            ptr::null(),
+            app_name.as_ptr(),
+            ptr::null(),
+            0,
+            app_desktop_id.as_ptr(),
+        );
+        assert!(!ok, "push_window with null title must return false");
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "len must not change when push_window fails on null title"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_window_invalid_utf8_title_returns_false() {
+    // 0xFF is never a valid UTF-8 byte; the FFI must reject it strictly,
+    // mirroring the existing push_application invalid-UTF-8 contract. Title
+    // is constructed as raw bytes [0xFF, 0x00] (one invalid byte plus the
+    // NUL terminator) and passed as a `*const c_char`.
+    const WINDOW_ID: u64 = 13;
+
+    // SAFETY: deliberately pass a non-UTF-8 title pointer; FFI must reject
+    // without crashing.
+    unsafe {
+        let list = lofi_entries_new();
+
+        let bad_title: [u8; 2] = [0xFF, 0x00];
+        let app_name = CString::new("TextEdit").expect("app_name valid");
+
+        let ok = lofi_entries_push_window(
+            list,
+            WINDOW_ID,
+            bad_title.as_ptr().cast::<c_char>(),
+            app_name.as_ptr(),
+            ptr::null(),
+            0,
+            ptr::null(),
+        );
+        assert!(
+            !ok,
+            "push_window with invalid UTF-8 title must return false"
+        );
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "len must not change when push_window fails on invalid UTF-8 title"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_window_id_returns_zero_for_application() {
+    // The 0-sentinel contract: get_window_id returns 0 for anything that
+    // isn't a Window at the given idx. Three sub-cases bundled here:
+    //   (a) Application variant at the requested idx -> 0
+    //   (b) Out-of-bounds idx -> 0
+    //   (c) Null list pointer -> 0
+    // Plus the positive case: after pushing a Window, its idx returns the
+    // pushed u64 verbatim. The Application stays at idx 0 (insertion order
+    // is preserved under no active query), the Window lands at idx 1.
+    const WINDOW_ID: u64 = 99;
+    const FAR_OUT_OF_BOUNDS: usize = 999;
+
+    // SAFETY: standard FFI lifecycle plus a deliberate null-list call.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
+
+        // (a) Application at idx 0 -> 0.
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            0,
+            "get_window_id must return 0 for an Application variant"
+        );
+
+        // Now push a Window so we have a mixed list.
+        assert!(
+            push_window_named(list, WINDOW_ID, "Some Doc", Some("TextEdit"), None, None),
+            "push_window should succeed for the mixed-list setup"
+        );
+
+        // Application still at 0, Window at 1.
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            0,
+            "Application at idx 0 must still report 0 after a Window is pushed"
+        );
+        assert_eq!(
+            lofi_entries_get_window_id(list, 1),
+            WINDOW_ID,
+            "Window at idx 1 must report its pushed CGWindowID"
+        );
+
+        // (b) Out-of-bounds idx -> 0.
+        assert_eq!(
+            lofi_entries_get_window_id(list, FAR_OUT_OF_BOUNDS),
+            0,
+            "get_window_id at an out-of-bounds idx must return 0"
+        );
+
+        // (c) Null list -> 0.
+        assert_eq!(
+            lofi_entries_get_window_id(ptr::null(), 0),
+            0,
+            "get_window_id with a null list must return 0"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn mixed_list_search_then_window_id() {
+    // The filtered-index resolver must route through to the right underlying
+    // entry on get_window_id. Push two apps and a window whose title is the
+    // only haystack containing "cron"; narrow with set_query("cron"); the
+    // single surviving entry at filtered idx 0 must be the Window, and
+    // get_window_id(list, 0) must return that window's pushed id.
+    const WINDOW_ID: u64 = 314;
+
+    // SAFETY: standard FFI lifecycle with one set_query mutation; we read
+    // get_window_id only after the mutation, so no stale-borrow concern.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
+        assert!(push_app(list, "Calendar", "com.apple.iCal", None));
+        assert!(
+            push_window_named(
+                list,
+                WINDOW_ID,
+                "Cron Job Notes",
+                Some("Notes"),
+                None,
+                None,
+            ),
+            "push_window should succeed for the mixed-list search test"
+        );
+
+        assert!(set_query(list, "cron"), "set_query should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "only the window's title \"Cron Job Notes\" should match \"cron\""
+        );
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            WINDOW_ID,
+            "filtered idx 0 must resolve through to the underlying window entry"
         );
 
         lofi_entries_free(list);

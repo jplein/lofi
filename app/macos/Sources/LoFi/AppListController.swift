@@ -55,6 +55,12 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// failed in the delegate); the launcher still works, it just
     /// doesn't remember the activation.
     private let mruStore: MruStore?
+    /// Activation-side state for Window entries — keyed by the same
+    /// `CGWindowID` we pushed into Rust. The Rust `Window` shape
+    /// doesn't carry a PID (intentional: cross-platform), so for the
+    /// macOS-only `WindowActivation.raise(pid:title:)` call we look the
+    /// pid + title pair up here at launch time.
+    private let windowAux: [UInt64: (pid: pid_t, title: String)]
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -67,9 +73,14 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// view wrapping the table so long lists overflow cleanly.
     var listView: NSView { scrollView }
 
-    init(entries: EntryList, mruStore: MruStore?) {
+    init(
+        entries: EntryList,
+        mruStore: MruStore?,
+        windowAux: [UInt64: (pid: pid_t, title: String)]
+    ) {
         self.entries = entries
         self.mruStore = mruStore
+        self.windowAux = windowAux
 
         // Non-zero initial size. NSScrollView does NOT auto-resize its
         // documentView, so without an explicit frame the table sits at
@@ -208,27 +219,41 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         tableView.scrollRowToVisible(next)
     }
 
-    /// Open the `.app` at the given filtered row and quit LoFi. Out-of-
-    /// bounds rows (incl. the `-1` "no clicked row" sentinel) are
-    /// silently ignored — the user's mouse landed somewhere that didn't
-    /// resolve to an entry; bailing without any visible response is
-    /// the right thing.
+    /// Activate the row at `row` and quit LoFi. Out-of-bounds rows
+    /// (incl. the `-1` "no clicked row" sentinel) are silently ignored
+    /// — the user's mouse landed somewhere that didn't resolve to an
+    /// entry; bailing without any visible response is the right thing.
     ///
-    /// Bumps the MRU store *before* opening: the bump is a microsecond
-    /// local SQLite write; `NSWorkspace.open` goes through LaunchServices
-    /// asynchronously and we then immediately `terminate`. If we lose
-    /// the race we prefer a double-bump (correctly attributed to "the
-    /// user tried to launch this") over a miss-bump.
+    /// Bumps the MRU store *before* dispatching: the bump is a
+    /// microsecond local SQLite write; the activation paths
+    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC plus
+    /// our immediate `NSApp.terminate`. If we lose the race we prefer a
+    /// double-bump (correctly attributed to "the user tried to activate
+    /// this") over a miss-bump.
+    ///
+    /// Branches on the stable English category label from the FFI: a
+    /// `"Window"` row routes through AX (raise the specific window via
+    /// pid + title looked up in `windowAux`); every other category
+    /// (currently only `"Application"`) opens the `.app` bundle via
+    /// LaunchServices.
     private func launchRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
         if let store = mruStore {
             entries.bumpMru(store: store, at: row)
         }
-        // `entries.icon(at:)` returns the bundle path on macOS — see
-        // the `DiscoveredApp.bundlePath` comment in `AppDiscovery.swift`
-        // for why the icon field carries the path identifier.
-        guard let path = entries.icon(at: row) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        if entries.category(at: row) == "Window" {
+            let id = entries.windowId(at: row)
+            if let aux = windowAux[id] {
+                _ = WindowActivation.raise(pid: aux.pid, title: aux.title)
+            }
+        } else {
+            // `entries.icon(at:)` returns the bundle path on macOS —
+            // see the `DiscoveredApp.bundlePath` comment in
+            // `AppDiscovery.swift` for why the icon field carries the
+            // path identifier.
+            guard let path = entries.icon(at: row) else { return }
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
         NSApp.terminate(nil)
     }
 }

@@ -44,7 +44,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::matcher;
 use crate::mru::MruStore;
-use crate::{Application, Entry, EntryKind, EntryRef};
+use crate::{Application, Entry, EntryKind, EntryRef, Window};
 
 /// Stable English category label for `EntryKind::Application`. The UI displays
 /// these as-is; localization is a UI-layer concern.
@@ -617,4 +617,127 @@ pub unsafe extern "C" fn lofi_entries_apply_mru(
     list_ref.clear_caches();
     list_ref.recompute_filter();
     true
+}
+
+/// Append a window entry to the list. Copies every string in; the caller's C
+/// buffers may be reused or freed as soon as the call returns.
+///
+/// Returns `true` on success, `false` if any of:
+/// - `list` is null
+/// - `title` is null
+/// - any non-null string is not valid UTF-8 (this includes `app_name`,
+///   `icon`, and `app_desktop_id`)
+///
+/// `app_name`, `icon`, and `app_desktop_id` may each be null to mean "field
+/// absent"; the resulting `Window` carries a `None` for the corresponding
+/// `Option<String>`. A non-null pointer that is invalid UTF-8 is rejected
+/// (strict rather than silent-`None`, matching `push_application`).
+///
+/// A successful push invalidates every pointer previously returned by
+/// `lofi_entries_get_*` (the borrow contract). The filter is recomputed
+/// against the active query so the new entry appears in `len`/`get_*` only
+/// when it matches.
+///
+/// # Safety
+///
+/// Pointers must be null or point at NUL-terminated C strings whose buffers
+/// remain valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_push_window(
+    list: *mut EntryList,
+    id: u64,
+    title: *const c_char,
+    app_name: *const c_char,
+    icon: *const c_char,
+    workspace: i32,
+    app_desktop_id: *const c_char,
+) -> bool {
+    if list.is_null() || title.is_null() {
+        return false;
+    }
+
+    // SAFETY: non-null and assumed-valid C string per the function contract.
+    let title_str = match unsafe { CStr::from_ptr(title) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return false,
+    };
+    let app_name_opt = if app_name.is_null() {
+        None
+    } else {
+        // SAFETY: non-null branch — caller's contract is the same as above.
+        match unsafe { CStr::from_ptr(app_name) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(_) => return false,
+        }
+    };
+    let icon_opt = if icon.is_null() {
+        None
+    } else {
+        // SAFETY: non-null branch — caller's contract is the same as above.
+        match unsafe { CStr::from_ptr(icon) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(_) => return false,
+        }
+    };
+    let app_desktop_id_opt = if app_desktop_id.is_null() {
+        None
+    } else {
+        // SAFETY: non-null branch — caller's contract is the same as above.
+        match unsafe { CStr::from_ptr(app_desktop_id) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(_) => return false,
+        }
+    };
+
+    // SAFETY: non-null `list` precondition; we have exclusive access for the
+    // duration of this call by the single-threaded FFI contract.
+    let list_ref = unsafe { &mut *list };
+    list_ref.push(Entry::Window(Window {
+        id,
+        title: title_str,
+        app_name: app_name_opt,
+        icon: icon_opt,
+        workspace,
+        app_desktop_id: app_desktop_id_opt,
+    }));
+    true
+}
+
+/// Return the `CGWindowID` (or platform-equivalent integer id) for the
+/// `Entry::Window` at the filtered idx. Returns `0` for any other case:
+/// - `list` is null
+/// - `idx` is out of bounds
+/// - the resolved entry is not an `Entry::Window`
+///
+/// The `0` sentinel is safe because real `CGWindowID`s on macOS are always
+/// strictly greater than 0 for regular application windows. Callers are
+/// expected to gate on `lofi_entries_get_category(...) == "Window"` before
+/// reading; this is a robustness fallback rather than the primary signal.
+///
+/// Unlike the string accessors there is no cache: the `u64` round-trips
+/// through the FFI by value, and no `CString` allocation is involved.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_window_id(
+    list: *const EntryList,
+    idx: usize,
+) -> u64 {
+    if list.is_null() {
+        return 0;
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(entry) = list_ref.resolve_filtered_index(idx) else {
+        return 0;
+    };
+    match entry {
+        Entry::Window(w) => w.id,
+        Entry::Application(_)
+        | Entry::Workspace(_)
+        | Entry::Command(_)
+        | Entry::PowerCommand(_) => 0,
+    }
 }
