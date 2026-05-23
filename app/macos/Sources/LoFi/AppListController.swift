@@ -55,12 +55,13 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// failed in the delegate); the launcher still works, it just
     /// doesn't remember the activation.
     private let mruStore: MruStore?
-    /// Activation-side state for Window entries — keyed by the same
-    /// `CGWindowID` we pushed into Rust. The Rust `Window` shape
-    /// doesn't carry a PID (intentional: cross-platform), so for the
-    /// macOS-only `WindowActivation.raise(pid:title:)` call we look the
-    /// pid + title pair up here at launch time.
-    private let windowAux: [UInt64: (pid: pid_t, title: String)]
+    /// Macos-side companion data for Window entries, keyed by the
+    /// same `CGWindowID` we pushed into Rust. Used at two points:
+    /// `WindowActivation.raise(pid:title:)` reads `pid` + `title`;
+    /// `tableView(_:viewFor:row:)` reads `appName` to render the
+    /// Window-row label as `"Title — App"`. See `AppDelegate.windowAux`
+    /// for why this lives Swift-side rather than crossing the FFI.
+    private let windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -76,7 +77,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     init(
         entries: EntryList,
         mruStore: MruStore?,
-        windowAux: [UInt64: (pid: pid_t, title: String)]
+        windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
     ) {
         self.entries = entries
         self.mruStore = mruStore
@@ -142,9 +143,25 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        let name = entries.name(at: row) ?? ""
+        let bareName = entries.name(at: row) ?? ""
         let category = entries.category(at: row) ?? ""
         let iconPath = entries.icon(at: row)
+        // Window rows: stitch the owning app's name into the visible
+        // label as `Title — App` so that when the user searches by
+        // app name (the matcher *does* match on `Window.app_name`),
+        // each matched window is identifiable as belonging to that
+        // app. Without this the rows read as bare titles ("Hacker
+        // News" with category "Window") and the user can't tell from
+        // the label which Chrome / Safari / Finder window they're
+        // looking at.
+        let name: String = {
+            guard category == "Window" else { return bareName }
+            let id = entries.windowId(at: row)
+            guard let aux = windowAux[id], !aux.appName.isEmpty else {
+                return bareName
+            }
+            return "\(bareName) — \(aux.appName)"
+        }()
         return EntryRowView(name: name, category: category, iconPath: iconPath)
     }
 

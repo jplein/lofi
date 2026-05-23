@@ -31,14 +31,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // `bumpMru` on activation. `nil` when `MruStore.init?` failed —
     // the launcher proceeds without MRU ordering in that case.
     private var mruStore: MruStore?
-    // Activation-side state for Window entries. The Rust `Window` shape
-    // doesn't have a PID field (cross-platform layer keeps it window-id-
-    // and-title only); macOS-side `WindowActivation.raise(pid:title:)`
-    // needs both pid and the title we discovered the window with. This
-    // map carries that pair, keyed by the same `CGWindowID` we hand
-    // through to Rust, so `launchRow` can look it up by id at activation
-    // time.
-    private var windowAux: [UInt64: (pid: pid_t, title: String)] = [:]
+    // Macos-side companion data for Window entries, keyed by the same
+    // `CGWindowID` we hand through to Rust. Two distinct uses:
+    //
+    //   - `pid` + `title` feed `WindowActivation.raise(pid:title:)` at
+    //     activation time. The Rust `Window` shape is intentionally
+    //     window-id-and-title only (cross-platform constraint); pid is
+    //     macOS-only state.
+    //   - `appName` is the row's "owning app" label. The matcher
+    //     already includes `Window.app_name` in its haystack so typing
+    //     an app name matches that app's windows — but the FFI
+    //     `lofi_entries_get_name` returns only the bare title. Without
+    //     this map the launcher row reads as `"Hacker News [Window]"`
+    //     with no indication that it belongs to Chrome. We render the
+    //     visible name as `"Hacker News — Google Chrome"` by stitching
+    //     `title` and `appName` at draw time.
+    private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)] = [:]
     // Set true when we triggered a TCC prompt on this launch. The
     // prompt is a system-owned window; if we then call
     // `NSApp.activate(ignoringOtherApps: true)` our borderless panel
@@ -87,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     workspace: w.workspace,
                     appDesktopId: w.ownerBundleId
                 )
-                windowAux[UInt64(w.id)] = (w.ownerPid, w.title)
+                windowAux[UInt64(w.id)] = (w.ownerPid, w.title, w.ownerName)
             }
         } else {
             // Trigger the system dialogs once. The state captured by
