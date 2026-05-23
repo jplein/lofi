@@ -1,16 +1,18 @@
 // `NSTableView` data source + delegate backed by a Rust-owned
-// `EntryList`. Owns the panel's `NSSearchField` (this controller is the
-// field's delegate; every keystroke flows through to
-// `entries.setQuery(...)` and then triggers a `tableView.reloadData()`).
+// `EntryList`. Owns the panel's search field — a borderless `NSTextField`
+// inside `SearchHeaderView` (this controller is the field's delegate;
+// every keystroke flows through to `entries.setQuery(...)` and then
+// triggers a `tableView.reloadData()`).
 //
 // Interaction model (Spotlight-style):
 //   - The search field stays first responder the whole time. Typing
 //     filters the list; arrow keys move the table's selection without
 //     ever taking focus away from the field.
 //   - Row 0 is auto-selected after every reload so the user can hit
-//     Enter immediately on the most-likely match. The system blue
-//     highlight makes the selected row visible (NSTableRowView's
-//     default behavior; we don't draw it ourselves).
+//     Enter immediately on the most-likely match. A rounded pill
+//     highlight makes the selected row visible (drawn by
+//     `RoundedSelectionRowView`; see its note for why we draw it
+//     ourselves rather than rely on the table style).
 //   - Enter or a single click launches the highlighted app via
 //     `NSWorkspace.open(_:)` and quits LoFi.
 //   - Esc quits LoFi without launching anything.
@@ -31,7 +33,8 @@
 //     trailing-aligned.
 //
 // Lifetime note: `NSTableView.dataSource` and `.delegate` are weak
-// references (and `NSSearchField.delegate` is too). Whoever creates an
+// references (and the search field's `NSTextField.delegate` is too).
+// Whoever creates an
 // `AppListController` must keep a strong reference for the table's
 // lifetime, or the table silently stops asking for cell views and rows
 // render blank. See `AppDelegate`.
@@ -41,11 +44,32 @@ import AppKit
 private let kRowHeight: CGFloat = 36
 private let kIconSize: CGFloat = 24
 private let kCategoryFontSize: CGFloat = 11
-private let kCellHorizontalPadding: CGFloat = 8
+// Leading/trailing inset for row content AND the search header, so the
+// magnifier/icons and the text share one column. Sized so content clears
+// the panel's rounded corners and sits inside the rounded selection pill
+// (see `RoundedSelectionRowView`).
+private let kCellHorizontalPadding: CGFloat = 16
 private let kCellSpacing: CGFloat = 8
+// SF Symbol point size for the search magnifier. Centered in the same
+// `kIconSize`-wide column the list icons use (see `SearchHeaderView`) so
+// the glyph lines up with the app icons below.
+private let kSearchGlyphSize: CGFloat = 18
+// Search input font size. Larger than the list rows' default body text
+// for a Spotlight-like prompt.
+private let kSearchFontSize: CGFloat = 22
+// Top/bottom inset for the search header row.
+private let kSearchRowVerticalInset: CGFloat = 6
+// Rounded selection pill geometry. We draw selection ourselves (see
+// `RoundedSelectionRowView`) because the `.inset` table style that draws
+// it for free also adds a hidden horizontal content inset, which pushed
+// the rows out of line with the search header. `.plain` + custom drawing
+// keeps the pill look without that inset.
+private let kSelectionHorizontalInset: CGFloat = 8
+private let kSelectionVerticalInset: CGFloat = 2
+private let kSelectionCornerRadius: CGFloat = 8
 
 final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
-    NSSearchFieldDelegate
+    NSTextFieldDelegate
 {
     private let entries: EntryList
     /// Optional persistent activation history. When non-nil, every
@@ -65,10 +89,16 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
-    /// The search field shown above the list. Owned here so the
-    /// controller can keep itself as the delegate; exposed to the panel
-    /// so it can pin it as the initial first responder.
-    let searchField: NSSearchField
+    private let searchHeader: SearchHeaderView
+
+    /// The search header row (magnifier + borderless text field) shown
+    /// above the list. Exposed so the panel can stack it.
+    var searchView: NSView { searchHeader }
+
+    /// The editable field inside `searchView`. Exposed so the panel can
+    /// pin it as the initial first responder, and so the controller reads
+    /// the typed query from it.
+    var searchInput: NSTextField { searchHeader.textField }
 
     /// The scrolling list view to embed below the search field. A scroll
     /// view wrapping the table so long lists overflow cleanly.
@@ -92,6 +122,15 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         table.allowsMultipleSelection = false
         table.intercellSpacing = NSSize(width: 0, height: 0)
         table.rowHeight = kRowHeight
+        // Transparent table + scroll view so the panel's liquid-glass
+        // background shows through the results, not just the search strip.
+        table.backgroundColor = .clear
+        // `.plain`, not the default `.automatic`/`.inset`, so rows carry no
+        // hidden horizontal inset — row content then sits at exactly
+        // `kCellHorizontalPadding`, lining up with the search header. The
+        // rounded selection the inset style drew for free is reproduced by
+        // `RoundedSelectionRowView`.
+        table.style = .plain
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("entry"))
         column.resizingMask = .autoresizingMask
@@ -104,18 +143,18 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.autoresizingMask = [.width, .height]
 
-        let field = NSSearchField()
-        field.placeholderString = "Search"
+        let header = SearchHeaderView()
 
         self.tableView = table
         self.scrollView = scroll
-        self.searchField = field
+        self.searchHeader = header
 
         super.init()
 
-        field.delegate = self
+        header.textField.delegate = self
         table.dataSource = self
         table.delegate = self
         // Single-click on a row launches; double-click would do the
@@ -165,14 +204,22 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         return EntryRowView(name: name, category: category, iconPath: iconPath)
     }
 
-    // MARK: - NSSearchFieldDelegate / NSControlTextDelegate
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        // Draw selection as a rounded inset pill ourselves; the `.plain`
+        // style (chosen to drop the inset style's content offset) would
+        // otherwise give a flat full-width highlight. See
+        // `RoundedSelectionRowView`.
+        RoundedSelectionRowView()
+    }
+
+    // MARK: - NSTextFieldDelegate / NSControlTextEditingDelegate
 
     func controlTextDidChange(_ notification: Notification) {
         // Every keystroke pushes the new query to Rust, then asks the
         // table to redraw. The Rust side recomputes the filter index in
         // `lofi_entries_set_query`; everything downstream (`count`,
         // `name(at:)`, ...) reads through that filter automatically.
-        entries.setQuery(searchField.stringValue)
+        entries.setQuery(searchInput.stringValue)
         tableView.reloadData()
         // After a filter change the previously selected row is almost
         // never the one the user wants; default to the top match.
@@ -349,5 +396,112 @@ private final class EntryRowView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("EntryRowView is not loadable from a NIB / coder")
+    }
+}
+
+/// The search input, rendered as a list-style header row: a magnifier in
+/// the same icon column the list rows use, then a borderless text field
+/// where the row name labels begin.
+///
+/// Why not `NSSearchField`: its cell positions the magnifier and text via
+/// `searchButtonRect`/`searchTextRect`, but stripping the bezel (which we
+/// need for the borderless look) makes the cell fall back to plain
+/// text-field drawing and ignore those rects — the glyph and text then
+/// collide at the left edge. Composing the row from the same
+/// `[icon] text` stack as `EntryRowView` (identical insets and spacing)
+/// is what guarantees the magnifier and typed text line up with the app
+/// icons and names below.
+private final class SearchHeaderView: NSView {
+    let textField: NSTextField
+
+    init() {
+        let magnifier = NSImageView()
+        magnifier.image = NSImage(
+            systemSymbolName: "magnifyingglass",
+            accessibilityDescription: "Search"
+        )
+        magnifier.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: kSearchGlyphSize,
+            weight: .regular
+        )
+        // Template SF Symbol; tint it like the dimmed category labels.
+        magnifier.contentTintColor = .secondaryLabelColor
+        magnifier.imageScaling = .scaleProportionallyDown
+        magnifier.translatesAutoresizingMaskIntoConstraints = false
+        // Same 24×24 box as the list icons so the glyph shares their column.
+        NSLayoutConstraint.activate([
+            magnifier.widthAnchor.constraint(equalToConstant: kIconSize),
+            magnifier.heightAnchor.constraint(equalToConstant: kIconSize),
+        ])
+
+        let field = NSTextField()
+        field.placeholderString = "Search"
+        // Borderless: no bezel, border, background, or focus ring so the
+        // field reads as plain text on the panel's glass.
+        field.isBezeled = false
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = NSFont.systemFont(ofSize: kSearchFontSize)
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.isScrollable = true
+        field.translatesAutoresizingMaskIntoConstraints = false
+        // Let the field absorb the horizontal slack like the row name field.
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        self.textField = field
+
+        super.init(frame: .zero)
+
+        let stack = NSStackView(views: [magnifier, field])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.distribution = .fill
+        stack.spacing = kCellSpacing
+        // Identical to EntryRowView's insets so the columns line up.
+        stack.edgeInsets = NSEdgeInsets(
+            top: kSearchRowVerticalInset,
+            left: kCellHorizontalPadding,
+            bottom: kSearchRowVerticalInset,
+            right: kCellHorizontalPadding
+        )
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("SearchHeaderView is not loadable from a NIB / coder")
+    }
+}
+
+/// Draws the row's selection as a rounded, inset pill — the look the
+/// `.inset` table style gives for free, reimplemented so the table can
+/// run in `.plain` style instead. `.plain` is what removes that style's
+/// hidden horizontal content inset, which had pushed the row icons/text
+/// to the right of the search header and broke their alignment.
+private final class RoundedSelectionRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard isSelected else { return }
+        let rect = bounds.insetBy(
+            dx: kSelectionHorizontalInset,
+            dy: kSelectionVerticalInset
+        )
+        let path = NSBezierPath(
+            roundedRect: rect,
+            xRadius: kSelectionCornerRadius,
+            yRadius: kSelectionCornerRadius
+        )
+        // The table is never first responder (the search field keeps
+        // focus), so selection is always the dimmed/unemphasized variant.
+        NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+        path.fill()
     }
 }

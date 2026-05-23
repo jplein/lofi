@@ -130,7 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.listController = listController
         let controller = PanelController(
-            searchField: listController.searchField,
+            searchView: listController.searchView,
+            searchResponder: listController.searchInput,
             listView: listController.listView
         )
         panelController = controller
