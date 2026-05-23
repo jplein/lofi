@@ -210,11 +210,21 @@ pub fn build(
         mru_position,
     }));
 
-    // Wire search-changed: rebuild list from the current query.
+    // Rebuild the list from the current query on every keystroke.
+    //
+    // We use `changed` (from GtkEditable), *not* GtkSearchEntry's own
+    // `search-changed`. `search-changed` is deliberately debounced — GTK
+    // holds it for ~150ms after the last keypress before emitting — which
+    // shows up as a visible lag between typing and the list updating.
+    // Setting `GtkSearchEntry:search-delay` to 0 would also fix it, but
+    // that property needs the gtk4-rs `v4_8` feature and this crate targets
+    // the unfeatured GTK baseline (see `install_styles`). `changed` fires
+    // synchronously per keystroke with no feature gate; the rebuild is
+    // cheap at application-gather scale, so immediate filtering is fine.
     {
         let state = state.clone();
         let list_box = list_box.clone();
-        search_entry.connect_search_changed(move |entry| {
+        search_entry.connect_changed(move |entry| {
             let query = entry.text();
             populate_list(&list_box, &state, query.as_str());
         });
