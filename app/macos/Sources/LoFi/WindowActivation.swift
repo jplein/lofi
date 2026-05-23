@@ -43,16 +43,72 @@
 // windows we cannot target a specific one, but that's strictly
 // better than dropping the activation.
 //
-// Brittleness: title matching is exact-string. When an app has two
-// windows with the same title (e.g. "Untitled — TextEdit"), the first
-// one returned by `kAXWindowsAttribute` wins. macOS does not expose a
-// stable mapping from CGWindowID to AXUIElement through the public
-// API; the private `_AXUIElementGetWindow` can do it, but pulling
-// that in is out of scope for this slice. If first-match-wins bites
-// users in practice, that's the next direction to explore.
+// Title matching
+// --------------
+// We bridge from a CGWindow title (`kCGWindowName`) to an AXUIElement
+// by walking the AX windows of the owning app and comparing their
+// `kAXTitleAttribute` against ours. Plain string equality is *not*
+// enough — see `titleMatches(cgWindowTitle:axTitle:)` below. Two
+// disagreements between the layers:
+//
+//   - CGWindow truncates long titles with a Unicode ellipsis (`…`);
+//     AX keeps the full text.
+//   - AX often suffixes the app name (Chrome: `"Hacker News" → AX
+//     "Hacker News - Google Chrome"`). AppKit apps mostly don't.
+//
+// We take the pre-ellipsis prefix of the CGWindow title and accept
+// any AX title that starts with it. This handles both shapes with
+// one rule.
+//
+// Brittleness: when an app has two windows with similar long
+// prefixes (the truncated portion happens to be identical), the
+// first-match-wins behavior picks whichever AX iteration order
+// surfaces first. macOS does not expose a stable mapping from
+// CGWindowID to AXUIElement through the public API; the private
+// `_AXUIElementGetWindow` can do it, but pulling that in is out of
+// scope for this slice.
 
 import AppKit
 import ApplicationServices
+
+/// Match a CGWindow-side title (what we got from
+/// `CGWindowListCopyWindowInfo[kCGWindowName]`) against an AX-side
+/// title (what `kAXTitleAttribute` returned on an `AXUIElement`).
+///
+/// Plain string equality is wrong because the two layers disagree on
+/// long-title rendering in ways that show up in practice:
+///
+///   - **CGWindow truncates with a Unicode ellipsis (`…`, U+2026).**
+///     AX keeps the full text. So CGWindow `"Long title that runs…"`
+///     never `==` AX `"Long title that runs on and on - Foo"`.
+///   - **AX often appends the app name as a suffix.** Chrome is the
+///     egregious case: CGWindow `"Hacker News"` vs AX
+///     `"Hacker News - Google Chrome"`. Some Electron apps do the
+///     same. AppKit apps usually don't.
+///
+/// We handle both by taking the pre-ellipsis prefix of the CGWindow
+/// title and accepting any AX title that *starts with* that prefix.
+/// `hasPrefix("Hacker News")` swallows the `" - Google Chrome"` suffix
+/// for free; pre-ellipsis prefix matching handles the truncation case.
+///
+/// Tradeoff: if two windows of the same app share a long-enough
+/// pre-ellipsis prefix, this picks whichever AX iteration order
+/// surfaces first. That's no worse than the existing first-match-wins
+/// behavior for exact-titled siblings (see gotcha 11 in the README);
+/// the principled fix is `_AXUIElementGetWindow` to disambiguate by
+/// CGWindowID. Out of scope for this slice.
+private func titleMatches(cgWindowTitle: String, axTitle: String) -> Bool {
+    if cgWindowTitle == axTitle { return true }
+    let prefix: String = {
+        if let r = cgWindowTitle.range(of: "…") {
+            return String(cgWindowTitle[..<r.lowerBound])
+                .trimmingCharacters(in: .whitespaces)
+        }
+        return cgWindowTitle
+    }()
+    guard !prefix.isEmpty else { return false }
+    return axTitle.hasPrefix(prefix)
+}
 
 enum WindowActivation {
     /// Raise the window with the given title belonging to the process
@@ -110,8 +166,8 @@ enum WindowActivation {
                 &titleValue
             )
             guard titleErr == .success,
-                  let windowTitle = titleValue as? String,
-                  windowTitle == title
+                  let axTitle = titleValue as? String,
+                  titleMatches(cgWindowTitle: title, axTitle: axTitle)
             else {
                 continue
             }
