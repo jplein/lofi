@@ -72,6 +72,17 @@ pub struct EntryList {
     /// `Some(indices)` when a real filter is active. Each entry indexes into
     /// `entries`. Built by `recompute_filter`.
     pub(super) filter: Option<Vec<usize>>,
+    /// Number of entries known to the MRU store, set by `apply_mru`.
+    /// `apply_mru` sorts `entries` so the first `mru_count` slots are
+    /// MRU-known (in recency order); the remaining slots are entries
+    /// the user has never launched, in push order. The filter uses
+    /// this boundary to enforce "MRU always wins": matching entries
+    /// at idx < mru_count stay in MRU order, and matching entries at
+    /// idx >= mru_count are sorted by descending fuzzy-match score
+    /// so the highest-quality match in the never-used tier comes
+    /// first. 0 before `apply_mru` ever runs (no MRU known →
+    /// everything sorts by score).
+    pub(super) mru_count: usize,
     /// Lazily-built C strings backing the pointers returned by
     /// `lofi_entries_get_name`. Indexed parallel to `entries` (NOT to
     /// `filter`). Cleared on every mutation.
@@ -95,6 +106,7 @@ impl EntryList {
             entries: Vec::new(),
             query: String::new(),
             filter: None,
+            mru_count: 0,
             name_cache: RefCell::new(Vec::new()),
             bundle_id_cache: RefCell::new(Vec::new()),
             category_cache: RefCell::new(Vec::new()),
@@ -142,6 +154,20 @@ impl EntryList {
     /// query becomes the passthrough case (`filter = None`). Non-empty query
     /// is tokenized on whitespace; every entry whose haystack matches every
     /// token (intersection semantics) ends up in the filter index vector.
+    ///
+    /// Ordering rule — *MRU always wins, then score*:
+    ///   - Matching entries with underlying idx `< mru_count` keep their
+    ///     existing entries-vec order. That order was set by `apply_mru`
+    ///     and reflects recency (rank 0 first), so the user's most-used
+    ///     hits stay at the top of the result set regardless of how good
+    ///     the fuzzy match against their name was.
+    ///   - Matching entries with idx `>= mru_count` (apps the user has
+    ///     never launched) are sorted by descending fuzzy-match score
+    ///     from `matcher::score`. This is what keeps `"Visual Studio
+    ///     Code"` above `"Acrobat"` when the user types `"Code"`:
+    ///     `"Visual Studio Code"` is a near-perfect substring match
+    ///     while `"Acrobat"` only matches via scattered letters from
+    ///     `"com.adobe.Acrobat"`.
     pub(super) fn recompute_filter(&mut self) {
         if self.query.trim().is_empty() {
             self.filter = None;
@@ -149,18 +175,29 @@ impl EntryList {
         }
         let tokens: Vec<&str> = self.query.split_whitespace().collect();
         let matcher = SkimMatcherV2::default().ignore_case();
-        let indices: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| {
-                if matcher::matches(e, &tokens, &matcher) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
+
+        let mut mru_part: Vec<usize> = Vec::new();
+        let mut scored_part: Vec<(i64, usize)> = Vec::new();
+        for (i, e) in self.entries.iter().enumerate() {
+            let Some(score) = matcher::score(e, &tokens, &matcher) else {
+                continue;
+            };
+            if i < self.mru_count {
+                // MRU-known: position in `entries` already encodes
+                // recency, so just append in iteration order.
+                mru_part.push(i);
+            } else {
+                scored_part.push((score, i));
+            }
+        }
+        // Stable sort descending by score; equal-score ties keep push
+        // order (which mirrors GNOME's `.desktop` enumeration or
+        // macOS's `AppDiscovery` order).
+        scored_part.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut indices = Vec::with_capacity(mru_part.len() + scored_part.len());
+        indices.extend(mru_part);
+        indices.extend(scored_part.iter().map(|(_, i)| *i));
         self.filter = Some(indices);
     }
 
@@ -610,6 +647,11 @@ pub unsafe extern "C" fn lofi_entries_apply_mru(
         })
         .collect();
     paired.sort_by_key(|(rank, _)| *rank);
+    // Count how many entries actually got a finite MRU rank. After the
+    // sort those entries sit in the leading positions of `entries`; the
+    // boundary lets `recompute_filter` keep MRU-known matches above
+    // score-ranked ones. We count *before* dropping the rank tags.
+    list_ref.mru_count = paired.iter().filter(|(r, _)| *r != usize::MAX).count();
     list_ref.entries = paired.into_iter().map(|(_, e)| e).collect();
 
     list_ref.clear_caches();

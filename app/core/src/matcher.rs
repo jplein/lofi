@@ -17,27 +17,43 @@ fn haystack(entry: &Entry) -> String {
     }
 }
 
-/// Whether a single `entry` matches every whitespace-separated token in
-/// `tokens` against its haystack (intersection / case-insensitive semantics).
-/// Factored out of `search` so the FFI layer (`lofi_entries_set_query`) can
-/// reuse the same predicate without materializing a `Vec<&Entry>`.
+/// Score a single `entry` against every whitespace-separated token in
+/// `tokens` (intersection / case-insensitive semantics). Returns `None` if
+/// any token fails to fuzzy-match the haystack; otherwise returns the sum
+/// of per-token scores from `SkimMatcherV2::fuzzy_match`.
 ///
-/// `tokens` is expected to already be tokenized by the caller (typically via
+/// Higher scores correspond to better matches — substring hits beat
+/// scattered-subsequence hits, prefix hits beat infix hits. The FFI layer
+/// (`lofi_entries_set_query`) and `search` below both use this score for
+/// ranking: a query like `"Code"` puts `"Visual Studio Code"` above
+/// `"Acrobat"` because the substring hit scores far higher than the
+/// scattered `c…o…d…e` pulled out of `"com.adobe.Acrobat"`.
+///
+/// `tokens` is expected to be already tokenized (typically via
 /// `query.split_whitespace().collect::<Vec<_>>()`); `matcher` is the
-/// case-insensitive skim matcher. Both are passed in so the caller can reuse
-/// them across many entries.
-pub(crate) fn matches(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> bool {
+/// case-insensitive skim matcher. Both are passed in so the caller can
+/// reuse them across many entries.
+pub(crate) fn score(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> Option<i64> {
     let hay = haystack(entry);
-    tokens
-        .iter()
-        .all(|token| matcher.fuzzy_match(&hay, token).is_some())
+    let mut total: i64 = 0;
+    for token in tokens {
+        let s = matcher.fuzzy_match(&hay, token)?;
+        total = total.saturating_add(s);
+    }
+    Some(total)
 }
 
-/// Fuzzy-filter `entries` by `query`. An empty or whitespace-only query is a
-/// passthrough that returns every entry. Otherwise the query is tokenized on
-/// whitespace and every token must match the entry's haystack (intersection
-/// semantics). Results preserve the input order — `search` is filter-only;
-/// ordering is the caller's responsibility (the launcher uses the MRU index).
+/// Fuzzy-filter `entries` by `query`. An empty or whitespace-only query is
+/// a passthrough that returns every entry in input order. Otherwise the
+/// query is tokenized on whitespace, every token must match the entry's
+/// haystack (intersection semantics), and matching entries are returned
+/// sorted by descending score — best matches first.
+///
+/// Why score-based: pure fuzzy subsequence matching is too permissive on
+/// its own (`"Code"` matches `"Acrobat com.adobe.Acrobat"` via scattered
+/// letters); ranking by score is what makes `"Visual Studio Code"` show
+/// up first instead of buried under noise. The FFI layer overlays MRU
+/// recency on top — see `EntryList::recompute_filter`.
 pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
     if query.trim().is_empty() {
         return entries.iter().collect();
@@ -46,10 +62,13 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
     let tokens: Vec<&str> = query.split_whitespace().collect();
     let matcher = SkimMatcherV2::default().ignore_case();
 
-    entries
+    let mut scored: Vec<(i64, &Entry)> = entries
         .iter()
-        .filter(|entry| matches(entry, &tokens, &matcher))
-        .collect()
+        .filter_map(|entry| score(entry, &tokens, &matcher).map(|s| (s, entry)))
+        .collect();
+    // Descending by score; ties retain input order (sort_by is stable).
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, e)| e).collect()
 }
 
 #[cfg(test)]

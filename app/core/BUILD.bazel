@@ -56,18 +56,26 @@ rust_static_library(
 # build scripts for the top-level crate, and we want the header in
 # Bazel's output tree so cc_library can declare it as a hdr.
 #
-# `--features ffi` is required: without it cbindgen does not see the
-# `#[cfg(feature = "ffi")] pub mod ffi` declaration and emits an empty
-# header.
+# cbindgen invokes `cargo metadata` internally to learn the crate's
+# dep graph + features. Inside the Bazel sandbox the user's
+# `~/.cargo/registry` is read-only — if cargo decides it needs to
+# refresh the registry (e.g. when the workspace Cargo.lock isn't
+# visible to the sandbox) the action fails with "Operation not
+# permitted" on the cache write. `CARGO_NET_OFFLINE=true` forbids any
+# network access, and adding the workspace Cargo.lock to the action
+# inputs gives cargo a resolved lock to read instead of trying to
+# regenerate one from the registry. Together they make the genrule
+# hermetic.
 genrule(
     name = "lofi_core_header",
     srcs = _LOFI_CORE_SRCS + [
         "cbindgen.toml",
         "Cargo.toml",
+        "//app:Cargo.lock",
     ],
     outs = ["include/lofi_core.h"],
     tools = ["@crates//:cbindgen__cbindgen"],
-    cmd = "$(execpath @crates//:cbindgen__cbindgen)" +
+    cmd = "CARGO_NET_OFFLINE=true $(execpath @crates//:cbindgen__cbindgen)" +
           " --config $(execpath cbindgen.toml)" +
           " --crate lofi-core" +
           " --output $@" +
