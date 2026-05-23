@@ -2,36 +2,83 @@
 //
 // Why AX over `NSRunningApplication.activate()` alone: activating the
 // owning app brings *some* window of that app forward, but not
-// necessarily the one the user picked from the launcher. The Accessibility
-// `kAXRaiseAction` raises a specific `AXUIElement` (one window) to the
-// top of the z-order within its application. We do both:
+// necessarily the one the user picked from the launcher. The
+// Accessibility `kAXRaiseAction` raises a specific `AXUIElement` (one
+// window) to the top of the z-order within its application. We do
+// both:
 //   1. Find the matching AX window by title, perform `kAXRaiseAction`.
-//   2. Call `NSRunningApplication.activate()` so the owning app becomes
-//      key — without this, the raised window's chrome is on top but
-//      keyboard input still goes to whatever the previous focused app
-//      was.
+//   2. Call `NSRunningApplication.activate()` so the owning app
+//      becomes key — without that, raising puts the window on top in
+//      z-order but keyboard focus stays with the previous app.
+//
+// Cross-Space limitation
+// ----------------------
+// When the target window is on another macOS Space, this code raises
+// it in-place (on its own Space) but does not move the user there.
+// macOS exposes no public API to programmatically switch Spaces:
+// `NSRunningApplication.activate()` honors the user's "When switching
+// to an application, switch to a Space with open windows for the
+// application" preference (System Settings → Desktop & Dock) — when
+// that's on, macOS follows; when off, the user stays put.
+//
+// The private SkyLight call `SLSManagedDisplaySetCurrentSpace` is what
+// Yabai et al. use to force a Space switch. We tried it on macOS 26
+// (Tahoe) and found it interacts badly with `kAXMainAttribute` set on
+// a background-app window from a foreground caller: the system
+// sometimes "fixes" the inconsistency by yanking the target window
+// onto the current Space instead of moving the user to it, leaving
+// the window in a broken Mission Control state. Until that's tracked
+// down, we leave Space-following to macOS preference handling.
+//
+// AX-disabled apps
+// ----------------
+// Firefox (and some Gecko/Chromium derivatives) ship with the AX
+// runtime asleep and report zero windows from `kAXWindowsAttribute`
+// even when the app clearly has windows open. We kick it via
+// `AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface",
+// true)` before reading the windows list — the same wakeup
+// VoiceOver and Mac scripting tools use. If the list is still empty
+// after the kick, we fall back to bare `running.activate()`: the app
+// comes forward and macOS picks one of its windows. With multiple
+// windows we cannot target a specific one, but that's strictly
+// better than dropping the activation.
 //
 // Brittleness: title matching is exact-string. When an app has two
 // windows with the same title (e.g. "Untitled — TextEdit"), the first
 // one returned by `kAXWindowsAttribute` wins. macOS does not expose a
-// stable mapping from CGWindowID to AXUIElement through the public API;
-// the private `_AXUIElementGetWindow` can do it, but pulling that in is
-// out of scope for this slice. If first-match-wins bites users in
-// practice, that's the next direction to explore.
+// stable mapping from CGWindowID to AXUIElement through the public
+// API; the private `_AXUIElementGetWindow` can do it, but pulling
+// that in is out of scope for this slice. If first-match-wins bites
+// users in practice, that's the next direction to explore.
 
 import AppKit
 import ApplicationServices
 
 enum WindowActivation {
-    /// Raise the window with the given title belonging to the process at
-    /// `pid`. Returns `true` on success, `false` if the AX call chain
-    /// fails or no AX window with the given title exists.
+    /// Raise the window with the given title belonging to the process
+    /// at `pid`. Returns `true` on success, `false` if the AX call
+    /// chain fails or no AX window with the given title exists.
     ///
     /// Calls `NSRunningApplication.activate()` after the raise so the
-    /// owning app becomes key (without that, raising puts the window on
-    /// top in z-order but keyboard focus stays with the previous app).
+    /// owning app becomes key (without that, raising puts the window
+    /// on top in z-order but keyboard focus stays with the previous
+    /// app).
     static func raise(pid: pid_t, title: String) -> Bool {
         let app = AXUIElementCreateApplication(pid)
+
+        // Firefox (and other Gecko/Chromium-derived apps) ship with
+        // accessibility disabled and report zero AX windows until the
+        // runtime is explicitly woken up. `AXEnhancedUserInterface` is
+        // the documented kick used by VoiceOver and Mac scripting
+        // tools; the attribute is undeclared (no `kAX` constant) but
+        // accepts the same boolean-set pattern as other AX attributes.
+        // Best-effort — apps that already expose AX just no-op the
+        // write.
+        _ = AXUIElementSetAttributeValue(
+            app,
+            "AXEnhancedUserInterface" as CFString,
+            true as CFTypeRef
+        )
 
         var windowsValue: CFTypeRef?
         let copyErr = AXUIElementCopyAttributeValue(
@@ -39,8 +86,20 @@ enum WindowActivation {
             kAXWindowsAttribute as CFString,
             &windowsValue
         )
-        guard copyErr == .success, let windowsArray = windowsValue as? [AXUIElement] else {
-            return false
+        guard copyErr == .success else { return false }
+        let windowsArray = (windowsValue as? [AXUIElement]) ?? []
+
+        // Fast path: AX list is empty (Firefox without AX, sandboxed
+        // app, etc.). We can't target a specific window — but we can
+        // still bring the owning app forward, which is strictly
+        // better than dropping the activation. Space-switching then
+        // falls to macOS's "switch to Space with open windows"
+        // preference (System Settings → Desktop & Dock).
+        if windowsArray.isEmpty {
+            guard let running = NSRunningApplication(processIdentifier: pid) else {
+                return false
+            }
+            return running.activate()
         }
 
         for window in windowsArray {
