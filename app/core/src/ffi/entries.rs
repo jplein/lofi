@@ -17,6 +17,16 @@
 //! Callers (Swift, in particular) must copy the bytes into their own storage
 //! before doing anything else with the list.
 //!
+//! Two accessors are exempt from the "copy before the next mutation" rule:
+//! - `lofi_entries_get_window_id` returns a `u64` by value (no borrow at all).
+//! - `lofi_entries_get_command_id` returns a `*const c_char` that points at a
+//!   `&'static CStr` (a `c"..."` literal selected by `command_id_cstr`), so its
+//!   lifetime is the *whole process*, not "until the next mutation". A mutation
+//!   never invalidates it. Swift still copies it for uniformity with the other
+//!   string accessors.
+//! - `lofi_entries_get_command_geometry` writes its result into caller-owned
+//!   out-params by value (no borrow), so it too is outside the borrow contract.
+//!
 //! Each cache is a `RefCell<Vec<Option<CString>>>` keyed on the **underlying**
 //! `entries` index (not the filtered index — see `EntryList::resolved`). We
 //! lazily fill slot `i` on demand and clear the whole cache on every mutation.
@@ -42,9 +52,12 @@ use std::ptr;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 
+use crate::compute_geometry;
 use crate::matcher;
 use crate::mru::MruStore;
-use crate::{Application, Entry, EntryKind, EntryRef, Window};
+use crate::{
+    Application, Command, CommandKind, Entry, EntryKind, EntryRef, Window, WorkArea,
+};
 
 /// Stable English category label for `EntryKind::Application`. The UI displays
 /// these as-is; localization is a UI-layer concern.
@@ -780,4 +793,211 @@ pub unsafe extern "C" fn lofi_entries_get_window_id(
         | Entry::Command(_)
         | Entry::PowerCommand(_) => 0,
     }
+}
+
+/// Stable C-string form of a `CommandKind`'s id, for `lofi_entries_get_command_id`.
+///
+/// Each arm returns a process-lifetime `&'static CStr` built from a `c"..."`
+/// literal, so the pointer handed back across the FFI never dangles and is
+/// never invalidated by a later mutation (unlike the lazily-cached string
+/// accessors). No `RefCell`/cache slot is needed.
+///
+/// The bytes here MUST stay byte-for-byte equal to the corresponding
+/// `CommandKind::as_id` (`app/core/src/lib.rs`) — `as_id` is the canonical
+/// snake_case id that round-trips into `EntryRef::Command` / the persistent MRU
+/// key. The match is exhaustive (no `_` arm) so adding a `CommandKind` variant
+/// is a compile error here until both this map and `as_id` are extended in
+/// lockstep. The `command_id_matches_as_id_for_all_kinds` FFI test guards
+/// against silent drift.
+fn command_id_cstr(kind: CommandKind) -> &'static CStr {
+    match kind {
+        CommandKind::Center => c"center",
+        CommandKind::CenterHalf => c"center_half",
+        CommandKind::CenterTwoThirds => c"center_two_thirds",
+        CommandKind::LeftHalf => c"left_half",
+        CommandKind::RightHalf => c"right_half",
+        CommandKind::StandardSize => c"standard_size",
+        CommandKind::Minimize => c"minimize",
+        CommandKind::ToggleMaximize => c"toggle_maximize",
+        CommandKind::ToggleFullscreen => c"toggle_fullscreen",
+    }
+}
+
+/// Append a window-action command entry to the list. Mirrors the `Command`
+/// struct field-for-field: `kind_id` selects the `CommandKind`,
+/// `target_window_id` is the window the command will act on at activation, the
+/// `wa_*` quadruple is the target window's monitor work area, and the `frame_*`
+/// quadruple is the target window's current frame at gather time (read by
+/// `CommandKind::Center` to recenter without resizing). All eight integers are
+/// in the caller's coordinate space and are stored verbatim — the platform
+/// layer is responsible for handing them in the convention `compute_geometry`
+/// expects (on macOS: top-left global; see `app/macos`).
+///
+/// Returns `true` on success, `false` if any of:
+/// - `list` is null
+/// - `kind_id` is null
+/// - `kind_id` is not valid UTF-8
+/// - `kind_id` is not a recognized `CommandKind::as_id` (unknown id; nothing is
+///   pushed, so the list length is unchanged)
+///
+/// A successful push invalidates every pointer previously returned by
+/// `lofi_entries_get_*` (the borrow contract). The filter is recomputed against
+/// the active query so the new command appears in `len`/`get_*` only when it
+/// matches.
+///
+/// # Safety
+///
+/// `list` must be null or a pointer obtained from `lofi_entries_new`.
+/// `kind_id` must be null or a NUL-terminated C string whose buffer remains
+/// valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_push_command(
+    list: *mut EntryList,
+    kind_id: *const c_char,
+    target_window_id: u64,
+    wa_x: i32,
+    wa_y: i32,
+    wa_w: i32,
+    wa_h: i32,
+    frame_x: i32,
+    frame_y: i32,
+    frame_w: i32,
+    frame_h: i32,
+) -> bool {
+    if list.is_null() || kind_id.is_null() {
+        return false;
+    }
+
+    // SAFETY: non-null and assumed-valid C string per the function contract.
+    let kind_str = match unsafe { CStr::from_ptr(kind_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // Unknown ids are rejected (no garbage entry inserted) so a Swift typo or
+    // a stale id surfaces as a `false` rather than a silently-broken row.
+    let Some(kind) = CommandKind::from_id(kind_str) else {
+        return false;
+    };
+
+    // SAFETY: non-null `list` precondition; we have exclusive access for the
+    // duration of this call by the single-threaded FFI contract.
+    let list_ref = unsafe { &mut *list };
+    list_ref.push(Entry::Command(Command {
+        kind,
+        target_window_id,
+        work_area: WorkArea {
+            x: wa_x,
+            y: wa_y,
+            width: wa_w,
+            height: wa_h,
+        },
+        current_frame: (frame_x, frame_y, frame_w, frame_h),
+    }));
+    true
+}
+
+/// Return a borrowed pointer to the entry-at-`idx`'s command id — the
+/// `CommandKind::as_id` snake_case string for an `Entry::Command`, and null for
+/// every other variant. The match below is exhaustive on `Entry` so a new
+/// variant is a compile error until this function is updated.
+///
+/// `idx` is the *filtered* index. Unlike the other string accessors the
+/// returned pointer is a process-lifetime `&'static CStr` (see
+/// `command_id_cstr`): it is NOT invalidated by a later mutation. Swift still
+/// copies it for uniformity.
+///
+/// Returns null when `list` is null, `idx >= len`, or the entry is not a
+/// Command.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_command_id(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
+    if list.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(entry) = list_ref.resolve_filtered_index(idx) else {
+        return ptr::null();
+    };
+    match entry {
+        Entry::Command(c) => command_id_cstr(c.kind).as_ptr(),
+        Entry::Application(_)
+        | Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::PowerCommand(_) => ptr::null(),
+    }
+}
+
+/// Compute the target geometry for the command-at-`idx` and write it to the
+/// four out-params. The geometry is `compute_geometry(kind, &work_area,
+/// current_frame)` — the single source of geometry truth shared with the GNOME
+/// frontend — so Swift never duplicates the half / two-thirds arithmetic.
+///
+/// Returns `true` and writes all four out-params only for an `Entry::Command`
+/// whose kind is a *geometry* kind (`Center`, `CenterHalf`, `CenterTwoThirds`,
+/// `LeftHalf`, `RightHalf`, `StandardSize`). Returns `false` and leaves ALL
+/// FOUR out-params untouched (documented contract) for every other case:
+/// - any out-pointer is null (guarded first)
+/// - `list` is null
+/// - `idx >= len`
+/// - the entry is not a Command
+/// - the command is a *state-toggle* kind (`Minimize`, `ToggleMaximize`,
+///   `ToggleFullscreen`), where `compute_geometry` returns `None` — Swift
+///   dispatches those by `lofi_entries_get_command_id` instead.
+///
+/// The result is by value through caller-owned out-params, so this accessor is
+/// exempt from the borrow contract (no pointer into the list is handed out).
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer. Each non-null
+/// out-pointer must reference writable `i32` storage that outlives the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_command_geometry(
+    list: *const EntryList,
+    idx: usize,
+    out_x: *mut i32,
+    out_y: *mut i32,
+    out_w: *mut i32,
+    out_h: *mut i32,
+) -> bool {
+    // Guard null out-pointers first: if we cannot write all four results we
+    // must not write any, so reject before touching the list.
+    if out_x.is_null() || out_y.is_null() || out_w.is_null() || out_h.is_null() {
+        return false;
+    }
+    if list.is_null() {
+        return false;
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(entry) = list_ref.resolve_filtered_index(idx) else {
+        return false;
+    };
+    let geometry = match entry {
+        Entry::Command(c) => compute_geometry(c.kind, &c.work_area, c.current_frame),
+        Entry::Application(_)
+        | Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::PowerCommand(_) => None,
+    };
+    let Some((x, y, w, h)) = geometry else {
+        // State-toggle kind / non-Command: leave the out-params untouched.
+        return false;
+    };
+    // SAFETY: each out-pointer is non-null (guarded at the top) and the caller
+    // guarantees writable, live `i32` storage for the duration of the call.
+    unsafe {
+        *out_x = x;
+        *out_y = y;
+        *out_w = w;
+        *out_h = h;
+    }
+    true
 }

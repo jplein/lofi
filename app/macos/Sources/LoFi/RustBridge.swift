@@ -172,6 +172,49 @@ final class EntryList {
         }
     }
 
+    /// Push a window-action command onto the list. `kindId` is a
+    /// `CommandKind::as_id` snake_case string (e.g. `"center_half"`);
+    /// `targetWindowId` is the CGWindowID the command will act on. The
+    /// work area (`waX/waY/waW/waH`) and current frame (`frameX/frameY/
+    /// frameW/frameH`) are plain `Int32` in the caller's coordinate space
+    /// (top-left global on macOS) — taken as scalars rather than CGRects
+    /// to keep this bridge CoreGraphics-free; the caller rounds CGFloat
+    /// components with `.rounded()` before converting.
+    ///
+    /// Returns `false` for a null list (impossible here, we own it), a
+    /// null/invalid-UTF-8 kind id (impossible from a Swift `String`), or
+    /// an UNKNOWN kind id (a real failure mode — Rust rejects ids that
+    /// aren't a `CommandKind`, pushing nothing).
+    @discardableResult
+    func pushCommand(
+        kindId: String,
+        targetWindowId: UInt64,
+        waX: Int32,
+        waY: Int32,
+        waW: Int32,
+        waH: Int32,
+        frameX: Int32,
+        frameY: Int32,
+        frameW: Int32,
+        frameH: Int32
+    ) -> Bool {
+        return kindId.withCString { kindPtr in
+            lofi_entries_push_command(
+                self.handle,
+                kindPtr,
+                targetWindowId,
+                waX,
+                waY,
+                waW,
+                waH,
+                frameX,
+                frameY,
+                frameW,
+                frameH
+            )
+        }
+    }
+
     var count: Int {
         Int(lofi_entries_len(handle))
     }
@@ -247,6 +290,48 @@ final class EntryList {
     /// fallback rather than the primary signal.
     func windowId(at idx: Int) -> UInt64 {
         lofi_entries_get_window_id(handle, UInt(idx))
+    }
+
+    /// Read the command id (`CommandKind::as_id`, e.g. `"center_half"`)
+    /// for the `Entry::Command` at the filtered `idx`. Returns `nil` for
+    /// non-Command entries, out-of-bounds indices, or any other case
+    /// (Rust returns null). Callers should gate on
+    /// `category(at:) == "Command"` before reading.
+    ///
+    /// Unlike the other string accessors the Rust pointer is a
+    /// process-lifetime `&'static CStr` and is never invalidated by a
+    /// later mutation, but we copy it into a Swift `String` immediately
+    /// anyway for uniformity with `name(at:)`.
+    func commandId(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_command_id(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
+    /// Read the computed geometry for the command at the filtered `idx`,
+    /// as `(x, y, w, h)` in the coordinate space the command was pushed in
+    /// (top-left global on macOS). Returns the tuple only for *geometry*
+    /// command kinds; returns `nil` for state-toggle kinds (minimize /
+    /// toggle_maximize / toggle_fullscreen), non-Command entries,
+    /// out-of-bounds indices, or a null list. A `nil` here means "dispatch
+    /// by `commandId(at:)` instead" — the state-toggle commands have no
+    /// rectangle.
+    func commandGeometry(at idx: Int) -> (x: Int32, y: Int32, w: Int32, h: Int32)? {
+        var x: Int32 = 0
+        var y: Int32 = 0
+        var w: Int32 = 0
+        var h: Int32 = 0
+        let ok = lofi_entries_get_command_geometry(
+            handle,
+            UInt(idx),
+            &x,
+            &y,
+            &w,
+            &h
+        )
+        guard ok else { return nil }
+        return (x, y, w, h)
     }
 
     /// Reorder the underlying entries by recency (most-recently-used

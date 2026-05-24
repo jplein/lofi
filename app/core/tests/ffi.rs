@@ -99,6 +99,59 @@ unsafe extern "C" {
         app_desktop_id: *const c_char,
     ) -> bool;
     fn lofi_entries_get_window_id(list: *const EntryList, idx: usize) -> u64;
+
+    // Command FFI surface (added in the macOS window-commands slice). Mirrors
+    // the C signatures cbindgen emits for the three new symbols in
+    // `lofi_core::ffi::entries`:
+    //
+    //     bool        lofi_entries_push_command(struct EntryList *list,
+    //                                            const char *kind_id,
+    //                                            uint64_t target_window_id,
+    //                                            int32_t wa_x, int32_t wa_y,
+    //                                            int32_t wa_w, int32_t wa_h,
+    //                                            int32_t frame_x, int32_t frame_y,
+    //                                            int32_t frame_w, int32_t frame_h);
+    //     const char *lofi_entries_get_command_id(const struct EntryList *list,
+    //                                              uintptr_t idx);
+    //     bool        lofi_entries_get_command_geometry(const struct EntryList *list,
+    //                                                    uintptr_t idx,
+    //                                                    int32_t *out_x,
+    //                                                    int32_t *out_y,
+    //                                                    int32_t *out_w,
+    //                                                    int32_t *out_h);
+    //
+    // `kind_id` is required and must be a valid `CommandKind::as_id` string
+    // (unknown / null / invalid-UTF-8 ids cause push_command to return false
+    // with no push). `get_command_id` returns `CommandKind::as_id` (a
+    // process-lifetime `&'static CStr`) for Command entries and null for any
+    // other variant / OOB / null list. `get_command_geometry` runs
+    // `compute_geometry`: it writes the four out-params and returns true only
+    // for geometry kinds; for state-toggle kinds (minimize / toggle_maximize /
+    // toggle_fullscreen), non-Command variants, OOB idx, or a null list it
+    // returns false AND leaves all four out-params untouched (documented
+    // contract). Null out-pointers are guarded (false).
+    fn lofi_entries_push_command(
+        list: *mut EntryList,
+        kind_id: *const c_char,
+        target_window_id: u64,
+        wa_x: i32,
+        wa_y: i32,
+        wa_w: i32,
+        wa_h: i32,
+        frame_x: i32,
+        frame_y: i32,
+        frame_w: i32,
+        frame_h: i32,
+    ) -> bool;
+    fn lofi_entries_get_command_id(list: *const EntryList, idx: usize) -> *const c_char;
+    fn lofi_entries_get_command_geometry(
+        list: *const EntryList,
+        idx: usize,
+        out_x: *mut i32,
+        out_y: *mut i32,
+        out_w: *mut i32,
+        out_h: *mut i32,
+    ) -> bool;
 }
 
 /// Opaque type matching the Rust-side `MruStore` newtype the FFI hands out
@@ -1644,6 +1697,579 @@ fn mixed_list_search_then_window_id() {
             WINDOW_ID,
             "filtered idx 0 must resolve through to the underlying window entry"
         );
+
+        lofi_entries_free(list);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command FFI surface (macOS window-commands slice).
+//
+// Constants reused from `commands.rs`'s `compute_geometry` unit tests so the
+// expected rects below are pinned to the same arithmetic the launcher relies
+// on. `WA` has non-zero `x`/`y` to catch relative-vs-absolute bugs; the
+// dimensions divide cleanly for the half / two-thirds cases. `FRAME` is the
+// target window's current frame at gather time — only `center` reads it, so
+// its size (800x600) must survive into the computed `center` rect.
+// ---------------------------------------------------------------------------
+
+/// Work area `(x, y, w, h)` shared by the command tests.
+const WA: (i32, i32, i32, i32) = (100, 50, 1800, 1000);
+
+/// Current frame `(x, y, w, h)` shared by the command tests. Only `center`
+/// reads it (recenter without resize), so its 800x600 size must reappear in
+/// the `center` geometry.
+const FRAME: (i32, i32, i32, i32) = (200, 60, 800, 600);
+
+/// Sentinel pre-filled into the four geometry out-params before a call so the
+/// "untouched on false" contract can be asserted: if the FFI returns false it
+/// must leave every out-param at this value.
+const GEOMETRY_SENTINEL: i32 = -12345;
+
+/// Push a Command of `kind_id` carrying `target_window_id`, a work area, and a
+/// current frame (both `(x, y, w, h)` tuples). Returns the boolean from the
+/// FFI call so each test can assert on it. Mirrors `push_app` /
+/// `push_window_named` for terseness.
+fn push_command_kind(
+    list: *mut EntryList,
+    kind_id: &str,
+    target_window_id: u64,
+    wa: (i32, i32, i32, i32),
+    frame: (i32, i32, i32, i32),
+) -> bool {
+    let kind_c = CString::new(kind_id).expect("kind_id must be valid for CString");
+    // SAFETY: `kind_c` is owned by this function and lives across the FFI
+    // call; `lofi_entries_push_command` copies what it needs (the kind id is
+    // parsed into a `CommandKind`, never retained) before returning.
+    unsafe {
+        lofi_entries_push_command(
+            list,
+            kind_c.as_ptr(),
+            target_window_id,
+            wa.0,
+            wa.1,
+            wa.2,
+            wa.3,
+            frame.0,
+            frame.1,
+            frame.2,
+            frame.3,
+        )
+    }
+}
+
+/// Read the command id at `idx` and return it as an owned `String`. Panics if
+/// the FFI returns null or non-UTF-8 — tests that want to assert on null call
+/// `lofi_entries_get_command_id` directly. Mirrors `name_at`.
+fn command_id_at(list: *const EntryList, idx: usize) -> String {
+    // SAFETY: caller is responsible for `idx` being in bounds; the returned
+    // pointer is a process-lifetime `&'static CStr` (per the FFI contract) so
+    // it is never invalidated by a later mutation, but we copy it out anyway
+    // for uniformity with the other accessor helpers.
+    unsafe {
+        let p = lofi_entries_get_command_id(list, idx);
+        assert!(
+            !p.is_null(),
+            "lofi_entries_get_command_id returned null for in-bounds Command idx={idx}"
+        );
+        CStr::from_ptr(p)
+            .to_str()
+            .expect("command id bytes should be UTF-8")
+            .to_owned()
+    }
+}
+
+/// Read the computed geometry at `idx`. Pre-fills the four out-params with
+/// `GEOMETRY_SENTINEL`, calls the FFI, and returns `Some((x, y, w, h))` on
+/// true / `None` on false. Tests asserting the "untouched on false" contract
+/// drive the raw FFI directly so they can inspect the sentinel after the call.
+fn command_geometry_at(list: *const EntryList, idx: usize) -> Option<(i32, i32, i32, i32)> {
+    let mut x = GEOMETRY_SENTINEL;
+    let mut y = GEOMETRY_SENTINEL;
+    let mut w = GEOMETRY_SENTINEL;
+    let mut h = GEOMETRY_SENTINEL;
+    // SAFETY: the four out-pointers reference live stack locals that outlive
+    // the call; the FFI either writes all four (true) or none (false).
+    let ok = unsafe {
+        lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h)
+    };
+    if ok {
+        Some((x, y, w, h))
+    } else {
+        None
+    }
+}
+
+#[test]
+fn push_command_round_trips_geometry_kind() {
+    // A geometry-kind Command must round-trip its polymorphic accessors:
+    // name == CommandKind::display_name ("Center half"), category == "Command",
+    // command_id == CommandKind::as_id ("center_half"), and geometry ==
+    // compute_geometry's rect for CenterHalf over WA. The shared accessors that
+    // are meaningless for a Command must report their sentinels: get_icon ==
+    // null, get_window_id == 0, get_bundle_id == null.
+    const EXPECTED_GEOMETRY: (i32, i32, i32, i32) = (550, 50, 900, 1000);
+    const TARGET_WINDOW_ID: u64 = 4242;
+
+    // SAFETY: standard FFI lifecycle: new -> push -> read -> free.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(
+            push_command_kind(list, "center_half", TARGET_WINDOW_ID, WA, FRAME),
+            "push_command for a known geometry kind should return true"
+        );
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "len should be 1 after one successful push_command"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Center half",
+            "Command's get_name should return the kind's display_name"
+        );
+        assert_eq!(
+            category_at(list, 0),
+            "Command",
+            "Command entries should report category \"Command\""
+        );
+        assert_eq!(
+            command_id_at(list, 0),
+            "center_half",
+            "get_command_id should return CommandKind::as_id"
+        );
+        assert_eq!(
+            command_geometry_at(list, 0),
+            Some(EXPECTED_GEOMETRY),
+            "get_command_geometry should return compute_geometry's CenterHalf rect"
+        );
+
+        // Polymorphic accessors that don't apply to a Command must report
+        // their documented sentinels rather than crash or leak Window/App data.
+        assert!(
+            lofi_entries_get_icon(list, 0).is_null(),
+            "get_icon must be null for a Command (Command is in the None icon arm)"
+        );
+        assert_eq!(
+            lofi_entries_get_window_id(list, 0),
+            0,
+            "get_window_id must be 0 for a Command (not a Window variant)"
+        );
+        assert!(
+            lofi_entries_get_bundle_id(list, 0).is_null(),
+            "get_bundle_id must be null for a Command (not an Application variant)"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_command_center_uses_current_frame() {
+    // Center is the only kind that reads `current_frame`: it keeps the
+    // window's current size and recenters it within the work area. With
+    // WA={100,50,1800,1000} and FRAME size 800x600, x = 100 + (1800-800)/2 =
+    // 600, y = 50 + (1000-600)/2 = 250. Proves the frame is plumbed through
+    // push_command into compute_geometry (a wrong/zero frame would change the
+    // size and origin).
+    const EXPECTED_GEOMETRY: (i32, i32, i32, i32) = (600, 250, 800, 600);
+    const TARGET_WINDOW_ID: u64 = 1;
+
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(
+            push_command_kind(list, "center", TARGET_WINDOW_ID, WA, FRAME),
+            "push_command(center) should return true"
+        );
+        assert_eq!(
+            command_geometry_at(list, 0),
+            Some(EXPECTED_GEOMETRY),
+            "center geometry must reflect the pushed current_frame size, recentered"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn command_geometry_false_for_state_toggle_kinds() {
+    // The three state-toggle kinds (minimize, toggle_maximize,
+    // toggle_fullscreen) produce no rectangle: compute_geometry returns None,
+    // so get_command_geometry returns false. They must still surface
+    // command_id and name so Swift can dispatch them by id.
+    const TARGET_WINDOW_ID: u64 = 5;
+    const STATE_KINDS: [(&str, &str); 3] = [
+        ("minimize", "Minimize"),
+        ("toggle_maximize", "Toggle maximize"),
+        ("toggle_fullscreen", "Toggle fullscreen"),
+    ];
+
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+
+        for (id, _display) in STATE_KINDS.iter() {
+            assert!(
+                push_command_kind(list, id, TARGET_WINDOW_ID, WA, FRAME),
+                "push_command({id}) should return true"
+            );
+        }
+        assert_eq!(
+            lofi_entries_len(list),
+            STATE_KINDS.len(),
+            "all three state-toggle kinds should be pushed"
+        );
+
+        for (idx, (id, display)) in STATE_KINDS.iter().enumerate() {
+            assert_eq!(
+                command_geometry_at(list, idx),
+                None,
+                "state-toggle kind {id} at idx {idx} must have no geometry"
+            );
+            assert_eq!(
+                command_id_at(list, idx),
+                *id,
+                "state-toggle kind at idx {idx} should still surface its command_id"
+            );
+            assert_eq!(
+                name_at(list, idx),
+                *display,
+                "state-toggle kind at idx {idx} should still surface its display name"
+            );
+        }
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn command_geometry_leaves_out_params_untouched_on_false() {
+    // The explicit contract: get_command_geometry must leave ALL FOUR
+    // out-params untouched on every false path. We pre-fill the outs with a
+    // sentinel and drive the raw FFI directly (not the helper) so we can
+    // inspect the sentinel after each call. Four false paths are exercised:
+    //   (a) state-toggle kind (minimize) at a valid Command idx
+    //   (b) non-Command variant (an Application)
+    //   (c) out-of-bounds idx
+    //   (d) null list pointer
+    const TARGET_WINDOW_ID: u64 = 9;
+    const FAR_OUT_OF_BOUNDS: usize = 999;
+
+    // SAFETY: standard FFI lifecycle plus a deliberate null-list call. The
+    // four out-pointers reference live stack locals across every call.
+    unsafe {
+        let list = lofi_entries_new();
+        // idx 0: a state-toggle Command (no geometry).
+        assert!(
+            push_command_kind(list, "minimize", TARGET_WINDOW_ID, WA, FRAME),
+            "push_command(minimize) should return true"
+        );
+        // idx 1: a non-Command variant.
+        assert!(
+            push_app(list, "Calculator", "com.apple.Calculator", None),
+            "push_app should succeed for the non-Command false-path case"
+        );
+
+        // Each sub-case re-arms the sentinel, calls the raw FFI, asserts
+        // false, then asserts every out-param is still the sentinel.
+        let check_untouched = |list: *const EntryList, idx: usize, case: &str| {
+            let mut x = GEOMETRY_SENTINEL;
+            let mut y = GEOMETRY_SENTINEL;
+            let mut w = GEOMETRY_SENTINEL;
+            let mut h = GEOMETRY_SENTINEL;
+            // SAFETY: out-pointers reference live stack locals; this is the
+            // false path under test, so no write should occur.
+            let ok = lofi_entries_get_command_geometry(
+                list, idx, &mut x, &mut y, &mut w, &mut h,
+            );
+            assert!(!ok, "get_command_geometry should return false for {case}");
+            assert_eq!(x, GEOMETRY_SENTINEL, "out_x must be untouched for {case}");
+            assert_eq!(y, GEOMETRY_SENTINEL, "out_y must be untouched for {case}");
+            assert_eq!(w, GEOMETRY_SENTINEL, "out_w must be untouched for {case}");
+            assert_eq!(h, GEOMETRY_SENTINEL, "out_h must be untouched for {case}");
+        };
+
+        check_untouched(list, 0, "state-toggle kind (minimize)");
+        check_untouched(list, 1, "non-Command variant (Application)");
+        check_untouched(list, FAR_OUT_OF_BOUNDS, "out-of-bounds idx");
+        check_untouched(ptr::null(), 0, "null list pointer");
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn command_geometry_false_for_non_command() {
+    // An Application entry has no command geometry: get_command_geometry must
+    // return None (false). Companion to the bundled false-path test above but
+    // expressed through the helper for the common case.
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
+
+        assert_eq!(
+            command_geometry_at(list, 0),
+            None,
+            "get_command_geometry must be None for a non-Command (Application)"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_command_unknown_kind_id_rejected() {
+    // An unrecognized kind_id (not a CommandKind::as_id) must be rejected:
+    // push_command returns false and the list stays empty (no garbage Command
+    // entry is inserted).
+    const TARGET_WINDOW_ID: u64 = 3;
+
+    // SAFETY: standard FFI lifecycle with one deliberately unknown kind id.
+    unsafe {
+        let list = lofi_entries_new();
+
+        assert!(
+            !push_command_kind(list, "not_a_command", TARGET_WINDOW_ID, WA, FRAME),
+            "push_command with an unknown kind_id must return false"
+        );
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "len must stay 0 when push_command rejects an unknown kind_id"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_command_null_kind_id_returns_false() {
+    // Null kind_id is the required-args contract: push_command returns false
+    // and does not mutate the list. A null list pointer must also short-circuit
+    // to false without crashing.
+    const TARGET_WINDOW_ID: u64 = 8;
+
+    // SAFETY: deliberately pass a null kind_id, then a null list; FFI must
+    // short-circuit to false without crashing.
+    unsafe {
+        let list = lofi_entries_new();
+
+        let ok = lofi_entries_push_command(
+            list,
+            ptr::null(),
+            TARGET_WINDOW_ID,
+            WA.0,
+            WA.1,
+            WA.2,
+            WA.3,
+            FRAME.0,
+            FRAME.1,
+            FRAME.2,
+            FRAME.3,
+        );
+        assert!(!ok, "push_command with a null kind_id must return false");
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "len must not change when push_command fails on a null kind_id"
+        );
+
+        // Null list with an otherwise-valid kind id must also be false.
+        let kind = CString::new("center").expect("kind id valid");
+        let ok_null_list = lofi_entries_push_command(
+            ptr::null_mut(),
+            kind.as_ptr(),
+            TARGET_WINDOW_ID,
+            WA.0,
+            WA.1,
+            WA.2,
+            WA.3,
+            FRAME.0,
+            FRAME.1,
+            FRAME.2,
+            FRAME.3,
+        );
+        assert!(!ok_null_list, "push_command with a null list must return false");
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_command_invalid_utf8_kind_id_returns_false() {
+    // 0xFF is never a valid UTF-8 byte; push_command must reject a non-UTF-8
+    // kind_id strictly (the to_str() check) rather than crashing or coercing.
+    // Bytes are [0xFF, 0x00] (one invalid byte plus the NUL terminator).
+    const TARGET_WINDOW_ID: u64 = 6;
+
+    // SAFETY: deliberately pass a non-UTF-8 kind_id pointer; FFI must reject
+    // without crashing.
+    unsafe {
+        let list = lofi_entries_new();
+
+        let bad_kind: [u8; 2] = [0xFF, 0x00];
+        let ok = lofi_entries_push_command(
+            list,
+            bad_kind.as_ptr().cast::<c_char>(),
+            TARGET_WINDOW_ID,
+            WA.0,
+            WA.1,
+            WA.2,
+            WA.3,
+            FRAME.0,
+            FRAME.1,
+            FRAME.2,
+            FRAME.3,
+        );
+        assert!(
+            !ok,
+            "push_command with an invalid-UTF-8 kind_id must return false"
+        );
+        assert_eq!(
+            lofi_entries_len(list),
+            0,
+            "len must not change when push_command fails on invalid UTF-8 kind_id"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_command_id_null_for_non_command() {
+    // get_command_id returns null for anything that isn't a Command at the
+    // given idx. Sub-cases: an Application (idx 0), a Window (idx 1), an
+    // out-of-bounds idx, and a null list. The mirror of get_window_id's
+    // 0-sentinel contract, but the sentinel here is a null pointer.
+    const WINDOW_ID: u64 = 21;
+    const FAR_OUT_OF_BOUNDS: usize = 999;
+
+    // SAFETY: standard FFI lifecycle plus a deliberate null-list call.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
+        assert!(
+            push_window_named(list, WINDOW_ID, "Some Doc", Some("TextEdit"), None, None),
+            "push_window should succeed for the get_command_id null test"
+        );
+
+        assert!(
+            lofi_entries_get_command_id(list, 0).is_null(),
+            "get_command_id must be null for an Application variant"
+        );
+        assert!(
+            lofi_entries_get_command_id(list, 1).is_null(),
+            "get_command_id must be null for a Window variant"
+        );
+        assert!(
+            lofi_entries_get_command_id(list, FAR_OUT_OF_BOUNDS).is_null(),
+            "get_command_id must be null for an out-of-bounds idx"
+        );
+        assert!(
+            lofi_entries_get_command_id(ptr::null(), 0).is_null(),
+            "get_command_id must be null for a null list"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn mixed_list_filtered_command_geometry_and_id() {
+    // The filtered-index resolver must route through to a Command on both
+    // get_command_id and get_command_geometry. Push two apps whose names do
+    // NOT contain an l-e-f-t subsequence ("Chrome", "Notes") plus one
+    // left_half command (display name "Left half" — contains "left"). Narrow
+    // with set_query("left"): only the command survives, and its command_id
+    // and geometry must still resolve through the filtered idx 0.
+    const EXPECTED_GEOMETRY: (i32, i32, i32, i32) = (100, 50, 900, 1000);
+    const TARGET_WINDOW_ID: u64 = 77;
+
+    // SAFETY: standard FFI lifecycle with one set_query mutation; geometry/id
+    // are read only after the mutation, so no stale-borrow concern.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Chrome", "com.google.Chrome", None));
+        assert!(push_app(list, "Notes", "com.apple.Notes", None));
+        assert!(
+            push_command_kind(list, "left_half", TARGET_WINDOW_ID, WA, FRAME),
+            "push_command(left_half) should return true"
+        );
+
+        assert!(set_query(list, "left"), "set_query should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            1,
+            "only the \"Left half\" command should match query \"left\""
+        );
+        assert_eq!(
+            category_at(list, 0),
+            "Command",
+            "the surviving filtered entry should be the Command"
+        );
+        assert_eq!(
+            command_id_at(list, 0),
+            "left_half",
+            "get_command_id must resolve through the filtered idx to the Command"
+        );
+        assert_eq!(
+            command_geometry_at(list, 0),
+            Some(EXPECTED_GEOMETRY),
+            "get_command_geometry must resolve through the filtered idx to the Command"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn command_id_matches_as_id_for_all_kinds() {
+    // Push all nine command kinds in display order and assert each
+    // command_id equals its expected snake_case id. This guards the FFI's
+    // command_id_cstr map against drift from CommandKind::as_id: if a new kind
+    // is added or an id string changes on one side only, this test fails.
+    const TARGET_WINDOW_ID: u64 = 100;
+    const ALL_KIND_IDS: [&str; 9] = [
+        "center",
+        "center_half",
+        "center_two_thirds",
+        "left_half",
+        "right_half",
+        "standard_size",
+        "minimize",
+        "toggle_maximize",
+        "toggle_fullscreen",
+    ];
+
+    // SAFETY: standard FFI lifecycle.
+    unsafe {
+        let list = lofi_entries_new();
+
+        for id in ALL_KIND_IDS.iter() {
+            assert!(
+                push_command_kind(list, id, TARGET_WINDOW_ID, WA, FRAME),
+                "push_command({id}) should return true"
+            );
+        }
+        assert_eq!(
+            lofi_entries_len(list),
+            ALL_KIND_IDS.len(),
+            "all nine command kinds should be pushed"
+        );
+
+        for (idx, expected_id) in ALL_KIND_IDS.iter().enumerate() {
+            assert_eq!(
+                command_id_at(list, idx),
+                *expected_id,
+                "command_id at idx {idx} must equal its CommandKind::as_id"
+            );
+        }
 
         lofi_entries_free(list);
     }

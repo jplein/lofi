@@ -48,8 +48,9 @@
 // We bridge from a CGWindow title (`kCGWindowName`) to an AXUIElement
 // by walking the AX windows of the owning app and comparing their
 // `kAXTitleAttribute` against ours. Plain string equality is *not*
-// enough — see `titleMatches(cgWindowTitle:axTitle:)` below. Two
-// disagreements between the layers:
+// enough — see `AXWindowFinder.titleMatches(cgWindowTitle:axTitle:)`
+// in `WindowControl.swift`, the one matcher shared by activation and
+// the window-action commands. Two disagreements between the layers:
 //
 //   - CGWindow truncates long titles with a Unicode ellipsis (`…`);
 //     AX keeps the full text.
@@ -67,48 +68,14 @@
 // CGWindowID to AXUIElement through the public API; the private
 // `_AXUIElementGetWindow` can do it, but pulling that in is out of
 // scope for this slice.
+//
+// The AX-window enumeration (the `AXEnhancedUserInterface` kick + the
+// `kAXWindowsAttribute` copy) and the title matcher both live in
+// `AXWindowFinder` (`WindowControl.swift`) so `raise` and the command
+// dispatch share one implementation of these brittle bits.
 
 import AppKit
 import ApplicationServices
-
-/// Match a CGWindow-side title (what we got from
-/// `CGWindowListCopyWindowInfo[kCGWindowName]`) against an AX-side
-/// title (what `kAXTitleAttribute` returned on an `AXUIElement`).
-///
-/// Plain string equality is wrong because the two layers disagree on
-/// long-title rendering in ways that show up in practice:
-///
-///   - **CGWindow truncates with a Unicode ellipsis (`…`, U+2026).**
-///     AX keeps the full text. So CGWindow `"Long title that runs…"`
-///     never `==` AX `"Long title that runs on and on - Foo"`.
-///   - **AX often appends the app name as a suffix.** Chrome is the
-///     egregious case: CGWindow `"Hacker News"` vs AX
-///     `"Hacker News - Google Chrome"`. Some Electron apps do the
-///     same. AppKit apps usually don't.
-///
-/// We handle both by taking the pre-ellipsis prefix of the CGWindow
-/// title and accepting any AX title that *starts with* that prefix.
-/// `hasPrefix("Hacker News")` swallows the `" - Google Chrome"` suffix
-/// for free; pre-ellipsis prefix matching handles the truncation case.
-///
-/// Tradeoff: if two windows of the same app share a long-enough
-/// pre-ellipsis prefix, this picks whichever AX iteration order
-/// surfaces first. That's no worse than the existing first-match-wins
-/// behavior for exact-titled siblings (see gotcha 11 in the README);
-/// the principled fix is `_AXUIElementGetWindow` to disambiguate by
-/// CGWindowID. Out of scope for this slice.
-private func titleMatches(cgWindowTitle: String, axTitle: String) -> Bool {
-    if cgWindowTitle == axTitle { return true }
-    let prefix: String = {
-        if let r = cgWindowTitle.range(of: "…") {
-            return String(cgWindowTitle[..<r.lowerBound])
-                .trimmingCharacters(in: .whitespaces)
-        }
-        return cgWindowTitle
-    }()
-    guard !prefix.isEmpty else { return false }
-    return axTitle.hasPrefix(prefix)
-}
 
 enum WindowActivation {
     /// Raise the window with the given title belonging to the process
@@ -119,31 +86,12 @@ enum WindowActivation {
     /// owning app becomes key (without that, raising puts the window
     /// on top in z-order but keyboard focus stays with the previous
     /// app).
-    static func raise(pid: pid_t, title: String) -> Bool {
-        let app = AXUIElementCreateApplication(pid)
-
-        // Firefox (and other Gecko/Chromium-derived apps) ship with
-        // accessibility disabled and report zero AX windows until the
-        // runtime is explicitly woken up. `AXEnhancedUserInterface` is
-        // the documented kick used by VoiceOver and Mac scripting
-        // tools; the attribute is undeclared (no `kAX` constant) but
-        // accepts the same boolean-set pattern as other AX attributes.
-        // Best-effort — apps that already expose AX just no-op the
-        // write.
-        _ = AXUIElementSetAttributeValue(
-            app,
-            "AXEnhancedUserInterface" as CFString,
-            true as CFTypeRef
-        )
-
-        var windowsValue: CFTypeRef?
-        let copyErr = AXUIElementCopyAttributeValue(
-            app,
-            kAXWindowsAttribute as CFString,
-            &windowsValue
-        )
-        guard copyErr == .success else { return false }
-        let windowsArray = (windowsValue as? [AXUIElement]) ?? []
+    static func raise(pid: pid_t, windowId: CGWindowID, title: String) -> Bool {
+        // Shared finder: kicks `AXEnhancedUserInterface` (Firefox /
+        // Gecko / Chromium ship with the AX runtime asleep) and copies
+        // `kAXWindowsAttribute`. See `AXWindowFinder` in
+        // `WindowControl.swift`.
+        let windowsArray = AXWindowFinder.windowsForApp(pid: pid)
 
         // Fast path: AX list is empty (Firefox without AX, sandboxed
         // app, etc.). We can't target a specific window — but we can
@@ -158,36 +106,29 @@ enum WindowActivation {
             return running.activate()
         }
 
-        for window in windowsArray {
-            var titleValue: CFTypeRef?
-            let titleErr = AXUIElementCopyAttributeValue(
-                window,
-                kAXTitleAttribute as CFString,
-                &titleValue
-            )
-            guard titleErr == .success,
-                  let axTitle = titleValue as? String,
-                  titleMatches(cgWindowTitle: title, axTitle: axTitle)
-            else {
-                continue
-            }
-            let raiseErr = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            guard raiseErr == .success else {
-                return false
-            }
-            // The raise put this window on top in its app's z-order; now
-            // bring the owning app to the foreground so keyboard input
-            // follows.
-            guard let running = NSRunningApplication(processIdentifier: pid) else {
-                // Window raised but we can't bring the app forward —
-                // treat as partial success and return false so the
-                // caller can decide.
-                return false
-            }
-            running.activate()
-            return true
+        // Match by CGWindowID first (immune to title drift), title as a
+        // fallback. Same shared matcher the window-action commands use.
+        guard let window = AXWindowFinder.match(
+            in: windowsArray,
+            windowId: windowId,
+            title: title
+        ) else {
+            return false
         }
-
-        return false
+        let raiseErr = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        guard raiseErr == .success else {
+            return false
+        }
+        // The raise put this window on top in its app's z-order; now
+        // bring the owning app to the foreground so keyboard input
+        // follows.
+        guard let running = NSRunningApplication(processIdentifier: pid) else {
+            // Window raised but we can't bring the app forward —
+            // treat as partial success and return false so the
+            // caller can decide.
+            return false
+        }
+        running.activate()
+        return true
     }
 }

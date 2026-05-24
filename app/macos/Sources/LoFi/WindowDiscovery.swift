@@ -38,6 +38,15 @@ import ApplicationServices
 /// `workspace` is always 0 on macOS: there's no Mutter-style workspace
 /// concept. The field exists for cross-platform parity with the GNOME
 /// pipeline, which uses `Shell.WindowTracker.get_workspace().index`.
+///
+/// `bounds` is the window's on-screen rectangle from `kCGWindowBounds`,
+/// already in **top-left global display coordinates** (origin top-left of
+/// the primary display, y growing downward). This is the same coordinate
+/// space the Accessibility `kAXPositionAttribute`/`kAXSizeAttribute` use,
+/// so the rect can be handed straight to `compute_geometry` (as the
+/// command target's `current_frame`) and back to AX without a flip. The
+/// work area, by contrast, comes from `NSScreen.visibleFrame` (Cocoa
+/// bottom-left) and *does* need flipping — see `WindowCommands`.
 struct DiscoveredWindow {
     let id: CGWindowID
     let title: String
@@ -46,6 +55,7 @@ struct DiscoveredWindow {
     let ownerBundleId: String?
     let ownerBundlePath: String?
     let workspace: Int32
+    let bounds: CGRect
 }
 
 enum WindowDiscovery {
@@ -59,12 +69,23 @@ enum WindowDiscovery {
     ///     is denied).
     /// Caller must hold both Screen Recording and Accessibility
     /// permissions; this function does not gate on them.
-    static func discover() -> [DiscoveredWindow] {
-        // No `optionOnScreenOnly` — that flag restricts the result to
-        // windows on the *current* macOS Space. Dropping it picks up
-        // windows on every Space (and minimized windows, which the
-        // user reasonably expects to be able to switch to).
-        let options: CGWindowListOption = [.excludeDesktopElements]
+    ///
+    /// `onScreenOnly` controls the Space/z-order behavior:
+    ///   - `false` (default, the window LIST): omit `.optionOnScreenOnly` so
+    ///     the result spans every macOS Space (and minimized windows) — the
+    ///     user can switch to any open window, not just ones on the current
+    ///     Space.
+    ///   - `true` (the command TARGET): pass `.optionOnScreenOnly` so the
+    ///     result is the current Space's windows in reliable front-to-back
+    ///     z-order. The first non-LoFi entry is then the genuinely-frontmost
+    ///     window the user was just looking at. Without this flag the list is
+    ///     neither z-ordered nor Space-scoped, so a window on another Space
+    ///     could sort first and become a wrong command target.
+    static func discover(onScreenOnly: Bool = false) -> [DiscoveredWindow] {
+        var options: CGWindowListOption = [.excludeDesktopElements]
+        if onScreenOnly {
+            options.insert(.optionOnScreenOnly)
+        }
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
             return []
         }
@@ -105,6 +126,21 @@ enum WindowDiscovery {
                 continue
             }
             let windowId = CGWindowID(numberRaw)
+            // `kCGWindowBounds` is a CFDictionary (`{X, Y, Width, Height}`),
+            // not a raw CGRect — bridge it via
+            // `CGRect(dictionaryRepresentation:)`. The rect is already in
+            // top-left global coordinates (see `DiscoveredWindow.bounds`).
+            // Skip the window if bounds can't be read, mirroring the
+            // skip-on-missing-field pattern above: a window surfaced to the
+            // launcher must always carry a usable `bounds` so a command
+            // targeting it has a real `current_frame`.
+            guard let boundsValue = dict[kCGWindowBounds as String],
+                  let bounds = CGRect(
+                      dictionaryRepresentation: boundsValue as! CFDictionary
+                  )
+            else {
+                continue
+            }
             // Single `NSRunningApplication` lookup, two derived fields:
             // `bundleIdentifier` (stable id, used for `EntryRef`) and
             // `bundleURL.path` (used by the UI to resolve the icon via
@@ -132,7 +168,8 @@ enum WindowDiscovery {
                     ownerPid: pidValue,
                     ownerBundleId: bundleId,
                     ownerBundlePath: bundlePath,
-                    workspace: 0
+                    workspace: 0,
+                    bounds: bounds
                 )
             )
         }

@@ -31,6 +31,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // `bumpMru` on activation. `nil` when `MruStore.init?` failed —
     // the launcher proceeds without MRU ordering in that case.
     private var mruStore: MruStore?
+    // Persistent per-window pre-maximize frame store for the
+    // toggle-maximize command. Held for the process lifetime (like
+    // `mruStore`) so the save (on maximize) and the take (on un-maximize)
+    // hit the same backing store — though in practice those two presses
+    // span two LoFi runs, which is exactly why the store is on-disk
+    // (UserDefaults). See `SavedFrameStore`.
+    private let savedFrameStore = SavedFrameStore()
+    // The window-action command target captured at startup (frontmost
+    // non-LoFi window). `nil` when there's no usable target, in which case
+    // no command rows are pushed. Threaded into `AppListController` so the
+    // command dispatch knows the pid/title/work-area/fallback rect.
+    private var commandTarget: WindowCommands.CommandTarget?
     // Macos-side companion data for Window entries, keyed by the same
     // `CGWindowID` we hand through to Rust. Two distinct uses:
     //
@@ -81,7 +93,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // permissions only take effect on the next launch.
         let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
         if canSeeWindows {
-            for w in WindowDiscovery.discover() {
+            // Enumerate once and reuse the result for both the window-row
+            // push and the saved-frame prune (re-enumerating would be a
+            // second CGWindowList syscall for no benefit).
+            let discoveredWindows = WindowDiscovery.discover()
+            // Drop saved pre-maximize frames for windows that are no longer
+            // on screen, bounding accumulation and shrinking the
+            // CGWindowID-reuse risk window (see `SavedFrameStore`).
+            savedFrameStore.prune(
+                liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
+            )
+            for w in discoveredWindows {
                 // `icon` is the icon-resolution input the Swift UI hands
                 // to `NSWorkspace.shared.icon(forFile:)` at draw time —
                 // it must be a *path*, not a bundle identifier.
@@ -97,6 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 windowAux[UInt64(w.id)] = (w.ownerPid, w.title, w.ownerName)
             }
+
+            // Push the nine window-action commands targeting the frontmost
+            // non-LoFi window. Done inside the `canSeeWindows` gate (the
+            // commands need AX to act and Screen Recording to find the
+            // target) and BEFORE `applyMru` so commands participate in MRU
+            // ordering like apps and windows.
+            pushCommands()
         } else {
             // Trigger the system dialogs once. The state captured by
             // `CGPreflightScreenCaptureAccess` is set at process start,
@@ -126,7 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let listController = AppListController(
             entries: entries,
             mruStore: mruStore,
-            windowAux: windowAux
+            windowAux: windowAux,
+            commandTarget: commandTarget,
+            savedFrameStore: savedFrameStore
         )
         self.listController = listController
         let controller = PanelController(
@@ -149,6 +180,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // click out to the prompt to grant the permission.
         NSApp.activate(ignoringOtherApps: !promptedForPermission)
         controller.show()
+    }
+
+    /// Window-action command ids in display order. Mirrors
+    /// `CommandKind::as_id` (`app/core/src/lib.rs`) and GNOME's
+    /// `commands.rs::ALL_KINDS` order.
+    private static let commandIds = [
+        "center",
+        "center_half",
+        "center_two_thirds",
+        "left_half",
+        "right_half",
+        "standard_size",
+        "minimize",
+        "toggle_maximize",
+        "toggle_fullscreen",
+    ]
+
+    /// Gather the command target and push the nine command entries. No-op
+    /// (and leaves `commandTarget` nil) when there's no usable target, so
+    /// the command rows simply don't appear — GNOME parity.
+    ///
+    /// After the push, fill `target.standardRect` by scanning the pushed
+    /// rows for the `standard_size` command and reading its computed
+    /// geometry. This single-sources the StandardSize restore rect from
+    /// Rust's `compute_geometry` (so the 2/3 math isn't duplicated in
+    /// Swift); `toggleMaximize` uses it only as the no-saved-frame
+    /// fallback. The scan is BY ID (not a fixed index) and happens before
+    /// any filter so it's robust to ordering.
+    private func pushCommands() {
+        guard var target = WindowCommands.gatherTarget() else { return }
+
+        for id in Self.commandIds {
+            _ = entries.pushCommand(
+                kindId: id,
+                targetWindowId: target.windowId,
+                waX: Int32(target.workArea.minX.rounded()),
+                waY: Int32(target.workArea.minY.rounded()),
+                waW: Int32(target.workArea.width.rounded()),
+                waH: Int32(target.workArea.height.rounded()),
+                frameX: Int32(target.currentFrame.minX.rounded()),
+                frameY: Int32(target.currentFrame.minY.rounded()),
+                frameW: Int32(target.currentFrame.width.rounded()),
+                frameH: Int32(target.currentFrame.height.rounded())
+            )
+        }
+
+        // Scan by id (no filter is active yet, so the filtered index space
+        // equals the push order) for the standard_size command's computed
+        // rect. Used as the toggle-maximize fallback.
+        for row in 0..<entries.count where entries.commandId(at: row) == "standard_size" {
+            if let geo = entries.commandGeometry(at: row) {
+                target.standardRect = CGRect(
+                    x: CGFloat(geo.x),
+                    y: CGFloat(geo.y),
+                    width: CGFloat(geo.w),
+                    height: CGFloat(geo.h)
+                )
+            }
+            break
+        }
+
+        commandTarget = target
     }
 
     private func installHiddenMenu() {

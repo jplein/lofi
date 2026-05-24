@@ -54,6 +54,9 @@ private let kCellSpacing: CGFloat = 8
 // `kIconSize`-wide column the list icons use (see `SearchHeaderView`) so
 // the glyph lines up with the app icons below.
 private let kSearchGlyphSize: CGFloat = 18
+// SF Symbol point size for command rows (whose icon is an SF Symbol, not
+// a bundle icon). Sized to read like the app icons in the same 24×24 box.
+private let kCommandGlyphSize: CGFloat = 16
 // Search input font size. Larger than the list rows' default body text
 // for a Spotlight-like prompt.
 private let kSearchFontSize: CGFloat = 22
@@ -86,6 +89,18 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// Window-row label as `"Title — App"`. See `AppDelegate.windowAux`
     /// for why this lives Swift-side rather than crossing the FFI.
     private let windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+    /// The window-action command target captured at startup (frontmost
+    /// non-LoFi window + its work area + current frame). `nil` when there
+    /// was no usable target, in which case no command rows were pushed and
+    /// the `"Command"` branch in `launchRow` is unreachable — it bails
+    /// safely anyway. Carries the StandardSize fallback rect that
+    /// `toggleMaximize` uses when no previous frame was saved.
+    private let commandTarget: WindowCommands.CommandTarget?
+    /// Persistent per-window pre-maximize frame store. Held for the
+    /// process lifetime so `toggleMaximize`'s save (on maximize) and
+    /// take (on un-maximize, possibly in a later run) hit the same backing
+    /// store. See `SavedFrameStore`.
+    private let savedFrameStore: SavedFrameStore
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -107,11 +122,15 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     init(
         entries: EntryList,
         mruStore: MruStore?,
-        windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+        windowAux: [UInt64: (pid: pid_t, title: String, appName: String)],
+        commandTarget: WindowCommands.CommandTarget?,
+        savedFrameStore: SavedFrameStore
     ) {
         self.entries = entries
         self.mruStore = mruStore
         self.windowAux = windowAux
+        self.commandTarget = commandTarget
+        self.savedFrameStore = savedFrameStore
 
         // Non-zero initial size. NSScrollView does NOT auto-resize its
         // documentView, so without an explicit frame the table sits at
@@ -201,7 +220,41 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             }
             return "\(bareName) — \(aux.appName)"
         }()
-        return EntryRowView(name: name, category: category, iconPath: iconPath)
+        // Command rows have no icon path (the Rust core returns null for
+        // `get_icon` on Command entries), so we render an SF Symbol chosen
+        // per command kind instead. Every other category keeps using the
+        // bundle-path icon. See `commandSymbolName(for:)`.
+        let symbolName: String? =
+            (category == "Command")
+            ? commandSymbolName(for: entries.commandId(at: row) ?? "")
+            : nil
+        return EntryRowView(
+            name: name,
+            category: category,
+            iconPath: iconPath,
+            symbolName: symbolName
+        )
+    }
+
+    /// SF Symbol name for a window-action command row, keyed by the
+    /// `CommandKind::as_id` string. Picked to communicate either the
+    /// geometry shape (halves / center / inset rectangles) or the action
+    /// (minimize / fullscreen). Unknown ids fall back to a generic window
+    /// glyph so a future Rust-side kind still renders something rather than
+    /// a blank icon column.
+    private func commandSymbolName(for id: String) -> String {
+        switch id {
+        case "center": return "rectangle.center.inset.filled"
+        case "center_half": return "rectangle.split.2x1"
+        case "center_two_thirds": return "rectangle.split.3x1"
+        case "left_half": return "rectangle.lefthalf.filled"
+        case "right_half": return "rectangle.righthalf.filled"
+        case "standard_size": return "rectangle.inset.filled"
+        case "minimize": return "minus.rectangle"
+        case "toggle_maximize": return "arrow.up.left.and.arrow.down.right"
+        case "toggle_fullscreen": return "arrow.up.left.and.arrow.down.right.rectangle"
+        default: return "macwindow"
+        }
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -295,21 +348,32 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// double-bump (correctly attributed to "the user tried to activate
     /// this") over a miss-bump.
     ///
-    /// Branches on the stable English category label from the FFI: a
-    /// `"Window"` row routes through AX (raise the specific window via
-    /// pid + title looked up in `windowAux`); every other category
-    /// (currently only `"Application"`) opens the `.app` bundle via
-    /// LaunchServices.
+    /// Branches on the stable English category label from the FFI:
+    ///   - `"Window"` routes through AX (raise the specific window via
+    ///     pid + title looked up in `windowAux`).
+    ///   - `"Command"` runs a window-action command against the captured
+    ///     `commandTarget`: geometry kinds (a non-nil
+    ///     `entries.commandGeometry(at:)`) call `WindowControl.move`;
+    ///     state-toggle kinds dispatch by command id.
+    ///   - every other category (currently only `"Application"`) opens the
+    ///     `.app` bundle via LaunchServices.
     private func launchRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
         if let store = mruStore {
             entries.bumpMru(store: store, at: row)
         }
-        if entries.category(at: row) == "Window" {
+        let category = entries.category(at: row)
+        if category == "Window" {
             let id = entries.windowId(at: row)
             if let aux = windowAux[id] {
-                _ = WindowActivation.raise(pid: aux.pid, title: aux.title)
+                _ = WindowActivation.raise(
+                    pid: aux.pid,
+                    windowId: CGWindowID(id),
+                    title: aux.title
+                )
             }
+        } else if category == "Command" {
+            runCommand(row)
         } else {
             // `entries.icon(at:)` returns the bundle path on macOS —
             // see the `DiscoveredApp.bundlePath` comment in
@@ -320,6 +384,66 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         }
         NSApp.terminate(nil)
     }
+
+    /// Run the window-action command at `row` against `commandTarget`.
+    /// Bails (no-op) when the command id can't be read or there is no
+    /// target — both impossible in practice once a command row exists, but
+    /// the launcher quits regardless via `launchRow`.
+    ///
+    /// Geometry kinds (`entries.commandGeometry(at:)` returns a rect) call
+    /// `WindowControl.move` with the precomputed top-left-global rect from
+    /// Rust's `compute_geometry`. State-toggle kinds (nil geometry)
+    /// dispatch by id: minimize / toggle fullscreen / toggle maximize.
+    private func runCommand(_ row: Int) {
+        guard let commandId = entries.commandId(at: row),
+              let target = commandTarget
+        else {
+            return
+        }
+        axLog(
+            "runCommand: id=\(commandId) targetWindowId=\(target.windowId) "
+                + "pid=\(target.pid) title=\"\(target.title)\""
+        )
+        if let geo = entries.commandGeometry(at: row) {
+            _ = WindowControl.move(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                x: geo.x,
+                y: geo.y,
+                width: geo.w,
+                height: geo.h
+            )
+            return
+        }
+        switch commandId {
+        case "minimize":
+            _ = WindowControl.minimize(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId
+            )
+        case "toggle_fullscreen":
+            _ = WindowControl.toggleFullscreen(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId
+            )
+        case "toggle_maximize":
+            _ = WindowControl.toggleMaximize(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                workArea: target.workArea,
+                fallbackRect: target.standardRect,
+                store: savedFrameStore
+            )
+        default:
+            // An unrecognized state-toggle id (a Rust-side kind we don't
+            // know how to dispatch yet). Do nothing rather than guess.
+            break
+        }
+    }
 }
 
 /// Single row view: `[icon] name <flexible spacer> [category]`. A plain
@@ -327,13 +451,32 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
 /// field's low horizontal content-hugging priority. The category field
 /// hugs at high priority so it never gets stretched.
 private final class EntryRowView: NSView {
-    init(name: String, category: String, iconPath: String?) {
+    /// `iconPath` (the app/window bundle path) takes precedence: if set,
+    /// the icon is read via `NSWorkspace.shared.icon(forFile:)`.
+    /// `symbolName` is the SF Symbol fallback for command rows, which have
+    /// no bundle icon — rendered as a template glyph tinted like the dimmed
+    /// category labels. Both nil ⇒ an empty (but still 24×24) icon box so
+    /// the name column stays aligned with the other rows.
+    init(name: String, category: String, iconPath: String?, symbolName: String?) {
         super.init(frame: .zero)
 
         let imageView = NSImageView()
         imageView.imageScaling = .scaleProportionallyDown
         if let path = iconPath {
             imageView.image = NSWorkspace.shared.icon(forFile: path)
+        } else if let symbolName = symbolName {
+            imageView.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: nil
+            )
+            imageView.symbolConfiguration = NSImage.SymbolConfiguration(
+                pointSize: kCommandGlyphSize,
+                weight: .regular
+            )
+            // Template SF Symbol; tint it like the dimmed category labels
+            // and the search magnifier so command rows read as actions
+            // rather than launchable apps.
+            imageView.contentTintColor = .secondaryLabelColor
         }
         imageView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
