@@ -2,7 +2,12 @@
 
 LoFi is a small launcher for GNOME and macOS (planned).
 
-![LoFi launcher showing a search field over a list of applications, workspaces, and commands](screenshot.png)
+<img src="screenshot.png" width="530" alt="LoFi launcher showing a search field over a list of applications, workspaces, and commands">
+
+<!-- screenshot.png is a 2x (HiDPI) capture, 1060x1100; width="530" renders it
+     at its intended 1x size while still serving the full-resolution pixels so
+     it stays sharp on Retina displays. -->
+
 
 ## Goals
 
