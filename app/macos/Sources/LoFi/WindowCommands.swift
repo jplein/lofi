@@ -75,14 +75,12 @@ enum WindowCommands {
     /// `AppDelegate` overwrites it post-push with the computed StandardSize
     /// rect (see `CommandTarget.standardRect`).
     static func gatherTarget() -> CommandTarget? {
-        // `onScreenOnly: true` gives the current Space's windows in reliable
-        // front-to-back z-order, so the first non-LoFi entry is the genuinely
-        // frontmost window the user was just using. (The window LIST uses the
-        // all-Spaces variant; the command TARGET must not pick a window on
-        // another Space — see `WindowDiscovery.discover`.) `WindowDiscovery`
+        // `WindowDiscovery.discover` returns the current Space's windows in
+        // reliable front-to-back z-order, so the first non-LoFi entry is the
+        // genuinely frontmost window the user was just using. `WindowDiscovery`
         // already excludes LoFi by pid; skip the LoFi bundle id too as a
         // belt-and-suspenders guard.
-        let target = WindowDiscovery.discover(onScreenOnly: true).first { window in
+        let target = WindowDiscovery.discover().first { window in
             window.ownerBundleId != lofiBundleId
         }
         guard let target else { return nil }

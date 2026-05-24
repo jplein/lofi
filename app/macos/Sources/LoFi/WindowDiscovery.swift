@@ -60,7 +60,8 @@ struct DiscoveredWindow {
 
 enum WindowDiscovery {
     /// Returns the user-relevant on-screen windows owned by other
-    /// applications. Filters:
+    /// applications on the **active macOS Space**, in reliable
+    /// front-to-back z-order. Filters:
     ///   - `kCGWindowLayer == 0` (regular app windows, not menus / panels /
     ///     system UI — those live at non-zero layers).
     ///   - `kCGWindowOwnerPID != getpid()` (don't list LoFi.app's own panel).
@@ -70,22 +71,18 @@ enum WindowDiscovery {
     /// Caller must hold both Screen Recording and Accessibility
     /// permissions; this function does not gate on them.
     ///
-    /// `onScreenOnly` controls the Space/z-order behavior:
-    ///   - `false` (default, the window LIST): omit `.optionOnScreenOnly` so
-    ///     the result spans every macOS Space (and minimized windows) — the
-    ///     user can switch to any open window, not just ones on the current
-    ///     Space.
-    ///   - `true` (the command TARGET): pass `.optionOnScreenOnly` so the
-    ///     result is the current Space's windows in reliable front-to-back
-    ///     z-order. The first non-LoFi entry is then the genuinely-frontmost
-    ///     window the user was just looking at. Without this flag the list is
-    ///     neither z-ordered nor Space-scoped, so a window on another Space
-    ///     could sort first and become a wrong command target.
-    static func discover(onScreenOnly: Bool = false) -> [DiscoveredWindow] {
-        var options: CGWindowListOption = [.excludeDesktopElements]
-        if onScreenOnly {
-            options.insert(.optionOnScreenOnly)
-        }
+    /// Why active-Space only: cross-Space activation from a regular
+    /// (non-Dock-injected) macOS process on Tahoe is unworkable —
+    /// `SLSManagedDisplaySetCurrentSpace` returns success but yanks
+    /// windows from the target Space onto the originating Space (the
+    /// gotcha 13 broken Mission Control state, see the README *Out of
+    /// scope* section). Listing windows we can't reliably activate is
+    /// worse UX than scoping the launcher to what's actually reachable.
+    /// `.optionOnScreenOnly` also gives us the front-to-back z-order
+    /// the command-target picker (`WindowCommands.gatherTarget`)
+    /// depends on.
+    static func discover() -> [DiscoveredWindow] {
+        let options: CGWindowListOption = [.excludeDesktopElements, .optionOnScreenOnly]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
             return []
         }

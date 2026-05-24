@@ -6,29 +6,21 @@
 // Accessibility `kAXRaiseAction` raises a specific `AXUIElement` (one
 // window) to the top of the z-order within its application. We do
 // both:
-//   1. Find the matching AX window by title, perform `kAXRaiseAction`.
+//   1. Find the matching AX window by id (title fallback) and perform
+//      `kAXRaiseAction`.
 //   2. Call `NSRunningApplication.activate()` so the owning app
 //      becomes key — without that, raising puts the window on top in
 //      z-order but keyboard focus stays with the previous app.
 //
-// Cross-Space limitation
-// ----------------------
-// When the target window is on another macOS Space, this code raises
-// it in-place (on its own Space) but does not move the user there.
-// macOS exposes no public API to programmatically switch Spaces:
-// `NSRunningApplication.activate()` honors the user's "When switching
-// to an application, switch to a Space with open windows for the
-// application" preference (System Settings → Desktop & Dock) — when
-// that's on, macOS follows; when off, the user stays put.
-//
-// The private SkyLight call `SLSManagedDisplaySetCurrentSpace` is what
-// Yabai et al. use to force a Space switch. We tried it on macOS 26
-// (Tahoe) and found it interacts badly with `kAXMainAttribute` set on
-// a background-app window from a foreground caller: the system
-// sometimes "fixes" the inconsistency by yanking the target window
-// onto the current Space instead of moving the user to it, leaving
-// the window in a broken Mission Control state. Until that's tracked
-// down, we leave Space-following to macOS preference handling.
+// Active-Space scope
+// ------------------
+// The window list shown by the launcher is scoped to the **active
+// Space** (`WindowDiscovery.discover` passes `.optionOnScreenOnly`), so
+// every window we can activate is already on the user's current Space.
+// That keeps activation simple: no Space-switching, no AX races, no
+// gotcha 13 reconciliation surface — just the precise AX raise. See
+// the README *Out of scope* section for why we don't try to drive
+// cross-Space activation ourselves on macOS.
 //
 // AX-disabled apps
 // ----------------
@@ -79,9 +71,7 @@ enum WindowActivation {
         // Fast path: AX list is empty (Firefox without AX, sandboxed
         // app, etc.). We can't target a specific window — but we can
         // still bring the owning app forward, which is strictly
-        // better than dropping the activation. Space-switching then
-        // falls to macOS's "switch to Space with open windows"
-        // preference (System Settings → Desktop & Dock).
+        // better than dropping the activation.
         if windowsArray.isEmpty {
             guard let running = NSRunningApplication(processIdentifier: pid) else {
                 return false
