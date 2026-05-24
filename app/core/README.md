@@ -309,7 +309,12 @@ Two ways the header gets produced, depending on the driving build system:
 - **Bazel** (the macOS path): a `genrule` in `app/core/BUILD.bazel` runs the cbindgen binary (built from the same `Cargo.lock` via `crate_universe`) and writes the header into Bazel's output tree. `build.rs` is *not* invoked.
 - **Cargo** (the `cargo build -p lofi-core --features ffi` path, useful for non-Bazel environments): `build.rs` runs cbindgen at compile time and writes `include/lofi_core.h` into the source tree.
 
-cbindgen itself enables all features by default via its internal `cargo metadata --all-features` call, so neither path needs to thread `--features ffi` through to cbindgen explicitly. The `ffi` feature toggle only gates whether the `pub mod ffi` declaration is compiled and whether `build.rs` runs cbindgen for non-Bazel consumers.
+The two paths invoke cbindgen differently to handle the `feature = "ffi"` gate on `pub mod ffi`:
+
+- The Bazel `genrule` passes a single source file (`src/lib.rs`) to the cbindgen CLI, which selects cbindgen's file-mode parser. File-mode walks `mod` declarations on disk without ever calling `cargo metadata`, so the action is hermetic (no `~/.cargo/registry`, no network). Cbindgen still records the `#[cfg(feature = "ffi")]` on items it discovers — but with no `[defines]` mapping in `cbindgen.toml`, `to_condition` returns `None` and the items are emitted unconditionally. That matches reality: Bazel's `rust_static_library` for `lofi_core` already pins `crate_features = ["ffi"]`, so the actual `.a` always exports these symbols, and an unconditional C declaration matches the linker surface.
+- The Cargo path calls `cbindgen::Builder::with_crate(&crate_dir)` from `build.rs`, which internally shells out to `cargo metadata --all-features`. That gives cbindgen full feature info and the items emit unconditionally for the same reason. The `ffi` feature toggle only gates whether `build.rs` runs cbindgen at all (so the GNOME `cargo build` path is a pure no-op).
+
+The cbindgen file-mode path emits a `Missing [defines] entry for "feature = ffi"` warning per discovered item. This is expected; see the comment block above the `lofi_core_header` genrule in `BUILD.bazel`.
 
 ### How the FFI integration tests link the symbols
 

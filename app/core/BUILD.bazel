@@ -56,30 +56,36 @@ rust_static_library(
 # build scripts for the top-level crate, and we want the header in
 # Bazel's output tree so cc_library can declare it as a hdr.
 #
-# cbindgen invokes `cargo metadata` internally to learn the crate's
-# dep graph + features. Inside the Bazel sandbox the user's
-# `~/.cargo/registry` is read-only — if cargo decides it needs to
-# refresh the registry (e.g. when the workspace Cargo.lock isn't
-# visible to the sandbox) the action fails with "Operation not
-# permitted" on the cache write. `CARGO_NET_OFFLINE=true` forbids any
-# network access, and adding the workspace Cargo.lock to the action
-# inputs gives cargo a resolved lock to read instead of trying to
-# regenerate one from the registry. Together they make the genrule
-# hermetic.
+# cbindgen has two input modes; we deliberately use the file-mode one.
+# Given a directory (the crate-mode `--crate X <dir>` form) cbindgen
+# shells out to `cargo metadata --all-features` to discover the source
+# tree — which inside the Bazel sandbox needs either network access or
+# a populated `~/.cargo/registry`, neither of which is guaranteed and
+# both of which would make the action non-hermetic. Given a single
+# source *file* (`load_bindings` in cbindgen's main.rs takes the
+# !is_dir branch) cbindgen walks `mod` declarations on disk itself with
+# no cargo invocation. We pass `src/lib.rs`; cbindgen descends into
+# `mod ffi` and finds every `#[unsafe(no_mangle)]` symbol the same way
+# the cargo-driven build.rs path does.
+#
+# Side effect: the `#[cfg(feature = "ffi")]` gate on `pub mod ffi;`
+# emits a cbindgen warning ("Missing [defines] entry for `feature =
+# ffi`") because there's no cargo metadata feeding feature info. The
+# warning is harmless — cbindgen's `to_condition` returns `None` for
+# unmapped cfgs, which means items are emitted unconditionally rather
+# than wrapped in `#if` blocks. That's exactly what we want: the
+# generated header is consumed only when the staticlib has been built
+# with `crate_features = ["ffi"]`, so an unconditional declaration
+# matches the actual linker surface.
 genrule(
     name = "lofi_core_header",
-    srcs = _LOFI_CORE_SRCS + [
-        "cbindgen.toml",
-        "Cargo.toml",
-        "//app:Cargo.lock",
-    ],
+    srcs = _LOFI_CORE_SRCS + ["cbindgen.toml"],
     outs = ["include/lofi_core.h"],
     tools = ["@crates//:cbindgen__cbindgen"],
-    cmd = "CARGO_NET_OFFLINE=true $(execpath @crates//:cbindgen__cbindgen)" +
+    cmd = "$(execpath @crates//:cbindgen__cbindgen)" +
           " --config $(execpath cbindgen.toml)" +
-          " --crate lofi-core" +
           " --output $@" +
-          " $$(dirname $(execpath cbindgen.toml))",
+          " $(execpath src/lib.rs)",
 )
 
 # `aspect_hints` on the cc_library makes rules_swift register the
