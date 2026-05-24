@@ -86,45 +86,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Window enumeration is gated on TWO permissions: Screen
         // Recording (to read `kCGWindowName`) and Accessibility (to
-        // raise specific windows via AX). Both deny? Skip windows
-        // entirely for this session — listing entries we can't activate
-        // is a worse experience than silently omitting them. Both are
-        // captured at process start by TCC, so freshly-granted
-        // permissions only take effect on the next launch.
+        // act on windows via AX). Both deny? Skip the whole section
+        // for this session. Both are captured at process start by
+        // TCC, so freshly-granted permissions only take effect on
+        // the next launch.
         let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
         if canSeeWindows {
-            // Enumerate once and reuse the result for both the window-row
-            // push and the saved-frame prune (re-enumerating would be a
-            // second CGWindowList syscall for no benefit).
+            // `WindowDiscovery.discover` is still called because the
+            // window-action commands need it to find their target
+            // (the frontmost non-LoFi window on the active display)
+            // and `SavedFrameStore.prune` needs the live-id list to
+            // garbage-collect dropped frame records. What's
+            // **intentionally absent** is the per-window
+            // `entries.pushWindow(...)` loop — i.e. the window
+            // *switcher* feature.
+            //
+            // Why the window switcher is disabled on macOS:
+            // shipping it required solving two macOS limitations a
+            // regular (unprivileged, non-Dock-injected) launcher
+            // can't work around:
+            //
+            //   1. **Cross-Space activation** —
+            //      `SLSManagedDisplaySetCurrentSpace` from a regular
+            //      process on Tahoe returns success but yanks
+            //      windows from the target Space onto the
+            //      originating Space (gotcha 13). Scoping the list
+            //      to the active Space sidesteps this, but...
+            //   2. **Cross-display focus retargeting** — AX writes
+            //      that retarget another app's key window across a
+            //      display boundary are silently dropped (gotcha
+            //      14). And even with the list scoped to the active
+            //      display, picking a same-display window can still
+            //      fail to focus when the owning app has sibling
+            //      windows on other displays: the picked window
+            //      raises to the front, but keyboard focus stays on
+            //      whichever window the app considered key. The
+            //      list contents would also depend on mouse-cursor
+            //      position (the "active display" determination),
+            //      which is surprising UX in its own right.
+            //
+            // Net: with the scoping in place, the user can't be
+            // sure a window they want is *listed*, OR that
+            // activating a listed window will actually get them
+            // there. That's worse than not having the feature.
+            // Yabai-style Dock-injection scripting additions are
+            // the only path that would make this reliable, and
+            // they're out of scope for a launcher (SIP-disabled,
+            // system-modification install). The investigation lives
+            // in the project memory entries
+            // `project_sls_cross_space.md` and
+            // `project_ax_cross_display_focus.md`; see README
+            // gotchas 13-14 for the user-facing rationale.
+            //
+            // The window-action commands stay because they don't
+            // require the user to *pick* a window — they always act
+            // on the frontmost non-LoFi window on the active
+            // display, which is reliably identifiable from
+            // `WindowDiscovery.discover`.
             let discoveredWindows = WindowDiscovery.discover()
-            // Drop saved pre-maximize frames for windows that are no longer
-            // on screen, bounding accumulation and shrinking the
-            // CGWindowID-reuse risk window (see `SavedFrameStore`).
             savedFrameStore.prune(
                 liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
             )
-            for w in discoveredWindows {
-                // `icon` is the icon-resolution input the Swift UI hands
-                // to `NSWorkspace.shared.icon(forFile:)` at draw time —
-                // it must be a *path*, not a bundle identifier.
-                // `appDesktopId` is the stable identifier and stays the
-                // bundle id. See `DiscoveredWindow` for the field split.
-                _ = entries.pushWindow(
-                    id: UInt64(w.id),
-                    title: w.title,
-                    appName: w.ownerName,
-                    icon: w.ownerBundlePath,
-                    workspace: w.workspace,
-                    appDesktopId: w.ownerBundleId
-                )
-                windowAux[UInt64(w.id)] = (w.ownerPid, w.title, w.ownerName)
-            }
-
-            // Push the nine window-action commands targeting the frontmost
-            // non-LoFi window. Done inside the `canSeeWindows` gate (the
-            // commands need AX to act and Screen Recording to find the
-            // target) and BEFORE `applyMru` so commands participate in MRU
-            // ordering like apps and windows.
             pushCommands()
         } else {
             // Trigger the system dialogs once. The state captured by

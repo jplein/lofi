@@ -60,27 +60,37 @@ struct DiscoveredWindow {
 
 enum WindowDiscovery {
     /// Returns the user-relevant on-screen windows owned by other
-    /// applications on the **active macOS Space**, in reliable
-    /// front-to-back z-order. Filters:
+    /// applications on the **active macOS Space *and* the active
+    /// display**, in reliable front-to-back z-order. Filters:
     ///   - `kCGWindowLayer == 0` (regular app windows, not menus / panels /
     ///     system UI — those live at non-zero layers).
     ///   - `kCGWindowOwnerPID != getpid()` (don't list LoFi.app's own panel).
-    ///   - non-empty `kCGWindowName` (a titleless window is uninteresting
-    ///     in a launcher, and also a strong signal that Screen Recording
-    ///     is denied).
+    ///   - non-empty `kCGWindowName` (a titleless window is uninteresting,
+    ///     and also a strong signal that Screen Recording is denied).
+    ///   - window center is on the active display (where the mouse
+    ///     cursor is — see `activeScreenTopLeftFrame`).
     /// Caller must hold both Screen Recording and Accessibility
     /// permissions; this function does not gate on them.
     ///
-    /// Why active-Space only: cross-Space activation from a regular
-    /// (non-Dock-injected) macOS process on Tahoe is unworkable —
-    /// `SLSManagedDisplaySetCurrentSpace` returns success but yanks
-    /// windows from the target Space onto the originating Space (the
-    /// gotcha 13 broken Mission Control state, see the README *Out of
-    /// scope* section). Listing windows we can't reliably activate is
-    /// worse UX than scoping the launcher to what's actually reachable.
-    /// `.optionOnScreenOnly` also gives us the front-to-back z-order
-    /// the command-target picker (`WindowCommands.gatherTarget`)
-    /// depends on.
+    /// **Used only by the window-action command target** today.
+    /// `WindowCommands.gatherTarget` calls this to pick the frontmost
+    /// non-LoFi window as the target for center/halves/standard-size/
+    /// minimize/toggle-* commands. `SavedFrameStore.prune` also reads
+    /// the live-id list to garbage-collect dropped frame records. The
+    /// window *switcher* (per-window launcher rows) used to call this
+    /// too but is disabled on macOS — see README gotchas 13-14 for the
+    /// macOS limitations that ruled it out.
+    ///
+    /// Scope rationale:
+    ///   - `.optionOnScreenOnly` gives the front-to-back z-order
+    ///     `gatherTarget` depends on, AND restricts the result to the
+    ///     active Space (the only Space we could reliably activate
+    ///     anything on, before the switcher was disabled — see gotcha
+    ///     13).
+    ///   - Active-display filtering means the command target is
+    ///     always on the same display as LoFi (the user's mouse-cursor
+    ///     display), so commands never resize a window on a display
+    ///     the user wasn't looking at.
     static func discover() -> [DiscoveredWindow] {
         let options: CGWindowListOption = [.excludeDesktopElements, .optionOnScreenOnly]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
@@ -91,6 +101,13 @@ enum WindowDiscovery {
         }
 
         let ourPid = getpid()
+        // Compute the active display's bounds in top-left global coords
+        // once, up front. Nil = no screens (impossible in practice, but
+        // fail open: no display filter applied). Window bounds come
+        // from `kCGWindowBounds` in the same top-left coordinate
+        // space, so `.contains(window.bounds.center)` is the
+        // membership test.
+        let activeFrameTopLeft = activeScreenTopLeftFrame()
         var results: [DiscoveredWindow] = []
         results.reserveCapacity(dicts.count)
 
@@ -138,6 +155,16 @@ enum WindowDiscovery {
             else {
                 continue
             }
+            // Active-display filter: skip windows whose center sits
+            // on a different display from the user (mouse cursor).
+            // `activeFrameTopLeft == nil` means no screens were
+            // available; fail open and let the window through.
+            if let activeFrame = activeFrameTopLeft {
+                let center = CGPoint(x: bounds.midX, y: bounds.midY)
+                if !activeFrame.contains(center) {
+                    continue
+                }
+            }
             // Single `NSRunningApplication` lookup, two derived fields:
             // `bundleIdentifier` (stable id, used for `EntryRef`) and
             // `bundleURL.path` (used by the UI to resolve the icon via
@@ -172,5 +199,47 @@ enum WindowDiscovery {
         }
 
         return results
+    }
+
+    /// The active display's frame in **top-left global coordinates**
+    /// (same space as `kCGWindowBounds`), so it can be intersected
+    /// directly against a discovered window's `bounds`.
+    ///
+    /// "Active display" = the display the mouse cursor is on
+    /// (`NSEvent.mouseLocation` returns Cocoa bottom-left coords).
+    /// We pick this over `NSScreen.main` because at the moment
+    /// `discover()` runs, LoFi has not yet called `NSApp.activate`,
+    /// so `NSScreen.main` could legitimately point at whichever app
+    /// was previously foreground — not necessarily the display the
+    /// user just summoned LoFi from. Mouse cursor location is the
+    /// most direct "where the user is" signal.
+    ///
+    /// Returns `nil` only when `NSScreen.screens` is empty (no
+    /// displays attached, which shouldn't be reachable on a live
+    /// macOS user session); the caller fails open in that case.
+    private static func activeScreenTopLeftFrame() -> CGRect? {
+        guard let primary = NSScreen.screens.first else { return nil }
+        let primaryHeight = primary.frame.height
+        let mouse = NSEvent.mouseLocation  // Cocoa bottom-left
+        let screens = NSScreen.screens
+        // Mouse-on-which-screen, falling back to `NSScreen.main` and
+        // finally the primary if the cursor sits in a gap (rare
+        // with mirrored displays / sleep wake transitions).
+        let active = screens.first(where: { $0.frame.contains(mouse) })
+            ?? NSScreen.main
+            ?? primary
+        let cocoa = active.frame
+        // Cocoa → top-left global: x unchanged, y flipped against
+        // the *primary* display's height (the global origin). The
+        // primary display's height is the only stable reference
+        // for converting any Cocoa y-coordinate; using the target
+        // screen's own height misplaces the rect on a secondary
+        // monitor. Same rule `WindowCommands.workAreaTopLeft` uses.
+        return CGRect(
+            x: cocoa.origin.x,
+            y: primaryHeight - cocoa.origin.y - cocoa.height,
+            width: cocoa.width,
+            height: cocoa.height
+        )
     }
 }
