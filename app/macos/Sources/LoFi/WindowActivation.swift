@@ -3,14 +3,22 @@
 // Why AX over `NSRunningApplication.activate()` alone: activating the
 // owning app brings *some* window of that app forward, but not
 // necessarily the one the user picked from the launcher. The
-// Accessibility `kAXRaiseAction` raises a specific `AXUIElement` (one
-// window) to the top of the z-order within its application. We do
-// both:
-//   1. Find the matching AX window by id (title fallback) and perform
-//      `kAXRaiseAction`.
-//   2. Call `NSRunningApplication.activate()` so the owning app
-//      becomes key — without that, raising puts the window on top in
-//      z-order but keyboard focus stays with the previous app.
+// Accessibility API addresses windows directly via `AXUIElement`s.
+// The sequence is:
+//
+//   1. Find the matching AX window by `CGWindowID` (title fallback).
+//   2. `NSRunningApplication.activate()` first — bring the owning
+//      app to the foreground so keyboard focus follows. This MUST
+//      happen before the per-window AX writes; doing it after makes
+//      `activate()` restore the app's previously-focused window and
+//      silently undo the raise (see gotcha 14).
+//   3. `kAXRaiseAction` on the picked window — moves it to the top
+//      of its app's z-order.
+//   4. `kAXMain = true` and `kAXFocused = true` on the picked window
+//      — covers the union of AppKit-style and Gecko/Chromium-style
+//      "current window" conventions, so multi-window non-AppKit apps
+//      (Firefox in particular) surface the window we picked rather
+//      than their internally-tracked current window.
 //
 // Active-Space scope
 // ------------------
@@ -18,9 +26,9 @@
 // Space** (`WindowDiscovery.discover` passes `.optionOnScreenOnly`), so
 // every window we can activate is already on the user's current Space.
 // That keeps activation simple: no Space-switching, no AX races, no
-// gotcha 13 reconciliation surface — just the precise AX raise. See
-// the README *Out of scope* section for why we don't try to drive
-// cross-Space activation ourselves on macOS.
+// gotcha 13 reconciliation surface — just the precise AX raise + the
+// main/focused writes. See the README *Out of scope* section for why
+// we don't try to drive cross-Space activation ourselves on macOS.
 //
 // AX-disabled apps
 // ----------------
@@ -88,20 +96,63 @@ enum WindowActivation {
         ) else {
             return false
         }
+
+        // Order: **activate the app first, then raise + set
+        // main/focused on the picked window.** Doing it the other way
+        // round (raise then activate) makes `NSRunningApplication.
+        // activate()` restore whichever window the app considered
+        // "main" before LoFi grabbed focus, which on multi-display
+        // setups silently undoes the AX raise. Observed symptoms:
+        //
+        //   - Finder: picking "Dustbin" on display 2 raised Dustbin
+        //     to the top of display 2's stack (good), but activate()
+        //     also raised "Blue Steel HD" to the top of display 1's
+        //     stack and made *Blue Steel HD* the focused window — not
+        //     the one we picked.
+        //   - Firefox: picking either of two windows consistently
+        //     brought up the same Firefox window (the one that was
+        //     front before LoFi), regardless of which the user
+        //     chose.
+        //
+        // Activating first lets macOS settle the app's "previous"
+        // main-window state, then the raise + main/focused writes
+        // land as the final state. This is the order Hammerspoon,
+        // Rectangle, and other AX-driven launchers use.
+        guard let running = NSRunningApplication(processIdentifier: pid) else {
+            return false
+        }
+        running.activate()
+
         let raiseErr = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         guard raiseErr == .success else {
             return false
         }
-        // The raise put this window on top in its app's z-order; now
-        // bring the owning app to the foreground so keyboard input
-        // follows.
-        guard let running = NSRunningApplication(processIdentifier: pid) else {
-            // Window raised but we can't bring the app forward —
-            // treat as partial success and return false so the
-            // caller can decide.
-            return false
-        }
-        running.activate()
+
+        // For native AppKit apps the raise above is sufficient; for
+        // Gecko (Firefox) and a few other non-AppKit toolkits it is
+        // not — they track "current window" independently of macOS
+        // z-order. Setting both `kAXMain` and `kAXFocused` covers
+        // the union of conventions: AppKit-style apps respect
+        // `kAXMain` for the "this is the active document window"
+        // semantics, while some Gecko/Chromium builds only honor
+        // `kAXFocused` for keyboard-focus selection. Best-effort —
+        // we don't check the return values because an app that
+        // doesn't implement these attributes is the expected shape
+        // for some non-AppKit toolkits, not a bug.
+        //
+        // The README's gotcha 13 warning against `kAXMainAttribute`
+        // applies specifically to the (removed) cross-Space
+        // SpaceManager flow where the write triggers macOS to yank
+        // the target window onto the originating Space. LoFi is now
+        // active-Space scoped (gotcha 13 / *Out of scope*), so there
+        // is no Space inconsistency for macOS to reconcile and the
+        // write is safe.
+        _ = AXUIElementSetAttributeValue(
+            window, kAXMainAttribute as CFString, true as CFTypeRef
+        )
+        _ = AXUIElementSetAttributeValue(
+            window, kAXFocusedAttribute as CFString, true as CFTypeRef
+        )
         return true
     }
 }
