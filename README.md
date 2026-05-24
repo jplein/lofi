@@ -2,6 +2,8 @@
 
 LoFi is a small launcher for GNOME and macOS (planned).
 
+![LoFi launcher showing a search field over a list of applications, workspaces, and commands](screenshot.png)
+
 ## Goals
 
 - Fast: LoFi should launch and display its results instantly
