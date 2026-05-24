@@ -43,36 +43,19 @@
 // windows we cannot target a specific one, but that's strictly
 // better than dropping the activation.
 //
-// Title matching
-// --------------
-// We bridge from a CGWindow title (`kCGWindowName`) to an AXUIElement
-// by walking the AX windows of the owning app and comparing their
-// `kAXTitleAttribute` against ours. Plain string equality is *not*
-// enough — see `AXWindowFinder.titleMatches(cgWindowTitle:axTitle:)`
-// in `WindowControl.swift`, the one matcher shared by activation and
-// the window-action commands. Two disagreements between the layers:
-//
-//   - CGWindow truncates long titles with a Unicode ellipsis (`…`);
-//     AX keeps the full text.
-//   - AX often suffixes the app name (Chrome: `"Hacker News" → AX
-//     "Hacker News - Google Chrome"`). AppKit apps mostly don't.
-//
-// We take the pre-ellipsis prefix of the CGWindow title and accept
-// any AX title that starts with it. This handles both shapes with
-// one rule.
-//
-// Brittleness: when an app has two windows with similar long
-// prefixes (the truncated portion happens to be identical), the
-// first-match-wins behavior picks whichever AX iteration order
-// surfaces first. macOS does not expose a stable mapping from
-// CGWindowID to AXUIElement through the public API; the private
-// `_AXUIElementGetWindow` can do it, but pulling that in is out of
-// scope for this slice.
-//
-// The AX-window enumeration (the `AXEnhancedUserInterface` kick + the
-// `kAXWindowsAttribute` copy) and the title matcher both live in
-// `AXWindowFinder` (`WindowControl.swift`) so `raise` and the command
-// dispatch share one implementation of these brittle bits.
+// Finding the AX window
+// ---------------------
+// We bridge from our captured `CGWindowID` to an `AXUIElement` by
+// exact id, via the private `_AXUIElementGetWindow` (see
+// `AXWindowFinder.match` in `WindowControl.swift`), falling back to
+// title matching only when an app's AX windows don't expose an id.
+// Id matching is what makes this robust for apps that retitle (a
+// terminal rewriting its title between gather and activation would
+// defeat title matching). The AX-window enumeration (the
+// `AXEnhancedUserInterface` kick + the `kAXWindowsAttribute` copy),
+// the id bridge, and the title-fallback matcher all live in
+// `AXWindowFinder` so `raise` and the command dispatch share one
+// implementation.
 
 import AppKit
 import ApplicationServices

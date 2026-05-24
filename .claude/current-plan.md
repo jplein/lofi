@@ -1,6 +1,30 @@
 # macOS commands slice: window-action commands on the Mac side
 
-## Status: COMPLETE ✅
+## Status: COMPLETE ✅ (+ field fixes from manual testing)
+
+## Field fixes after manual smoke testing (post-review)
+
+Manual testing on a real Mac (Ghostty + Chrome) surfaced three runtime issues the
+build/FFI tests couldn't catch; all fixed Swift-side (FFI surface unchanged):
+
+1. **Commands no-op'd on Ghostty** — AX window was found by *title*, but terminals
+   retitle between gather and activation. Fixed: match by exact `CGWindowID` via the
+   private `_AXUIElementGetWindow` (`dlsym`-resolved, title fallback) in
+   `AXWindowFinder.match`; used by both commands and `raise`. (This is the
+   `_AXUIElementGetWindow` work the macOS README gotcha 11 had marked "out of scope".)
+2. **Commands hit the wrong window (another Space)** — the command target came from the
+   all-Spaces, unordered window list. Fixed: `gatherTarget` uses
+   `WindowDiscovery.discover(onScreenOnly: true)` (current Space, front-to-back z-order);
+   the switcher list still spans all Spaces.
+3. **Resized-or-moved-but-not-both** — `AXEnhancedUserInterface` (kicked on for Firefox
+   enumeration) makes geometry async so only the last set survives. Fixed:
+   `WindowControl.disableEnhancedUI` before geometry + a `size → position → size` pass in
+   `setFrame`.
+
+Temporary `/tmp/lofi-wm.log` diagnostics added during debugging were removed once
+confirmed working. Docs updated: `app/macos/README.md` gotchas 11/12/19/20 +
+`WindowActivation.swift`/`WindowControl.swift` header comments. Verified: 49 FFI tests
+pass, macOS build green.
 
 ## Orchestrator decision on coder's test recommendations
 

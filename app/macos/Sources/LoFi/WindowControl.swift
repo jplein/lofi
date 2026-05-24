@@ -26,33 +26,29 @@
 // AX silently ignores geometry changes on a window that is fullscreen
 // (and, in practice, on a "zoomed"/green-button-maximized window), so
 // `move` and `toggleMaximize` clear `"AXFullScreen"` *before* setting
-// position/size. We also set **position then size** rather than the
-// reverse: some apps clamp a move against the *current* size, so moving
-// first and resizing second lands the window where we asked more
-// reliably. There is no public "is zoomed" attribute, so we rely on the
-// explicit position+size set to de-zoom in practice — the same shape
+// position/size. There is no public "is zoomed" attribute, so we rely on
+// the explicit position+size set to de-zoom in practice — the same shape
 // GNOME's MoveResizeWindow takes (it unmaximizes/unfullscreens first).
 //
-// Title matching brittleness (gotcha 11) applies here exactly as it does
-// to activation: the AX window is found by `pid` + `titleMatches`. See
-// `AXWindowFinder` and `WindowActivation`.
+// Two things make AX geometry actually stick (see `setFrame` /
+// `disableEnhancedUI`):
+//   1. Disable `AXEnhancedUserInterface` first. `windowsForApp` turns it on
+//      to wake sleeping AX runtimes (Firefox) for enumeration, but with it
+//      on the window server applies geometry asynchronously/animated and
+//      only the LAST attribute set survives — so position and size fight
+//      (resize-or-move-but-not-both, the bug we hit on Ghostty).
+//   2. Set **size -> position -> size**. Even with sets synchronous, a move
+//      is clamped against the window's size at that instant (and a resize
+//      against its position); resizing first, moving, then re-asserting size
+//      lands both for shrink and grow. Same dance Rectangle uses.
+//
+// The AX window is found by `pid` + exact `CGWindowID` (via the private
+// `_AXUIElementGetWindow` bridge below), falling back to `titleMatches`
+// only when an app's AX windows don't expose an id. See `AXWindowFinder`
+// and `WindowActivation`.
 
 import AppKit
 import ApplicationServices
-
-/// TEMPORARY diagnostic logger. Writes to the unified logging system via
-/// `NSLog`, so the messages are visible regardless of how the app was
-/// launched (it does not depend on a terminal being attached). To watch
-/// them while reproducing, run in another terminal:
-///
-///     log stream --predicate 'eventMessage CONTAINS "LoFi[wm]"' --info
-///
-/// or open Console.app and filter on `LoFi[wm]`. Added to debug
-/// window-command dispatch (commands no-op'ing / hitting the wrong window);
-/// remove once the dispatch is confirmed working in the field.
-func axLog(_ message: String) {
-    NSLog("LoFi[wm] %@", message)
-}
 
 /// `_AXUIElementGetWindow` is a private (un-headered) HIServices function
 /// that returns the `CGWindowID` backing an `AXUIElement` window. It is the
@@ -179,7 +175,6 @@ enum AXWindowFinder {
             else {
                 continue
             }
-            axLog("match: id bridge missed, matched by title \"\(axTitle)\"")
             return window
         }
         return nil
@@ -189,16 +184,7 @@ enum AXWindowFinder {
     /// fallback — see `match`). Returns `nil` when the app exposes no windows
     /// or none match.
     static func find(pid: pid_t, windowId: CGWindowID, title: String) -> AXUIElement? {
-        let windows = windowsForApp(pid: pid)
-        let result = match(in: windows, windowId: windowId, title: title)
-        if result == nil {
-            let ids = windows.map { cgWindowId(of: $0).map(String.init) ?? "nil" }
-            axLog(
-                "find: NO MATCH pid=\(pid) wantId=\(windowId) "
-                    + "title=\"\(title)\" — \(windows.count) AX windows, ids=\(ids)"
-            )
-        }
-        return result
+        match(in: windowsForApp(pid: pid), windowId: windowId, title: title)
     }
 }
 
@@ -226,13 +212,12 @@ enum WindowControl {
             return false
         }
         clearFullscreen(window)
-        let ok = setFrame(
+        disableEnhancedUI(pid: pid)
+        return setFrame(
             window,
             origin: CGPoint(x: CGFloat(x), y: CGFloat(y)),
             size: CGSize(width: CGFloat(width), height: CGFloat(height))
         )
-        axLog("move: id=\(windowId) -> (\(x),\(y),\(width),\(height)) ok=\(ok)")
-        return ok
     }
 
     /// Minimize the window with `title` owned by `pid` by setting
@@ -248,7 +233,6 @@ enum WindowControl {
             kAXMinimizedAttribute as CFString,
             true as CFTypeRef
         )
-        axLog("minimize: id=\(windowId) ok=\(err == .success)")
         return err == .success
     }
 
@@ -273,7 +257,6 @@ enum WindowControl {
             "AXFullScreen" as CFString,
             (!current) as CFTypeRef
         )
-        axLog("toggleFullscreen: id=\(windowId) \(current) -> \(!current) ok=\(err == .success)")
         return err == .success
     }
 
@@ -325,46 +308,89 @@ enum WindowControl {
             return false
         }
 
+        clearFullscreen(window)
+        disableEnhancedUI(pid: pid)
         if framesFill(currentFrame, workArea) {
             // Un-maximize: restore the saved previous frame, falling back
             // to the StandardSize rect when none was saved.
             let restore = store.take(windowId: windowId) ?? fallbackRect
-            clearFullscreen(window)
             return setFrame(window, origin: restore.origin, size: restore.size)
         } else {
             // Maximize: remember where the window was (overwriting any
             // prior saved frame — we track the size right before the most
             // recent maximize), then fill the work area.
             store.save(windowId: windowId, frame: currentFrame)
-            clearFullscreen(window)
             return setFrame(window, origin: workArea.origin, size: workArea.size)
         }
     }
 
     // MARK: - AX primitives
 
-    /// Set a window's position then size from a top-left-global origin +
-    /// size. AX wants each value wrapped in an `AXValue` of the matching
-    /// type (`.cgPoint` / `.cgSize`); `AXValueCreate` takes the address of
-    /// a mutable local. Position first, size second (see the file header).
-    /// Returns true iff both sets report `.success`.
+    /// Move + resize a window to a top-left-global origin + size, using a
+    /// **size → position → size** sequence.
+    ///
+    /// Callers MUST disable `AXEnhancedUserInterface` first (see
+    /// `disableEnhancedUI`) — with it on, geometry sets apply asynchronously
+    /// and only the last attribute set sticks, so position and size fight.
+    /// With it off the sets are synchronous, but a single pass can still be
+    /// clamped: the server constrains a move using the window's size at that
+    /// instant (and a resize using its position). Setting size first, then
+    /// position, then size again handles both directions — the leading size
+    /// shrinks a too-wide window so the move isn't clamped against an edge,
+    /// and the trailing size re-asserts the dimensions once the window is at
+    /// its target origin (covering the grow case). This is the same dance
+    /// Rectangle uses. AX values are wrapped via
+    /// `AXValueCreate(.cgPoint/.cgSize, ...)`. Returns true iff the final
+    /// position set and at least one size set report `.success`.
     private static func setFrame(_ window: AXUIElement, origin: CGPoint, size: CGSize) -> Bool {
+        let size1 = setSize(window, size)
+        let posOk = setPosition(window, origin)
+        let size2 = setSize(window, size)
+        return posOk && (size1 || size2)
+    }
+
+    /// Turn `AXEnhancedUserInterface` OFF on the owning app so geometry sets
+    /// apply synchronously. `AXWindowFinder.windowsForApp` turns it ON to
+    /// wake sleeping AX runtimes (Firefox) for enumeration, but leaving it on
+    /// makes the window server apply position/size changes asynchronously and
+    /// animated — so the two sets in `setFrame` fight and only whichever was
+    /// set LAST survives (the cause of resize-or-move-but-not-both). Rectangle
+    /// and yabai disable it for exactly this reason. We leave it off rather
+    /// than restore it: off is the normal state and LoFi quits immediately
+    /// after. Undeclared attribute, hence the bare string.
+    private static func disableEnhancedUI(pid: pid_t) {
+        let app = AXUIElementCreateApplication(pid)
+        _ = AXUIElementSetAttributeValue(
+            app,
+            "AXEnhancedUserInterface" as CFString,
+            false as CFTypeRef
+        )
+    }
+
+    /// Set just `kAXPositionAttribute`. Returns true iff the set reports
+    /// `.success` (which does NOT guarantee the window honored it — the
+    /// server may clamp; see `setFrame`).
+    private static func setPosition(_ window: AXUIElement, _ origin: CGPoint) -> Bool {
         var p = origin
         guard let posValue = AXValueCreate(.cgPoint, &p) else { return false }
-        let posErr = AXUIElementSetAttributeValue(
+        return AXUIElementSetAttributeValue(
             window,
             kAXPositionAttribute as CFString,
             posValue
-        )
+        ) == .success
+    }
 
+    /// Set just `kAXSizeAttribute`. Returns true iff the set reports
+    /// `.success`. Some windows (terminals snapping to a character grid,
+    /// fixed-size dialogs) honor it only approximately or not at all.
+    private static func setSize(_ window: AXUIElement, _ size: CGSize) -> Bool {
         var s = size
         guard let sizeValue = AXValueCreate(.cgSize, &s) else { return false }
-        let sizeErr = AXUIElementSetAttributeValue(
+        return AXUIElementSetAttributeValue(
             window,
             kAXSizeAttribute as CFString,
             sizeValue
-        )
-        return posErr == .success && sizeErr == .success
+        ) == .success
     }
 
     /// Read a window's current top-left-global frame via AX. Returns `nil`

@@ -349,8 +349,9 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// this") over a miss-bump.
     ///
     /// Branches on the stable English category label from the FFI:
-    ///   - `"Window"` routes through AX (raise the specific window via
-    ///     pid + title looked up in `windowAux`).
+    ///   - `"Window"` routes through AX (raise the specific window by its
+    ///     `CGWindowID`, with pid + title from `windowAux` for the AX lookup
+    ///     and its title fallback).
     ///   - `"Command"` runs a window-action command against the captured
     ///     `commandTarget`: geometry kinds (a non-nil
     ///     `entries.commandGeometry(at:)`) call `WindowControl.move`;
@@ -400,10 +401,6 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         else {
             return
         }
-        axLog(
-            "runCommand: id=\(commandId) targetWindowId=\(target.windowId) "
-                + "pid=\(target.pid) title=\"\(target.title)\""
-        )
         if let geo = entries.commandGeometry(at: row) {
             _ = WindowControl.move(
                 pid: target.pid,

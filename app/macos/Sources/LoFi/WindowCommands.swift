@@ -85,15 +85,7 @@ enum WindowCommands {
         let target = WindowDiscovery.discover(onScreenOnly: true).first { window in
             window.ownerBundleId != lofiBundleId
         }
-        guard let target else {
-            axLog("gatherTarget: no non-LoFi on-screen window — no command rows")
-            return nil
-        }
-        axLog(
-            "gatherTarget: target id=\(target.id) pid=\(target.ownerPid) "
-                + "bundle=\(target.ownerBundleId ?? "nil") title=\"\(target.title)\" "
-                + "bounds=\(target.bounds)"
-        )
+        guard let target else { return nil }
         guard let workArea = workAreaTopLeft(forWindowBounds: target.bounds) else {
             return nil
         }
