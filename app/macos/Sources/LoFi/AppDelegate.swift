@@ -34,12 +34,16 @@
 // Permissions
 // -----------
 // Both Screen Recording and Accessibility are checked at process
-// start. If either is missing, the prompts fire once and
-// `promptedForPermission` is set so the very first `summonPanel`
-// skips `ignoringOtherApps: true` — the system permission dialog
-// is borderless-panel-on-top-style and our floating panel would
-// otherwise cover it. Subsequent summons after the user grants
-// (and relaunches — gotcha 10) are normal.
+// start (TCC freezes the answer there — gotcha 10). The first summon
+// that finds either missing fires the system prompts and returns
+// WITHOUT showing the panel: our `.floating`-level panel composites
+// on top of the centered TCC dialogs (window level beats activation
+// for z-order, so `ignoringOtherApps` can't push it behind), so we
+// let the dialogs own the screen instead. The prompt fires exactly
+// once (`promptedForPermission`); later summons in the same process
+// show the panel in degraded apps-only mode. After the user grants
+// and relaunches, the new process sees the permissions and runs the
+// full path from its first summon.
 
 import AppKit
 import Carbon.HIToolbox
@@ -80,11 +84,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // this stays empty; the field exists because `AppListController`
     // expects it).
     private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)] = [:]
-    // Set true on the first summon after a TCC prompt fires so we
-    // don't shove our panel in front of the system permission
-    // dialog. Subsequent summons after the user has granted (and
-    // relaunched — gotcha 10) clear back to false naturally because
-    // the prompt only triggers on missing-permission summons.
+    // Set once, on the first summon that finds a permission missing,
+    // right before we fire the TCC prompts and bail without showing
+    // the panel (so the panel doesn't bury the system dialogs). Gates
+    // that prompt-and-bail path to exactly once per process — later
+    // missing-permission summons skip it and show the panel in
+    // degraded apps-only mode instead.
     private var promptedForPermission = false
     // Live for the process lifetime; deinit unregisters via Carbon.
     private var hotkey: GlobalHotkey?
@@ -183,25 +188,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// z-order it gets is more useful when LoFi isn't at the top
     /// of it.)
     private func summonPanel() {
+        // Window enumeration is gated on TWO permissions: Screen
+        // Recording (for `kCGWindowName`) and Accessibility (for AX
+        // raise/move). Both are captured at process start by TCC, so
+        // freshly-granted permissions only take effect on the next
+        // launch (relaunch via `:close` + `:launch`, or Cmd-Q +
+        // `:launch`).
+        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
+
+        // First summon that finds a permission missing: fire the TCC
+        // prompts and bail BEFORE showing the panel. Our `.floating`
+        // panel composites on top of the centered system dialogs
+        // (window level beats activation for z-order, so
+        // `ignoringOtherApps` can't push it behind), so showing it
+        // would bury them — instead we let the dialogs own the screen.
+        // Runs once per process (`promptedForPermission`); the user
+        // grants, relaunches (gotcha 10), and the next process takes
+        // the full path. Later missing-permission summons fall through
+        // and show the panel in degraded apps-only mode.
+        if !canSeeWindows && !promptedForPermission {
+            promptedForPermission = true
+            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
+            if !Permissions.accessibility() { Permissions.requestAccessibility() }
+            return
+        }
+
         // Reset state from the previous summon.
         entries.clear()
         commandTarget = nil
 
-        // Window enumeration is gated on TWO permissions: Screen
-        // Recording (for `kCGWindowName`) and Accessibility (for AX
-        // raise/move). Both deny? Skip the command section — the
-        // panel still shows apps. Both are captured at process
-        // start by TCC, so freshly-granted permissions only take
-        // effect on the next launch (relaunch via `:close` +
-        // `:launch`, or Cmd-Q + `:launch`).
-        //
         // Ordering note: window discovery happens BEFORE the
         // application push loop so we can stamp `isRunning` on each
         // app from the set of bundle ids that appeared as window
         // owners. Without permissions, `runningBundleIds` is empty
         // and every app row gets `isRunning: false` — the dot just
         // doesn't appear, which is the right degraded behavior.
-        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
         let discoveredWindows: [DiscoveredWindow]
         if canSeeWindows {
             discoveredWindows = WindowDiscovery.discover()
@@ -210,12 +231,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         } else {
             discoveredWindows = []
-            // First-time prompt path. After this, the user has to
-            // relaunch to pick up the granted permissions (TCC
-            // state is frozen at process start — gotcha 10).
-            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
-            if !Permissions.accessibility() { Permissions.requestAccessibility() }
-            promptedForPermission = true
         }
 
         // Bundle ids that own at least one window in the current
@@ -274,11 +289,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         listController?.reset()
 
         // `LSUIElement=YES` keeps LoFi out of the Dock; `activate`
-        // is what brings it forward each summon. The
-        // `ignoringOtherApps` suppression on the first
-        // post-prompt summon prevents our panel from covering the
-        // system permission dialog.
-        NSApp.activate(ignoringOtherApps: !promptedForPermission)
+        // is what brings it forward each summon. We always ignore
+        // other apps here — the one case that must not cover the
+        // system permission dialog (the first missing-permission
+        // summon) returns above before reaching this point.
+        NSApp.activate(ignoringOtherApps: true)
         panelController?.show()
     }
 
