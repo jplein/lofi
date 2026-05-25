@@ -41,19 +41,39 @@
 
 import AppKit
 
-private let kRowHeight: CGFloat = 36
+// Row height is 44pt (vs. 36pt before the running-indicator slice). The
+// icon-plus-dot column is 32pt tall (24 + 2 + 6) and sits slightly below
+// the row's vertical center (`kIconColumnVerticalOffset`), so the row has
+// ~9pt of padding above the icon and ~3pt below the dot. The padding is
+// uniform across every row — command rows with no dot still see the
+// same margins, because the dot view is always part of the icon column
+// (only its layer's `backgroundColor` toggles). The selection pill
+// (`RoundedSelectionRowView`) stays inset 2pt vertically, so it grows
+// in lockstep with the row height.
+private let kRowHeight: CGFloat = 44
+// Nudge the icon+dot column slightly below the row's vertical center.
+// The text in the row (aligned to the icon's center) reads as noticeably
+// high when the block is exactly centered, because the dot occupies the
+// lower half of the column. Offsetting the whole block downward by a
+// couple of points trades a bit of bottom padding for text that visually
+// sits near the row's vertical center.
+private let kIconColumnVerticalOffset: CGFloat = 3
 private let kIconSize: CGFloat = 24
 private let kCategoryFontSize: CGFloat = 11
 // Running-indicator dot under the icon. Mirrors the GNOME launcher's
 // `.running-indicator` (`app/gnome/src/ui.rs`): a 6pt circular pip,
 // `secondaryLabelColor` so it adapts to light/dark mode and reads
-// quieter than the app name. The dot view is always present in the
-// row's icon column at its full size — only the layer backgroundColor
-// toggles between secondaryLabelColor and clear — so row heights don't
-// shift between running and not-running entries (the GNOME notes call
-// out the same fixed-size-empty-placeholder rationale).
+// quieter than the app name. The dot is a sibling of the icon in the
+// row view — not an arranged subview of the outer stack — so its
+// presence doesn't shift the icon's vertical position. The dot view
+// is always created and pinned at its full size; only the layer's
+// `backgroundColor` toggles between `secondaryLabelColor` and clear,
+// so running and not-running rows look pixel-identical above the
+// baseline.
 private let kRunningDotSize: CGFloat = 6
-private let kIconColumnSpacing: CGFloat = 2
+// Vertical gap between the bottom of the icon (≈ text baseline, see
+// `.lastBaseline` alignment in `EntryRowView`) and the top of the dot.
+private let kRunningDotTopGap: CGFloat = 2
 // Leading/trailing inset for row content AND the search header, so the
 // magnifier/icons and the text share one column. Sized so content clears
 // the panel's rounded corners and sits inside the rounded selection pill
@@ -517,18 +537,33 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     }
 }
 
-/// Single row view: `[icon-column] name <flexible spacer> [category]`. A
-/// plain `NSStackView` carries the layout; the spacer comes from the name
-/// field's low horizontal content-hugging priority. The category field
-/// hugs at high priority so it never gets stretched.
+/// Single row view: `[icon + dot below] name <flexible spacer> [category]`.
 ///
-/// The icon column is itself a vertical `NSStackView` containing the icon
-/// image and a fixed-size running-indicator dot below it. The dot view is
-/// always part of the layout — only its layer's backgroundColor toggles
-/// between visible and clear — so the icon column has the same height on
-/// every row whether the app is running or not (otherwise the icon would
-/// shift vertically between rows). Mirrors the GNOME launcher's icon-column
-/// design in `app/gnome/src/ui.rs`.
+/// The layout splits into two horizontally-positioned pieces:
+///
+///   - `iconColumn` — vertical `NSStackView` containing the icon image
+///     and a fixed-size running-indicator dot below it. The column has
+///     a stable 32pt height (24pt icon + 2pt gap + 6pt dot) regardless
+///     of whether the dot is painted, so command and non-running
+///     application rows have icons in the same vertical position as
+///     running application rows. The column is centered vertically
+///     against the row's `centerYAnchor`, which is what gives the
+///     symmetric ~6pt of padding above the icon and below the dot in
+///     the 44pt row.
+///
+///   - `textStack` — horizontal `NSStackView` of `[nameField,
+///     categoryField]`. Its vertical center is pinned to the **icon's**
+///     center, not the row's, so the text reads as visually aligned
+///     with the icon (centered on the same y) rather than offset down
+///     toward the row's vertical center. Without this pin the text
+///     would float ~3pt below the icon center because the icon column
+///     sits in the upper half of the row to make room for the dot.
+///
+/// Mirrors the GNOME launcher's icon-with-running-indicator design in
+/// `app/gnome/src/ui.rs`. The cross-platform difference: GTK accepts
+/// the icon-text vertical offset that block-centering produces; the
+/// macOS version pins the text to the icon center to keep them
+/// visually aligned.
 private final class EntryRowView: NSView {
     /// `iconPath` (the app/window bundle path) takes precedence: if set,
     /// the icon is read via `NSWorkspace.shared.icon(forFile:)`.
@@ -574,27 +609,6 @@ private final class EntryRowView: NSView {
             imageView.heightAnchor.constraint(equalToConstant: kIconSize),
         ])
 
-        let runningDot = RunningDotView()
-        runningDot.isOn = isRunning
-        runningDot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            runningDot.widthAnchor.constraint(equalToConstant: kRunningDotSize),
-            runningDot.heightAnchor.constraint(equalToConstant: kRunningDotSize),
-        ])
-
-        let iconColumn = NSStackView(views: [imageView, runningDot])
-        iconColumn.orientation = .vertical
-        iconColumn.alignment = .centerX
-        iconColumn.spacing = kIconColumnSpacing
-        iconColumn.translatesAutoresizingMaskIntoConstraints = false
-        // Pin the column to the icon width so the outer horizontal stack
-        // sees the icon column as a fixed-width slot (the dot would
-        // otherwise have its 6pt width stretched by the stack view's
-        // distribution).
-        NSLayoutConstraint.activate([
-            iconColumn.widthAnchor.constraint(equalToConstant: kIconSize),
-        ])
-
         let nameField = NSTextField(labelWithString: name)
         nameField.isBezeled = false
         nameField.drawsBackground = false
@@ -626,24 +640,65 @@ private final class EntryRowView: NSView {
             for: .horizontal
         )
 
-        let stack = NSStackView(views: [iconColumn, nameField, categoryField])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.distribution = .fill
-        stack.spacing = kCellSpacing
-        stack.edgeInsets = NSEdgeInsets(
-            top: 0,
-            left: kCellHorizontalPadding,
-            bottom: 0,
-            right: kCellHorizontalPadding
-        )
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        // Running-indicator dot — fixed 6x6, always part of the icon column
+        // so command and non-running rows have the same icon position.
+        let runningDot = RunningDotView()
+        runningDot.isOn = isRunning
+        runningDot.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            runningDot.widthAnchor.constraint(equalToConstant: kRunningDotSize),
+            runningDot.heightAnchor.constraint(equalToConstant: kRunningDotSize),
+        ])
+
+        // Vertical icon column: imageView on top, runningDot 2pt below.
+        // Width is locked to the icon size so the column is a fixed-width
+        // slot (the dot would otherwise have its 6pt width stretched).
+        let iconColumn = NSStackView(views: [imageView, runningDot])
+        iconColumn.orientation = .vertical
+        iconColumn.alignment = .centerX
+        iconColumn.spacing = kRunningDotTopGap
+        iconColumn.translatesAutoresizingMaskIntoConstraints = false
+
+        // Horizontal text stack: name + flexible space + category.
+        let textStack = NSStackView(views: [nameField, categoryField])
+        textStack.orientation = .horizontal
+        textStack.alignment = .centerY
+        textStack.distribution = .fill
+        textStack.spacing = kCellSpacing
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(iconColumn)
+        addSubview(textStack)
+
+        NSLayoutConstraint.activate([
+            // iconColumn: leading position, centered vertically in the row
+            // with a small downward nudge so the text (which follows the
+            // icon's centerY below) reads close to the row's visual center
+            // instead of floating into the upper half.
+            iconColumn.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: kCellHorizontalPadding
+            ),
+            iconColumn.centerYAnchor.constraint(
+                equalTo: centerYAnchor,
+                constant: kIconColumnVerticalOffset
+            ),
+            iconColumn.widthAnchor.constraint(equalToConstant: kIconSize),
+
+            // textStack: starts after the icon column, fills to trailing,
+            // and is vertically aligned to the imageView's center (not the
+            // row's). The icon column sits in the upper portion of the row
+            // (because the dot occupies the lower portion), so pinning the
+            // text to the row center would put it visibly below the icon.
+            textStack.leadingAnchor.constraint(
+                equalTo: iconColumn.trailingAnchor,
+                constant: kCellSpacing
+            ),
+            textStack.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -kCellHorizontalPadding
+            ),
+            textStack.centerYAnchor.constraint(equalTo: imageView.centerYAnchor),
         ])
     }
 
