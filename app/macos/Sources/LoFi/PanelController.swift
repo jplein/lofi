@@ -13,12 +13,11 @@
 // - `[.canJoinAllSpaces, .fullScreenAuxiliary]` — the panel follows the
 //   user across spaces and overlays full-screen apps the same way the
 //   system Spotlight does.
-// - `hidesOnDeactivate = false` *for this slice only*. Spotlight-style
-//   "dismiss on focus loss" is the eventual UX, but with no global
-//   hotkey yet to bring the panel back, a hide-on-deactivate panel
-//   would vanish the moment `open LoFi.app` returns control to the
-//   launching terminal. Keeping it visible lets the static-list demo
-//   actually be seen; flip back to `true` once the hotkey slice lands.
+// - `hidesOnDeactivate = true` — Spotlight-style "dismiss on focus
+//   loss": when LoFi resigns key (the user clicks another app, picks
+//   an entry that activates Safari, etc.), the panel hides itself.
+//   The Alt+Space hotkey resummons via `AppDelegate.summonPanel`, so
+//   the user can always get the panel back.
 // - Clear window background + `hasShadow` + a rounded
 //   `NSGlassEffectView` (Tahoe Liquid Glass; `NSVisualEffectView`
 //   fallback below macOS 26 — see `makeBackground`) give the panel
@@ -63,7 +62,7 @@ final class PanelController {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = false
-        panel.hidesOnDeactivate = false
+        panel.hidesOnDeactivate = true
         // Clear background + a real window shadow so the rounded glass
         // content view defines the visible shape and casts a Spotlight-
         // style drop shadow. An opaque background would let the square
@@ -133,6 +132,21 @@ final class PanelController {
     func show() {
         panel.center()
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// Hide the panel without terminating the process. Paired with
+    /// `NSApp.hide` in `AppDelegate.dismissPanel` for the Esc /
+    /// post-activation flow; `hidesOnDeactivate = true` covers the
+    /// auto-hide case when LoFi loses key to another app.
+    func hide() {
+        panel.orderOut(nil)
+    }
+
+    /// Whether the panel is currently on screen. Used by
+    /// `AppDelegate.toggleOrSummonPanel` to decide between summon and
+    /// dismiss when the hotkey fires.
+    var isVisible: Bool {
+        panel.isVisible
     }
 
     /// Builds the rounded, translucent background the search field and

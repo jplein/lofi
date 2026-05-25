@@ -8,7 +8,7 @@ Experimental. Builds and runs on macOS 26 Tahoe with Xcode 26. `bazelisk run //a
 
 **The window switcher (listing open windows as launcher entries) is intentionally disabled on macOS.** It was implemented and shipped, then disabled after empirical confirmation that two macOS Tahoe limitations make it unreliable for an unprivileged-process launcher: cross-Space activation is impossible without Dock injection (gotcha 13), and AX writes that retarget another app's key window across a display boundary are silently dropped (gotcha 14). The scoping workaround (active Space + active display) still leaves enough holes — the list contents would depend on the mouse cursor location, AND picking a listed same-display window can still fail to focus if the app has sibling windows on other displays — that we'd rather not ship the feature than ship one that's unpredictable. See *Out of scope* below and the *gotchas* section for the full investigation.
 
-Still pending: global hotkey to summon the panel (see *Out of scope* below).
+LoFi runs as a long-running background daemon: a single `bazelisk run :launch` starts it, after which it listens for the **Option+Space** global hotkey (and Launch Services reopen events from `:activate`). Each press of the hotkey gathers the current frontmost-non-LoFi window, rebuilds the entry list, applies MRU, and shows the panel; pressing Esc, clicking outside, or activating an entry hides the panel and returns LoFi to the background. Cmd-Q (from the hidden Application menu) is the explicit quit path; `bazelisk run :close` quits an existing instance from the terminal.
 
 ## Why a separate frontend
 
@@ -36,7 +36,9 @@ The earlier xcodegen + xcodebuild + cargo + bash-script pipeline is gone — one
 ```
 BUILD.bazel             swift_library + macos_application + launch + xcodeproj
 bazel/
-  launch.sh             extracts the bundle from LoFi.zip and `open`s it
+  launch.sh             quit-then-extract-and-open dev cycle (`:launch`)
+  close.sh              quit any running instance (`:close`)
+  activate.sh           re-open event for a running instance (`:activate`)
 Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
@@ -45,6 +47,7 @@ Sources/LoFi/
   AppListController.swift  NSTableView data source + delegate
   RustBridge.swift      Swift wrapper around the C ABI; `import LoFiCore`
   Permissions.swift     Screen Recording + Accessibility helpers
+  Hotkey.swift          Carbon `RegisterEventHotKey` wrapper (Option+Space → AppDelegate)
   WindowDiscovery.swift CGWindowList enumeration of open windows (incl. each window's top-left-global `bounds`)
   WindowActivation.swift AXUIElement-based window raise (active-Space only)
   WindowControl.swift   AX move/resize/minimize/toggle-fullscreen/toggle-maximize/move-to-display, + the shared `AXWindowFinder` (AX window lookup + `titleMatches`)
@@ -59,10 +62,14 @@ Resources/
 
 ```sh
 bazelisk build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
-bazelisk run   //app/macos:launch     # unzip + `open` the bundle
+bazelisk run   //app/macos:launch     # quit any running instance, unzip + `open` the freshly-built bundle
+bazelisk run   //app/macos:close      # quit any running instance (idempotent)
+bazelisk run   //app/macos:activate   # bring an already-running instance to the foreground; no-op otherwise
 bazelisk test  //app/core:ffi_test    # run the 49 FFI integration tests
 bazelisk run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
+
+`:launch` is the dev-cycle target — every invocation guarantees you are interacting with the binary Bazel just built, not a stale background process from a previous run. `:close` is the idempotent shutdown. `:activate` is the equivalent of clicking a running app's Dock icon: it sends Launch Services a re-open event, which the AppDelegate will use to summon the panel once the global-hotkey slice lands. (Today the panel just appears on launch, so `:activate` is mostly a placeholder for that slice.) All three quit-paths use a graceful AppleScript quit first and SIGTERM as a fallback, so persistent stores (`mru.sqlite`, `SavedFrameStore`) get to flush.
 
 Always invoke the build through `bazelisk`, not `bazel`. The Nix devShell installs `bazelisk` (a thin launcher that reads `.bazelversion` and downloads the pinned Bazel release on demand); it does *not* install a `bazel` binary directly. Calling `bazel` outside the devShell will either fail with "command not found" or pick up a system Bazel that doesn't match `.bazelversion`.
 
@@ -153,22 +160,28 @@ Each cost real time to figure out the first time; each is permanent in the code 
 
     **No active-display filter on the command target.** An earlier iteration filtered the target by the cursor's display, originally added for the window switcher (gotcha 14) and kept for commands as a "tidiness" measure. It was actively wrong for commands: after a "Previous display" / "Next display" move, the user's cursor stays on the originating display while the foreground window has moved to the destination display; on the next LoFi invocation, the cursor-filtered `gatherTarget` would pick whatever happens to be on the cursor's display (a *different* window) instead of the window the user just moved — so "Next display" would then move the wrong window, and sometimes no non-LoFi window would be on the cursor's display at all, dropping the command rows entirely. The fix was to drop the filter: the command target is now the globally frontmost non-LoFi window, and each command's *work area* is still derived from the *target window's* display via `WindowCommands.workAreaTopLeft`, so geometry commands (Center, halves, etc.) keep the window on its own display.
 
+### Hotkey + daemon lifecycle
+
+22. **`RegisterEventHotKey` is the only API that can register a global hotkey AND consume the keystroke — even though it lives in Carbon.** The system-wide Option+Space hotkey is implemented in `Hotkey.swift` against Carbon's `RegisterEventHotKey` / `InstallEventHandler` (from `HIToolbox`). The natural-looking AppKit alternative `NSEvent.addGlobalMonitorForEvents(matching: .keyDown, ...)` doesn't work for our case: it requires Accessibility permission, and crucially **cannot consume the event** — Option+Space would still fall through to whatever app has focus (which is rarely what users want from a launcher hotkey). `CGEventTap` could consume but introduces latency on every keystroke. Carbon-the-framework is broadly deprecated, but `RegisterEventHotKey` specifically has no AppKit replacement, ships on Apple Silicon + macOS 26, and is what every shipping macOS launcher uses (Alfred, Raycast, Rectangle, Hammerspoon, BetterTouchTool); the popular Sindre Sorhus `KeyboardShortcuts` Swift package is a thin wrapper around it. We don't pull in the package because the call site is ~50 lines and adding a SwiftPM dependency to a Bazel build is friction we don't need.
+
+    The C event handler callback can't capture `self` (it's a `@convention(c)` function pointer), so we pass `Unmanaged.passUnretained(self).toOpaque()` as the handler's `userData` and unwrap it back inside the trampoline. *Unretained* is correct because the `GlobalHotkey` instance is owned by `AppDelegate` for the entire process lifetime; `deinit` unregisters the handler before the pointer would dangle. If we ever move to per-screen or per-window hotkey lifetimes, this needs revisiting.
+23. **`applicationDidFinishLaunching` does NOT show the panel; the first paint happens in the hotkey handler.** Before the daemon slice, `applicationDidFinishLaunching` discovered apps, gathered the command target, applied MRU, and called `panel.makeKeyAndOrderFront`. Now it does the *summon-stable* setup once (cache `[DiscoveredApp]`, open the SQLite MRU store, build the panel + list controller empty, register the hotkey) and returns without showing anything. The first visible paint happens when the user presses Option+Space (or `:activate` sends a Launch Services reopen event), which calls `AppDelegate.summonPanel` to: `entries.clear()` (drop the previous summon's contents), re-push the cached app set, gather the *current* frontmost-non-LoFi window + push the commands, apply MRU, hand the new command target to the list controller, then `NSApp.activate(...)` + `panel.show()`.
+
+    The `entries.clear()` step is what `lofi_entries_clear` (Rust FFI, added with this slice) is for — without it every summon would *append* a fresh copy of apps + commands to the existing list and the user would see duplicates plus stale command targets. The command-target gather happens *before* `NSApp.activate` so `WindowDiscovery.discover` reads `CGWindowListCopyWindowInfo` while LoFi is still background, which keeps the frontmost-non-LoFi z-order pointing at the user's previous app rather than at LoFi itself. (The `pid == getpid()` filter would catch LoFi anyway, but the z-order is more useful when LoFi isn't in the way.)
+24. **`hidesOnDeactivate = true` couples key status and visibility, so `NSApp.isActive` is the right toggle discriminator.** `PanelController` sets `hidesOnDeactivate = true` so the panel auto-hides when LoFi resigns key (e.g. the user picks "Open Safari" and Safari activates). The hotkey handler (`AppDelegate.toggleOrSummon`) checks `NSApp.isActive` rather than `panel.isVisible` to decide between dismiss and summon: with `hidesOnDeactivate`, those two states are coupled tightly enough that they always agree, and `isActive` is the cleaner signal for "the user is currently interacting with LoFi." `applicationShouldHandleReopen` (the Launch Services hook used by `:activate`) returns `false` because LSUIElement apps have no default window — returning true would have AppKit try to open one. Esc and after-activation paths go through `AppDelegate.dismissPanel` (`panel.orderOut` + `NSApp.hide`) rather than `NSApp.terminate`; Cmd-Q in the hidden Application menu is the only terminate path, and `:close` is the from-terminal equivalent.
+
 ### Bazel
 
-22. **`DEVELOPER_DIR` set by the Nix devShell points at a partial Darwin SDK** in the nix store, which doesn't contain a usable Swift toolchain. `rules_swift` walks `xcrun --find swiftc` against `DEVELOPER_DIR` and bails. `.envrc` explicitly re-exports `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` after `use flake` to override.
-23. **`apple_support` must appear above `rules_cc` in `MODULE.bazel`.** Module ordering determines toolchain registration order; if `rules_cc` registers first, rules_swift picks up the generic CC toolchain (target triple "local") and fails. Reordering is non-obvious from the error message.
-24. **`swift_interop_hint` auto-generates the Clang module map** — do not also put a hand-written `module.modulemap` in `cc_library.hdrs`. It gets included as a C header in the auto-generated map and the parser barfs on module-map syntax.
-25. **`crate_universe`'s binary targets are named `<crate>__<bin>`**, e.g. `@crates//:cbindgen__cbindgen`, not `__cli` or `__bin`. `gen_binaries` takes a list of binary names, not a `True` boolean.
-26. **cbindgen 0.29 has no `--features` CLI flag** — features are discovered by running `cargo metadata --all-features` internally. Passing `--features ffi` to the binary errors out; the right approach is to let cbindgen compute it.
-
-### Temporary for this slice
-
-27. **`hidesOnDeactivate = false`** in `PanelController.swift`. Spotlight-style "dismiss on focus loss" is the eventual UX, but with no global hotkey yet to bring the panel back, a hide-on-deactivate panel vanishes the moment `open LoFi.app` returns control to the launching terminal. Flip back to `true` once the hotkey slice lands.
+25. **`DEVELOPER_DIR` set by the Nix devShell points at a partial Darwin SDK** in the nix store, which doesn't contain a usable Swift toolchain. `rules_swift` walks `xcrun --find swiftc` against `DEVELOPER_DIR` and bails. `.envrc` explicitly re-exports `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` after `use flake` to override.
+26. **`apple_support` must appear above `rules_cc` in `MODULE.bazel`.** Module ordering determines toolchain registration order; if `rules_cc` registers first, rules_swift picks up the generic CC toolchain (target triple "local") and fails. Reordering is non-obvious from the error message.
+27. **`swift_interop_hint` auto-generates the Clang module map** — do not also put a hand-written `module.modulemap` in `cc_library.hdrs`. It gets included as a C header in the auto-generated map and the parser barfs on module-map syntax.
+28. **`crate_universe`'s binary targets are named `<crate>__<bin>`**, e.g. `@crates//:cbindgen__cbindgen`, not `__cli` or `__bin`. `gen_binaries` takes a list of binary names, not a `True` boolean.
+29. **cbindgen 0.29 has no `--features` CLI flag** — features are discovered by running `cargo metadata --all-features` internally. Passing `--features ffi` to the binary errors out; the right approach is to let cbindgen compute it.
 
 ## Out of scope this slice
 
 Each is a follow-up:
 
-- Global hotkey to summon the panel (requires Accessibility entitlement).
+- Login Item / Launch Agent autostart. LoFi is now a long-running daemon (Option+Space summons; gotchas 22-24), but starting it currently requires running `bazelisk run :launch` (or, in production, double-clicking `LoFi.app`). A Login Item registration would make the daemon resume across login sessions. Out of scope for this slice; the present manual-start flow is fine for development.
 - Workspace + power commands. (Window-action commands — center/halves/two-thirds/standard-size/minimize/toggle-maximize/toggle-fullscreen — are now **implemented**; see the *Status* section and gotchas 18-21 above.) Mutter-style workspaces have no direct macOS analog (Spaces are the closest, but they're not first-class targets the way Mutter workspaces are). Power commands could be driven via `osascript "tell application System Events to ..."` for Shut Down / Restart / Log Out / Sleep, but the wiring isn't in this slice.
 - **The window switcher (listing open windows as launcher entries).** Implemented and shipped, then disabled. Two independent macOS Tahoe limitations make it unreliable for an unprivileged-process launcher: `SLSManagedDisplaySetCurrentSpace` from a non-Dock-injected process can't actually switch Spaces (gotcha 13), and AX writes that retarget another app's key window across a display boundary are silently dropped (gotcha 14). Narrowing the listing scope to (a) active Space, then (b) active Space + active display, made the list contents depend on mouse-cursor position AND still left the cross-display focus problem within the active display when the target app had sibling windows elsewhere — picking a listed window could still fail to focus it. That's worse-than-no-feature. The only known path that *would* work is yabai-style Dock injection (SIP-disabled scripting addition routing private SkyLight calls through the Dock); that requirement is non-negotiable for the people who use it and is out of scope for a launcher. Users who want to reach a specific window should use the macOS-native flow: Cmd-Tab (with the "switch to a Space with open windows" preference on, in System Settings → Desktop & Dock), Mission Control, or Dock-click. The window-action commands (center, halves, minimize, etc.) are unaffected — they don't require the user to pick a specific window, they always act on the frontmost non-LoFi window on the active display, which IS reliably identifiable.

@@ -96,6 +96,15 @@ final class EntryList {
         lofi_entries_free(handle)
     }
 
+    /// Reset the list to empty (no entries, no query, no filter, no
+    /// MRU state). The daemon calls this on every global-hotkey
+    /// summon before re-pushing apps + commands, so the command
+    /// target reflects the frontmost-non-LoFi window *now*, not at
+    /// process-start time.
+    func clear() {
+        lofi_entries_clear(handle)
+    }
+
     /// Push an application onto the list. Returns `false` on null
     /// args (impossible from Swift `String`) or invalid-UTF-8 — neither
     /// is reachable in practice, but the return value matches the C

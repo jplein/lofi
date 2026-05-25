@@ -88,19 +88,32 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// `tableView(_:viewFor:row:)` reads `appName` to render the
     /// Window-row label as `"Title — App"`. See `AppDelegate.windowAux`
     /// for why this lives Swift-side rather than crossing the FFI.
-    private let windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
-    /// The window-action command target captured at startup (frontmost
-    /// non-LoFi window + its work area + current frame). `nil` when there
-    /// was no usable target, in which case no command rows were pushed and
-    /// the `"Command"` branch in `launchRow` is unreachable — it bails
-    /// safely anyway. Carries the StandardSize fallback rect that
-    /// `toggleMaximize` uses when no previous frame was saved.
-    private let commandTarget: WindowCommands.CommandTarget?
+    private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+    /// The window-action command target captured at the most recent
+    /// summon (frontmost non-LoFi window + its work area + current
+    /// frame). `nil` when there is no usable target, in which case
+    /// no command rows were pushed and the `"Command"` branch in
+    /// `launchRow` is unreachable — it bails safely anyway. Carries
+    /// the StandardSize fallback rect that `toggleMaximize` uses
+    /// when no previous frame was saved.
+    ///
+    /// **Mutable** because the daemon refreshes it on every
+    /// global-hotkey summon — the previously-frontmost window
+    /// changes between summons. `AppDelegate.summonPanel` calls
+    /// `setCommandTarget(_:)` after pushing the fresh entries.
+    private var commandTarget: WindowCommands.CommandTarget?
     /// Persistent per-window pre-maximize frame store. Held for the
     /// process lifetime so `toggleMaximize`'s save (on maximize) and
     /// take (on un-maximize, possibly in a later run) hit the same backing
     /// store. See `SavedFrameStore`.
     private let savedFrameStore: SavedFrameStore
+    /// Called when the user finishes interacting with the panel — either
+    /// because they activated an entry (Enter / click) or dismissed it
+    /// (Esc). The daemon's `AppDelegate.dismissPanel` hides the panel
+    /// and steps LoFi back to background. In the pre-hotkey era this
+    /// was `NSApp.terminate(nil)`; now LoFi stays running between
+    /// summons.
+    private let onDismiss: () -> Void
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -124,13 +137,15 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         mruStore: MruStore?,
         windowAux: [UInt64: (pid: pid_t, title: String, appName: String)],
         commandTarget: WindowCommands.CommandTarget?,
-        savedFrameStore: SavedFrameStore
+        savedFrameStore: SavedFrameStore,
+        onDismiss: @escaping () -> Void
     ) {
         self.entries = entries
         self.mruStore = mruStore
         self.windowAux = windowAux
         self.commandTarget = commandTarget
         self.savedFrameStore = savedFrameStore
+        self.onDismiss = onDismiss
 
         // Non-zero initial size. NSScrollView does NOT auto-resize its
         // documentView, so without an explicit frame the table sits at
@@ -307,11 +322,33 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             launchRow(tableView.selectedRow)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            NSApp.terminate(nil)
+            onDismiss()
             return true
         default:
             return false
         }
+    }
+
+    /// Update the captured command target. Called by
+    /// `AppDelegate.summonPanel` after re-gathering the
+    /// frontmost-non-LoFi window on each global-hotkey summon, so
+    /// commands like "Center" or "Next display" target the window
+    /// the user was just using rather than whichever was front when
+    /// the daemon started.
+    func setCommandTarget(_ target: WindowCommands.CommandTarget?) {
+        self.commandTarget = target
+    }
+
+    /// Re-prepare the list for a fresh summon: empty the search input,
+    /// reset the filter on the underlying Rust list, reload the table,
+    /// and select row 0 so Enter immediately fires the top match.
+    /// Called by `AppDelegate.summonPanel` after the entry list has
+    /// been rebuilt.
+    func reset() {
+        searchInput.stringValue = ""
+        _ = entries.setQuery("")
+        tableView.reloadData()
+        selectFirstRowIfAny()
     }
 
     // MARK: - Selection + activation
@@ -349,10 +386,10 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     ///
     /// Bumps the MRU store *before* dispatching: the bump is a
     /// microsecond local SQLite write; the activation paths
-    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC plus
-    /// our immediate `NSApp.terminate`. If we lose the race we prefer a
-    /// double-bump (correctly attributed to "the user tried to activate
-    /// this") over a miss-bump.
+    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC.
+    /// If we lose the race we prefer a double-bump (correctly
+    /// attributed to "the user tried to activate this") over a
+    /// miss-bump.
     ///
     /// Branches on the stable English category label from the FFI:
     ///   - `"Window"` routes through AX (raise the specific window by its
@@ -389,7 +426,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             guard let path = entries.icon(at: row) else { return }
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
         }
-        NSApp.terminate(nil)
+        onDismiss()
     }
 
     /// Run the window-action command at `row` against `commandTarget`.

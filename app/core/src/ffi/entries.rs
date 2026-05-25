@@ -223,6 +223,22 @@ impl EntryList {
         self.category_cache.borrow_mut().clear();
         self.icon_cache.borrow_mut().clear();
     }
+
+    /// Reset the list to its just-constructed state — no entries, no
+    /// query, no filter, no MRU bookkeeping, no caches. The borrow contract
+    /// applies the same as for `push`: any pointer previously returned by
+    /// `get_*` is invalid after this call. Used by the macOS daemon on
+    /// each global-hotkey summon to rebuild the list from scratch
+    /// (`AppDelegate.summonPanel`), so the command target reflects the
+    /// frontmost-non-LoFi window *at summon time*, not at process-start
+    /// time.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.query.clear();
+        self.filter = None;
+        self.mru_count = 0;
+        self.clear_caches();
+    }
 }
 
 /// Construct a fresh empty `EntryList` on the heap and hand its ownership
@@ -253,6 +269,32 @@ pub unsafe extern "C" fn lofi_entries_free(list: *mut EntryList) {
     unsafe {
         drop(Box::from_raw(list));
     }
+}
+
+/// Reset the list to its just-constructed state: no entries, no
+/// active query, no filter, no MRU bookkeeping, every per-accessor
+/// cache emptied. Passing null is a safe no-op.
+///
+/// The borrow contract from `push_*` applies the same way: every
+/// pointer previously returned by `lofi_entries_get_*` is invalidated
+/// by this call. Callers (e.g. the macOS daemon's
+/// `AppDelegate.summonPanel`) use this to rebuild the list from
+/// scratch on each global-hotkey summon so the command target
+/// reflects the frontmost-non-LoFi window *at summon time*, not at
+/// process-start time.
+///
+/// # Safety
+///
+/// `list` must be null or a pointer obtained from `lofi_entries_new`
+/// that has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_clear(list: *mut EntryList) {
+    if list.is_null() {
+        return;
+    }
+    // SAFETY: non-null precondition above; single-threaded FFI contract
+    // gives exclusive access for the duration of this call.
+    unsafe { &mut *list }.clear();
 }
 
 /// Append an application entry to the list. Copies every string in; the

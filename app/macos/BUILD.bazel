@@ -42,6 +42,23 @@ sh_binary(
     data = [":LoFi"],
 )
 
+# Quit any running LoFi.app. Tries a graceful AppleScript quit first,
+# falls back to SIGTERM. Safely no-ops when no instance is running.
+sh_binary(
+    name = "close",
+    srcs = ["bazel/close.sh"],
+)
+
+# Send a re-open event (Launch Services equivalent of a Dock click) to
+# an already-running LoFi.app. Prints a hint and exits when no instance
+# is running — use `:launch` to start one. The intended caller is a
+# global keyboard shortcut once the hotkey slice lands; until then it's
+# a manual dev tool.
+sh_binary(
+    name = "activate",
+    srcs = ["bazel/activate.sh"],
+)
+
 # Generates `LoFi.xcodeproj` from the Bazel graph so the app can be
 # opened, built, and debugged in Xcode. The project is generated on
 # demand — `bazel run //app/macos:xcodeproj` writes it to

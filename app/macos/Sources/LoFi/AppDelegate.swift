@@ -1,20 +1,48 @@
-// `AppDelegate` is the top-level coordinator for the LoFi process.
+// `AppDelegate` is the top-level coordinator for the long-running LoFi
+// daemon. It registers an Alt+Space global hotkey at launch, stays
+// resident in the background until the hotkey fires (or `:activate`
+// sends a reopen event), then summons the panel — gathering the
+// fresh frontmost-non-LoFi window for command targeting on every
+// summon. Activating an entry or pressing Esc hides the panel and
+// returns LoFi to the background without terminating. Cmd-Q in the
+// hidden menu is the explicit quit path.
 //
-// On launch it:
-//   1. Installs a hidden main menu so Cmd-Q has a handler (the
-//      LSUIElement=YES suppresses the system-provided Application
-//      menu).
-//   2. Discovers installed `.app` bundles via `AppDiscovery`.
-//   3. Pushes each into a Rust-owned `EntryList` over the C ABI.
-//   4. Hands that list to the `PanelController`'s list controller.
-//   5. Foregrounds the process (`LSUIElement=YES` apps start in the
-//      background and would never become key without this step) and
-//      shows the panel.
+// Daemon lifecycle
+// ----------------
+// `applicationDidFinishLaunching` does the *expensive but
+// summon-stable* setup once: enumerate `.app` bundles, open the
+// MRU SQLite store, build the panel + list controller. It does
+// **not** show the panel — the user has to summon. The cheap
+// per-summon work (gather command target, push entries, apply MRU,
+// reset UI state) happens in `summonPanel` so the command target
+// always reflects the foreground window at summon time, not at
+// process-start time.
 //
-// All steps are synchronous on launch in this first slice. Async
-// discovery and incremental updates are out of scope here.
+// `applicationShouldHandleReopen` is the Launch Services hook
+// `:activate` (and a Dock click on a regular-app LoFi build) uses to
+// summon. Returning `false` tells AppKit not to open its default
+// window (LSUIElement apps don't have one anyway, but the contract
+// is clearer if we say so).
+//
+// The hotkey handler routes through `toggleOrSummon` so pressing
+// Alt+Space while the panel is already up (and LoFi is active)
+// dismisses — Spotlight behavior. The visibility check uses
+// `NSApp.isActive` rather than `panel.isVisible` because
+// `hidesOnDeactivate = true` couples those two states tightly and
+// `isActive` is the more direct signal.
+//
+// Permissions
+// -----------
+// Both Screen Recording and Accessibility are checked at process
+// start. If either is missing, the prompts fire once and
+// `promptedForPermission` is set so the very first `summonPanel`
+// skips `ignoringOtherApps: true` — the system permission dialog
+// is borderless-panel-on-top-style and our floating panel would
+// otherwise cover it. Subsequent summons after the user grants
+// (and relaunches — gotcha 10) are normal.
 
 import AppKit
+import Carbon.HIToolbox
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let entries = EntryList()
@@ -27,159 +55,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // lifetime.
     private var listController: AppListController?
     // Held for the process lifetime so the underlying SQLite connection
-    // stays open between the initial `applyMru` and any subsequent
-    // `bumpMru` on activation. `nil` when `MruStore.init?` failed —
-    // the launcher proceeds without MRU ordering in that case.
+    // stays open between summons. `nil` when `MruStore.init?` failed —
+    // LoFi proceeds without MRU ordering in that case.
     private var mruStore: MruStore?
     // Persistent per-window pre-maximize frame store for the
-    // toggle-maximize command. Held for the process lifetime (like
-    // `mruStore`) so the save (on maximize) and the take (on un-maximize)
-    // hit the same backing store — though in practice those two presses
-    // span two LoFi runs, which is exactly why the store is on-disk
-    // (UserDefaults). See `SavedFrameStore`.
+    // toggle-maximize command. The save (on maximize) and the take
+    // (on un-maximize) typically span multiple summons of the same
+    // long-running process; UserDefaults is the on-disk backing
+    // store so it also survives a quit/relaunch.
     private let savedFrameStore = SavedFrameStore()
-    // The window-action command target captured at startup (frontmost
-    // non-LoFi window). `nil` when there's no usable target, in which case
-    // no command rows are pushed. Threaded into `AppListController` so the
-    // command dispatch knows the pid/title/work-area/fallback rect.
+    // Cached at launch and re-pushed on each summon. App enumeration
+    // (file-system walk + bundle reads) costs ~50ms on a typical Mac
+    // — fine for a one-time launch cost, too slow to redo on every
+    // Alt+Space press. Apps don't change frequently within a session;
+    // a user installing a new app mid-session will need to quit and
+    // relaunch LoFi to see it. Acceptable trade for snappy summons.
+    private var cachedApps: [DiscoveredApp] = []
+    // Globally-frontmost non-LoFi window, captured fresh by every
+    // `summonPanel`. `nil` between summons / when there's no target.
+    // Pushed into the list controller before the panel is shown.
     private var commandTarget: WindowCommands.CommandTarget?
-    // Macos-side companion data for Window entries, keyed by the same
-    // `CGWindowID` we hand through to Rust. Two distinct uses:
-    //
-    //   - `pid` + `title` feed `WindowActivation.raise(pid:title:)` at
-    //     activation time. The Rust `Window` shape is intentionally
-    //     window-id-and-title only (cross-platform constraint); pid is
-    //     macOS-only state.
-    //   - `appName` is the row's "owning app" label. The matcher
-    //     already includes `Window.app_name` in its haystack so typing
-    //     an app name matches that app's windows — but the FFI
-    //     `lofi_entries_get_name` returns only the bare title. Without
-    //     this map the launcher row reads as `"Hacker News [Window]"`
-    //     with no indication that it belongs to Chrome. We render the
-    //     visible name as `"Hacker News — Google Chrome"` by stitching
-    //     `title` and `appName` at draw time.
+    // macOS-side companion data for Window entries (the window
+    // switcher feature is disabled — see README gotchas 13-14 — so
+    // this stays empty; the field exists because `AppListController`
+    // expects it).
     private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)] = [:]
-    // Set true when we triggered a TCC prompt on this launch. The
-    // prompt is a system-owned window; if we then call
-    // `NSApp.activate(ignoringOtherApps: true)` our borderless panel
-    // covers it and the user can't grant the permission they were just
-    // asked for.
+    // Set true on the first summon after a TCC prompt fires so we
+    // don't shove our panel in front of the system permission
+    // dialog. Subsequent summons after the user has granted (and
+    // relaunched — gotcha 10) clear back to false naturally because
+    // the prompt only triggers on missing-permission summons.
     private var promptedForPermission = false
+    // Live for the process lifetime; deinit unregisters via Carbon.
+    private var hotkey: GlobalHotkey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
 
-        // Gather + push happens before the panel is constructed so the
-        // table view sees a fully-populated list at first paint.
-        for app in AppDiscovery.discover() {
-            // Per the cross-platform contract (mirroring GNOME's "icon
-            // identifier, not bytes"), the `icon` argument is whatever
-            // identifier the platform layer needs to resolve a real icon
-            // later. On macOS that's the `.app` bundle path; the UI calls
-            // `NSWorkspace.shared.icon(forFile:)` at draw time.
-            _ = entries.pushApplication(
-                name: app.name,
-                bundleId: app.bundleId,
-                icon: app.bundlePath
-            )
-        }
+        // Cache app discovery once. See `cachedApps` comment for the
+        // refresh tradeoff.
+        cachedApps = AppDiscovery.discover()
 
-        // Window enumeration is gated on TWO permissions: Screen
-        // Recording (to read `kCGWindowName`) and Accessibility (to
-        // act on windows via AX). Both deny? Skip the whole section
-        // for this session. Both are captured at process start by
-        // TCC, so freshly-granted permissions only take effect on
-        // the next launch.
-        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
-        if canSeeWindows {
-            // `WindowDiscovery.discover` is still called because the
-            // window-action commands need it to find their target
-            // (the frontmost non-LoFi window on the active display)
-            // and `SavedFrameStore.prune` needs the live-id list to
-            // garbage-collect dropped frame records. What's
-            // **intentionally absent** is the per-window
-            // `entries.pushWindow(...)` loop — i.e. the window
-            // *switcher* feature.
-            //
-            // Why the window switcher is disabled on macOS:
-            // shipping it required solving two macOS limitations a
-            // regular (unprivileged, non-Dock-injected) launcher
-            // can't work around:
-            //
-            //   1. **Cross-Space activation** —
-            //      `SLSManagedDisplaySetCurrentSpace` from a regular
-            //      process on Tahoe returns success but yanks
-            //      windows from the target Space onto the
-            //      originating Space (gotcha 13). Scoping the list
-            //      to the active Space sidesteps this, but...
-            //   2. **Cross-display focus retargeting** — AX writes
-            //      that retarget another app's key window across a
-            //      display boundary are silently dropped (gotcha
-            //      14). And even with the list scoped to the active
-            //      display, picking a same-display window can still
-            //      fail to focus when the owning app has sibling
-            //      windows on other displays: the picked window
-            //      raises to the front, but keyboard focus stays on
-            //      whichever window the app considered key. The
-            //      list contents would also depend on mouse-cursor
-            //      position (the "active display" determination),
-            //      which is surprising UX in its own right.
-            //
-            // Net: with the scoping in place, the user can't be
-            // sure a window they want is *listed*, OR that
-            // activating a listed window will actually get them
-            // there. That's worse than not having the feature.
-            // Yabai-style Dock-injection scripting additions are
-            // the only path that would make this reliable, and
-            // they're out of scope for a launcher (SIP-disabled,
-            // system-modification install). The investigation lives
-            // in the project memory entries
-            // `project_sls_cross_space.md` and
-            // `project_ax_cross_display_focus.md`; see README
-            // gotchas 13-14 for the user-facing rationale.
-            //
-            // The window-action commands stay because they don't
-            // require the user to *pick* a window — they always act
-            // on the frontmost non-LoFi window on the active
-            // display, which is reliably identifiable from
-            // `WindowDiscovery.discover`.
-            let discoveredWindows = WindowDiscovery.discover()
-            savedFrameStore.prune(
-                liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
-            )
-            pushCommands()
-        } else {
-            // Trigger the system dialogs once. The state captured by
-            // `CGPreflightScreenCaptureAccess` is set at process start,
-            // so the user has to relaunch to pick up a freshly-granted
-            // permission.
-            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
-            if !Permissions.accessibility() { Permissions.requestAccessibility() }
-            // The TCC prompt is system-owned. Without this flag clear we'd
-            // call `NSApp.activate(ignoringOtherApps: true)` below and
-            // shove our borderless panel in front of the prompt — the
-            // user then can't see (or click) the grant button. Skip the
-            // aggressive activation on this launch; the panel will still
-            // render, and the user can relaunch once they've granted.
-            promptedForPermission = true
-        }
+        // Open the persistent MRU store. Re-applied on every summon
+        // (`applyMru` is cheap — just sorts the in-memory entries
+        // vec by the SQLite-backed rank).
+        mruStore = MruStore(path: MruStore.defaultPath())
 
-        // After every entry is pushed, apply the persistent MRU order so
-        // the most-recently-launched app shows up at the top. A failed
-        // open (permission denied, disk full, ...) leaves `mruStore` nil;
-        // the launcher falls back to the alphabetical order produced by
-        // `AppDiscovery.discover()`.
-        if let store = MruStore(path: MruStore.defaultPath()) {
-            self.mruStore = store
-            entries.applyMru(store: store)
-        }
-
+        // Build the panel + list controller once, with empty entries.
+        // The first summon will populate the list before showing.
         let listController = AppListController(
             entries: entries,
             mruStore: mruStore,
             windowAux: windowAux,
-            commandTarget: commandTarget,
-            savedFrameStore: savedFrameStore
+            commandTarget: nil,
+            savedFrameStore: savedFrameStore,
+            onDismiss: { [weak self] in self?.dismissPanel() }
         )
         self.listController = listController
         let controller = PanelController(
@@ -189,19 +119,143 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         panelController = controller
 
-        // `LSUIElement=YES` keeps LoFi out of the Dock and forces a
-        // background-only launch. `activate(ignoringOtherApps:)` brings
-        // the process to the foreground; without it the panel renders
-        // but never becomes key, so keyboard events go to whatever app
-        // was previously focused.
-        //
-        // Suppress the `ignoringOtherApps` flag when we just fired a
-        // TCC prompt — the prompt is a system-owned window and our
-        // borderless panel would otherwise cover it. The panel still
-        // shows (so the user can use the app list); they just need to
-        // click out to the prompt to grant the permission.
+        // Register Option+Space as the system-wide summon hotkey.
+        // Carbon constants: `kVK_Space` from `HIToolbox/Events.h`,
+        // `optionKey = 1 << 11` from `HIToolbox/Events.h`. The press
+        // handler runs on the main thread (Carbon event dispatch is
+        // main-threaded), so no extra hop is needed before touching
+        // the panel.
+        hotkey = GlobalHotkey(
+            keyCode: UInt32(kVK_Space),
+            modifiers: UInt32(optionKey)
+        ) { [weak self] in
+            self?.toggleOrSummon()
+        }
+    }
+
+    /// Launch Services delivers a reopen event when an already-running
+    /// LSUIElement app is `open`-ed again (the `:activate` target uses
+    /// `open -b dev.jplein.lofi` for exactly this). Treat it as an
+    /// explicit summon request.
+    ///
+    /// Returning `false` keeps AppKit from trying to open its default
+    /// window (we don't have one — the panel is owned by the
+    /// `PanelController`).
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        summonPanel()
+        return false
+    }
+
+    /// Hotkey entry point. Spotlight-style toggle: if LoFi is the
+    /// foreground app, the user wants the panel to go away;
+    /// otherwise summon it. `NSApp.isActive` is the right
+    /// discriminator (rather than `panel.isVisible`) because
+    /// `hidesOnDeactivate = true` couples key status and visibility,
+    /// and isActive is the cleaner signal for "the user is
+    /// currently interacting with LoFi."
+    private func toggleOrSummon() {
+        if NSApp.isActive {
+            dismissPanel()
+        } else {
+            summonPanel()
+        }
+    }
+
+    /// Rebuild the entry list from the cached app set + freshly
+    /// gathered commands, apply MRU, hand the new state to the list
+    /// controller, then activate + show.
+    ///
+    /// The `entries.clear()` at the top is critical: without it,
+    /// every summon would *append* a fresh copy of apps + commands
+    /// to the list, the user would see duplicates, and stale
+    /// command targets would linger from earlier summons. The
+    /// `lofi_entries_clear` FFI was added specifically for this
+    /// call.
+    ///
+    /// Command-target gathering happens *before* `NSApp.activate`
+    /// so `WindowDiscovery.discover` reads CGWindowList while LoFi
+    /// is still background — meaning the frontmost-non-LoFi
+    /// window is the one the user was just using, not LoFi
+    /// itself. (`WindowDiscovery` filters by pid anyway, but the
+    /// z-order it gets is more useful when LoFi isn't at the top
+    /// of it.)
+    private func summonPanel() {
+        // Reset state from the previous summon.
+        entries.clear()
+        commandTarget = nil
+
+        // Re-push the cached app set. Apps don't change between
+        // summons in the same session, but the Rust list does (we
+        // just cleared it), so we push from the cache.
+        for app in cachedApps {
+            _ = entries.pushApplication(
+                name: app.name,
+                bundleId: app.bundleId,
+                icon: app.bundlePath
+            )
+        }
+
+        // Window enumeration is gated on TWO permissions: Screen
+        // Recording (for `kCGWindowName`) and Accessibility (for AX
+        // raise/move). Both deny? Skip the command section — the
+        // panel still shows apps. Both are captured at process
+        // start by TCC, so freshly-granted permissions only take
+        // effect on the next launch (relaunch via `:close` +
+        // `:launch`, or Cmd-Q + `:launch`).
+        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
+        if canSeeWindows {
+            let discoveredWindows = WindowDiscovery.discover()
+            savedFrameStore.prune(
+                liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
+            )
+            pushCommands()
+        } else {
+            // First-time prompt path. After this, the user has to
+            // relaunch to pick up the granted permissions (TCC
+            // state is frozen at process start — gotcha 10).
+            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
+            if !Permissions.accessibility() { Permissions.requestAccessibility() }
+            promptedForPermission = true
+        }
+
+        // Apply MRU after every push so the user's recent picks
+        // bubble to the top. Cheap (in-memory sort against the
+        // SQLite-backed rank).
+        if let store = mruStore {
+            entries.applyMru(store: store)
+        }
+
+        // Hand the fresh command target to the list controller and
+        // reset its UI state (search input, table selection) before
+        // the panel becomes visible. Order matters here: if we
+        // showed the panel first the user might briefly see the
+        // *previous* summon's state.
+        listController?.setCommandTarget(commandTarget)
+        listController?.reset()
+
+        // `LSUIElement=YES` keeps LoFi out of the Dock; `activate`
+        // is what brings it forward each summon. The
+        // `ignoringOtherApps` suppression on the first
+        // post-prompt summon prevents our panel from covering the
+        // system permission dialog.
         NSApp.activate(ignoringOtherApps: !promptedForPermission)
-        controller.show()
+        panelController?.show()
+    }
+
+    /// Hide the panel and step LoFi back to the background without
+    /// terminating. Two paths reach this: explicit dismiss (Esc, or
+    /// the `onDismiss` callback after an entry activation) and
+    /// implicit dismiss via `hidesOnDeactivate = true` (the panel
+    /// vanishes when LoFi loses key — the dismissPanel call here is
+    /// then mostly redundant, but `NSApp.hide` cleans up the
+    /// "inactive but technically frontmost" state cmd-tab would
+    /// otherwise show).
+    private func dismissPanel() {
+        panelController?.hide()
+        NSApp.hide(nil)
     }
 
     /// Window-action command ids in display order. Mirrors
