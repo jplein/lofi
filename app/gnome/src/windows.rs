@@ -50,6 +50,13 @@ trait WindowManager {
     /// Raise the window with `id` and switch to its workspace.
     fn focus_window(&self, id: u64) -> zbus::Result<()>;
 
+    /// Move the window with `id` to the workspace at the 0-based
+    /// `target_index`. The extension unsticks an on-all-workspaces window
+    /// first and (under dynamic workspaces) appends a workspace when the
+    /// target is one past the end; LoFi only ever passes indices of
+    /// already-open workspaces, so neither path fires in practice.
+    fn move_window_to_workspace(&self, id: u64, target_index: i32) -> zbus::Result<()>;
+
     /// Minimize the window with `id`.
     fn minimize_window(&self, id: u64) -> zbus::Result<()>;
 
@@ -216,6 +223,32 @@ pub fn focus_window(id: u64) {
 
     if let Err(e) = proxy.focus_window(id) {
         eprintln!("lofi: focus window {id} failed: {e}");
+    }
+}
+
+/// Ask the extension to move the window with `id` to the workspace at the
+/// 0-based `target_index`. Same log-and-swallow degradation as `focus_window`:
+/// there's no caller-side recovery from "the window or workspace vanished
+/// between gather and click".
+pub fn move_window_to_workspace(id: u64, target_index: i32) {
+    let connection = match connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("lofi: connect to session bus failed: {e}");
+            return;
+        }
+    };
+
+    let proxy = match WindowManagerProxy::new(&connection) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("lofi: create WindowManager proxy failed: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = proxy.move_window_to_workspace(id, target_index) {
+        eprintln!("lofi: move_window_to_workspace {id} -> {target_index} failed: {e}");
     }
 }
 

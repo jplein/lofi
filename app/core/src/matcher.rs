@@ -41,6 +41,7 @@ fn haystack(entry: &Entry) -> String {
         Entry::Workspace(w) => w.name.clone(),
         Entry::Command(c) => c.kind.display_name().to_string(),
         Entry::PowerCommand(c) => c.kind.display_name().to_string(),
+        Entry::WorkspaceCommand(c) => c.name.clone(),
     }
 }
 

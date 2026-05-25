@@ -35,6 +35,7 @@ fn on_activate(app: &adw::Application) {
     let windows = windows::gather_windows();
     let workspaces_vec = workspaces::gather_workspaces();
     let commands_vec = commands::gather_commands();
+    let workspace_commands = commands::gather_workspace_commands(&windows, &workspaces_vec);
     let power_commands = power::gather_power_commands();
 
     // Build a desktop_id -> most-recent-window-id map. `gather_windows` returns
@@ -65,12 +66,14 @@ fn on_activate(app: &adw::Application) {
             + windows.len()
             + workspaces_vec.len()
             + commands_vec.len()
+            + workspace_commands.len()
             + power_commands.len(),
     );
     entries.extend(applications.into_iter().map(Entry::Application));
     entries.extend(windows.into_iter().map(Entry::Window));
     entries.extend(workspaces_vec.into_iter().map(Entry::Workspace));
     entries.extend(commands_vec.into_iter().map(Entry::Command));
+    entries.extend(workspace_commands.into_iter().map(Entry::WorkspaceCommand));
     entries.extend(power_commands.into_iter().map(Entry::PowerCommand));
 
     // Open the persistent MRU store and snapshot the recency index. Both are

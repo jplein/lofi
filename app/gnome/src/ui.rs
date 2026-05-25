@@ -527,6 +527,11 @@ fn kind_to_str(kind: EntryKind) -> &'static str {
         EntryKind::Workspace => "Workspace",
         EntryKind::Command => "Command",
         EntryKind::PowerCommand => "Power",
+        // Workspace-move commands are window-action commands (they act on the
+        // captured target window), so they share the "Command" category label
+        // with center/minimize/etc. rather than "Workspace" (which is reserved
+        // for the switch-to-workspace entries).
+        EntryKind::WorkspaceCommand => "Command",
     }
 }
 

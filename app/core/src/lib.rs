@@ -3,7 +3,7 @@ pub mod commands;
 pub mod ffi;
 pub mod matcher;
 pub mod mru;
-pub use commands::compute_geometry;
+pub use commands::{build_workspace_commands, compute_geometry};
 #[cfg(feature = "ffi")]
 pub use ffi::*;
 pub use matcher::search;
@@ -318,6 +318,86 @@ pub struct Command {
     pub current_frame: (i32, i32, i32, i32),
 }
 
+/// Identifier for the three flavours of workspace-move command. Unlike the
+/// static window-action `CommandKind`, the *absolute* `MoveToWorkspace` flavour
+/// is parametrized by a destination workspace index (the launcher emits one row
+/// per open workspace), so its id and display label can't be `&'static` — they
+/// live on `WorkspaceCommand` instead. This enum only carries what's common to
+/// a flavour: the icon and the id-construction rule.
+///
+/// Unlike `CommandKind`/`PowerCommandKind` there is no `serde` derive and no
+/// `from_id`: the persistent key is `WorkspaceCommand::as_id` (a runtime
+/// `String`), and these commands are gathered GNOME-side directly rather than
+/// pushed across the FFI, so nothing ever needs to parse a kind back from an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkspaceCommandKind {
+    /// Move the target window to a specific workspace (one row per open
+    /// workspace). The destination is `WorkspaceCommand::target_index`.
+    MoveToWorkspace,
+    /// Move the target window to the workspace immediately before its current
+    /// one. Only emitted when the window isn't already on the first workspace.
+    MoveToPreviousWorkspace,
+    /// Move the target window to the workspace immediately after its current
+    /// one. Only emitted when the window isn't already on the last workspace.
+    MoveToNextWorkspace,
+}
+
+impl WorkspaceCommandKind {
+    /// Symbolic icon name (Adwaita / freedesktop-symbolic) shown beside the
+    /// command. The absolute move reuses the workspace grid glyph; the relative
+    /// prev/next moves use directional arrows so they read as "shift one over".
+    pub fn icon_name(&self) -> &'static str {
+        match self {
+            WorkspaceCommandKind::MoveToWorkspace => "view-grid-symbolic",
+            WorkspaceCommandKind::MoveToPreviousWorkspace => "go-previous-symbolic",
+            WorkspaceCommandKind::MoveToNextWorkspace => "go-next-symbolic",
+        }
+    }
+}
+
+/// A launcher entry that moves the target window (the previously-focused user
+/// window captured at gather time — the same target as `Command`) to another
+/// workspace. Distinct from `Command` because the set is *dynamic*: the
+/// platform layer emits one `MoveToWorkspace` per open workspace plus the
+/// boundary-guarded prev/next moves, so the id and display label are built at
+/// gather time rather than fixed on a closed enum. This is a GNOME-only entry
+/// kind — the macOS frontend never constructs it (see `app/macos/README.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCommand {
+    pub kind: WorkspaceCommandKind,
+    /// Mutter id of the window to move, captured at gather time (see `Command`).
+    pub target_window_id: u64,
+    /// Destination workspace index (0-based, Mutter). Already resolved for the
+    /// relative prev/next flavours (current ∓ 1), so activation needs no
+    /// further reads: the platform layer moves the window to this index and
+    /// then switches to it (so the user follows the window they just moved).
+    pub target_index: i32,
+    /// Human-readable label shown in the launcher and used as the matcher
+    /// haystack, e.g. `"Move to workspace 3"` / `"Move to next workspace"`.
+    /// Stored rather than computed because `Entry::name` returns `&str` and the
+    /// absolute label depends on `target_index`.
+    pub name: String,
+}
+
+impl WorkspaceCommand {
+    /// Stable snake_case id used as the `EntryRef::WorkspaceCommand` payload
+    /// (and therefore the persistent MRU key). The absolute move keys on the
+    /// destination index so each workspace target is remembered independently;
+    /// the relative moves use a fixed id so MRU remembers "move next/prev" as an
+    /// action, independent of which workspace the window happened to be on.
+    pub fn as_id(&self) -> String {
+        match self.kind {
+            WorkspaceCommandKind::MoveToWorkspace => {
+                format!("move_to_workspace_{}", self.target_index)
+            }
+            WorkspaceCommandKind::MoveToPreviousWorkspace => {
+                "move_to_previous_workspace".to_string()
+            }
+            WorkspaceCommandKind::MoveToNextWorkspace => "move_to_next_workspace".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     Application,
@@ -325,6 +405,7 @@ pub enum EntryKind {
     Workspace,
     Command,
     PowerCommand,
+    WorkspaceCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +415,7 @@ pub enum Entry {
     Workspace(Workspace),
     Command(Command),
     PowerCommand(PowerCommand),
+    WorkspaceCommand(WorkspaceCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -344,6 +426,7 @@ pub enum EntryRef {
     Workspace(i32),
     Command(String),
     PowerCommand(String),
+    WorkspaceCommand(String),
 }
 
 /// Icon name used for every `Entry::Workspace`. Hardcoded because workspaces
@@ -360,6 +443,7 @@ impl Entry {
             Entry::Workspace(w) => w.name.as_str(),
             Entry::Command(c) => c.kind.display_name(),
             Entry::PowerCommand(c) => c.kind.display_name(),
+            Entry::WorkspaceCommand(c) => c.name.as_str(),
         }
     }
 
@@ -370,6 +454,7 @@ impl Entry {
             Entry::Workspace(_) => Some(WORKSPACE_ICON),
             Entry::Command(c) => Some(c.kind.icon_name()),
             Entry::PowerCommand(c) => Some(c.kind.icon_name()),
+            Entry::WorkspaceCommand(c) => Some(c.kind.icon_name()),
         }
     }
 
@@ -380,6 +465,7 @@ impl Entry {
             Entry::Workspace(_) => EntryKind::Workspace,
             Entry::Command(_) => EntryKind::Command,
             Entry::PowerCommand(_) => EntryKind::PowerCommand,
+            Entry::WorkspaceCommand(_) => EntryKind::WorkspaceCommand,
         }
     }
 
@@ -390,6 +476,7 @@ impl Entry {
             Entry::Workspace(w) => EntryRef::Workspace(w.index),
             Entry::Command(c) => EntryRef::Command(c.kind.as_id().to_string()),
             Entry::PowerCommand(c) => EntryRef::PowerCommand(c.kind.as_id().to_string()),
+            Entry::WorkspaceCommand(c) => EntryRef::WorkspaceCommand(c.as_id()),
         }
     }
 }
@@ -1330,5 +1417,165 @@ mod tests {
             unknown, None,
             "PowerCommandKind::from_id(\"not-a-power-command\") should be None; got {unknown:?}"
         );
+    }
+
+    /// Test helper: build a `WorkspaceCommand` of the given kind targeting
+    /// `target_index`, with a label matching what `build_workspace_commands`
+    /// produces. The target window id is fixed and non-zero so a dropped id
+    /// would surface as a mismatch.
+    fn make_workspace_command(kind: WorkspaceCommandKind, target_index: i32) -> WorkspaceCommand {
+        let name = match kind {
+            WorkspaceCommandKind::MoveToWorkspace => {
+                format!("Move to workspace {}", target_index + 1)
+            }
+            WorkspaceCommandKind::MoveToPreviousWorkspace => "Move to previous workspace".into(),
+            WorkspaceCommandKind::MoveToNextWorkspace => "Move to next workspace".into(),
+        };
+        WorkspaceCommand {
+            kind,
+            target_window_id: 99,
+            target_index,
+            name,
+        }
+    }
+
+    #[test]
+    fn workspace_command_as_id_distinguishes_absolute_from_relative() {
+        // Absolute moves key on the destination index so each is a distinct MRU
+        // row; the relative moves use a fixed id regardless of destination.
+        let abs0 = make_workspace_command(WorkspaceCommandKind::MoveToWorkspace, 0);
+        let abs2 = make_workspace_command(WorkspaceCommandKind::MoveToWorkspace, 2);
+        assert_eq!(abs0.as_id(), "move_to_workspace_0");
+        assert_eq!(abs2.as_id(), "move_to_workspace_2");
+
+        // Same fixed id even though the resolved destination differs.
+        let prev_from_1 = make_workspace_command(WorkspaceCommandKind::MoveToPreviousWorkspace, 0);
+        let prev_from_3 = make_workspace_command(WorkspaceCommandKind::MoveToPreviousWorkspace, 2);
+        assert_eq!(prev_from_1.as_id(), "move_to_previous_workspace");
+        assert_eq!(
+            prev_from_1.as_id(),
+            prev_from_3.as_id(),
+            "the previous-workspace id must be fixed, independent of destination"
+        );
+        assert_eq!(
+            make_workspace_command(WorkspaceCommandKind::MoveToNextWorkspace, 1).as_id(),
+            "move_to_next_workspace"
+        );
+    }
+
+    #[test]
+    fn entry_workspace_command_reference_round_trips() {
+        let cases = [
+            make_workspace_command(WorkspaceCommandKind::MoveToWorkspace, 2),
+            make_workspace_command(WorkspaceCommandKind::MoveToPreviousWorkspace, 1),
+            make_workspace_command(WorkspaceCommandKind::MoveToNextWorkspace, 3),
+        ];
+        for wc in cases {
+            let entry = Entry::WorkspaceCommand(wc.clone());
+            let reference = entry.reference();
+            assert_eq!(
+                reference,
+                EntryRef::WorkspaceCommand(wc.as_id()),
+                "Entry::WorkspaceCommand.reference() should be EntryRef::WorkspaceCommand(as_id); got {reference:?}"
+            );
+
+            let entries = vec![entry.clone()];
+            let resolved = resolve(&entries, &entry.reference());
+            assert!(
+                matches!(resolved, Some(r) if r == &entry),
+                "resolve should return Some(&entry) for its own WorkspaceCommand reference; got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_finds_workspace_command_by_reference() {
+        let entries = vec![
+            Entry::Workspace(make_workspace(2, "Workspace 3")),
+            Entry::Command(make_command(CommandKind::Center)),
+            Entry::WorkspaceCommand(make_workspace_command(
+                WorkspaceCommandKind::MoveToWorkspace,
+                2,
+            )),
+            Entry::WorkspaceCommand(make_workspace_command(
+                WorkspaceCommandKind::MoveToNextWorkspace,
+                1,
+            )),
+        ];
+
+        let reference = EntryRef::WorkspaceCommand("move_to_workspace_2".into());
+        let found = resolve(&entries, &reference)
+            .expect("resolve should find a WorkspaceCommand for move_to_workspace_2");
+        assert_eq!(
+            found.kind(),
+            EntryKind::WorkspaceCommand,
+            "resolve(EntryRef::WorkspaceCommand) must return a WorkspaceCommand entry; got {:?}",
+            found.kind()
+        );
+
+        // Cross-variant guard: EntryRef::Workspace(2) must NOT resolve to the
+        // move-to-workspace-2 command — different EntryRef variants, distinct
+        // id spaces.
+        let by_workspace = resolve(&entries, &EntryRef::Workspace(2))
+            .expect("resolve should find the Workspace with index 2");
+        assert_eq!(
+            by_workspace.kind(),
+            EntryKind::Workspace,
+            "EntryRef::Workspace(2) must resolve to a Workspace, not a WorkspaceCommand; got {:?}",
+            by_workspace.kind()
+        );
+
+        // Missing id returns None.
+        assert_eq!(
+            resolve(&entries, &EntryRef::WorkspaceCommand("move_to_workspace_9".into())),
+            None,
+            "resolve should return None for a WorkspaceCommand id not in the slice"
+        );
+    }
+
+    #[test]
+    fn entry_ref_workspace_command_serializes_to_tagged_json() {
+        let r = EntryRef::WorkspaceCommand("move_to_next_workspace".into());
+
+        let serialized =
+            serde_json::to_string(&r).expect("EntryRef::WorkspaceCommand should serialize");
+        assert_eq!(
+            serialized, r#"{"type":"workspace_command","id":"move_to_next_workspace"}"#,
+            "EntryRef::WorkspaceCommand should serialize with tag=type/content=id and snake_case variant; got {serialized}"
+        );
+
+        let round_tripped: EntryRef =
+            serde_json::from_str(&serialized).expect("EntryRef::WorkspaceCommand should deserialize");
+        assert_eq!(
+            round_tripped, r,
+            "EntryRef::WorkspaceCommand should round-trip via serde_json; got {round_tripped:?}"
+        );
+    }
+
+    #[test]
+    fn entry_workspace_command_methods_return_command_data() {
+        // Absolute move: name is the 1-based label, icon is the workspace grid.
+        let abs = Entry::WorkspaceCommand(make_workspace_command(
+            WorkspaceCommandKind::MoveToWorkspace,
+            2,
+        ));
+        assert_eq!(abs.name(), "Move to workspace 3");
+        assert_eq!(abs.icon(), Some("view-grid-symbolic"));
+        assert_eq!(abs.kind(), EntryKind::WorkspaceCommand);
+
+        // Relative moves: fixed labels, directional icons.
+        let prev = Entry::WorkspaceCommand(make_workspace_command(
+            WorkspaceCommandKind::MoveToPreviousWorkspace,
+            0,
+        ));
+        assert_eq!(prev.name(), "Move to previous workspace");
+        assert_eq!(prev.icon(), Some("go-previous-symbolic"));
+
+        let next = Entry::WorkspaceCommand(make_workspace_command(
+            WorkspaceCommandKind::MoveToNextWorkspace,
+            2,
+        ));
+        assert_eq!(next.name(), "Move to next workspace");
+        assert_eq!(next.icon(), Some("go-next-symbolic"));
     }
 }

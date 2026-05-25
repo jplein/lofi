@@ -5,7 +5,9 @@
 //! see decision 8 in the plan).
 
 use crate::windows;
-use lofi_core::{Command, CommandKind};
+use lofi_core::{
+    Command, CommandKind, Window, Workspace, WorkspaceCommand, build_workspace_commands,
+};
 
 /// Canonical desktop id for the launcher itself. We compare against this to
 /// skip LoFi when picking the target window — otherwise every command would
@@ -61,4 +63,33 @@ pub fn gather_commands() -> Vec<Command> {
             current_frame,
         })
         .collect()
+}
+
+/// Gather the dynamic workspace-move command set for the target window.
+///
+/// Unlike `gather_commands`, this takes the already-gathered `windows` (in MRU
+/// order) and `workspaces` rather than re-querying the extension: the target
+/// window's id and current workspace are both already on the `Window` struct,
+/// and the relative prev/next destinations are pure arithmetic over the
+/// workspace list — so no extra D-Bus round-trip is needed. `main.rs` passes
+/// the same slices it built for the Window and Workspace entries.
+///
+/// The target is the most-recently-focused non-LoFi window, the same pick
+/// `gather_commands` makes. Returns an empty Vec when there's no such window
+/// (LoFi launched with nothing else open), which drops the rows from the
+/// launcher list — matching `gather_commands`' empty-target behaviour. The
+/// per-workspace labelling and the first/last boundary guards live in
+/// `lofi_core::build_workspace_commands`.
+pub fn gather_workspace_commands(
+    windows: &[Window],
+    workspaces: &[Workspace],
+) -> Vec<WorkspaceCommand> {
+    let target = windows
+        .iter()
+        .find(|w| w.app_desktop_id.as_deref() != Some(LOFI_DESKTOP_ID));
+    let Some(target) = target else {
+        return Vec::new();
+    };
+
+    build_workspace_commands(target.id, target.workspace, workspaces)
 }

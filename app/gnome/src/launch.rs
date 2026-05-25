@@ -57,5 +57,16 @@ pub fn activate(entry: &Entry) {
             }
         }
         Entry::PowerCommand(c) => power::activate(c.kind),
+        Entry::WorkspaceCommand(wc) => {
+            // `target_index` is the already-resolved destination for every
+            // flavour (absolute or relative prev/next), so dispatch needs no
+            // further reads regardless of kind. Two sequential blocking D-Bus
+            // calls: move the window, then switch to the destination workspace
+            // so the user follows the window they just moved (rather than being
+            // left behind on the source workspace). The move lands before the
+            // switch because both block; each logs-and-degrades independently.
+            windows::move_window_to_workspace(wc.target_window_id, wc.target_index);
+            workspaces::activate_workspace(wc.target_index);
+        }
     }
 }
