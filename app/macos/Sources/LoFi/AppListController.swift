@@ -14,7 +14,7 @@
 //     `RoundedSelectionRowView`; see its note for why we draw it
 //     ourselves rather than rely on the table style).
 //   - Enter or a single click launches the highlighted app via
-//     `NSWorkspace.open(_:)` and quits LoFi.
+//     `NSWorkspace.openApplication(at:configuration:)` and quits LoFi.
 //   - Esc quits LoFi without launching anything.
 //
 // The view hierarchy is built programmatically rather than via a NIB so
@@ -454,7 +454,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     ///
     /// Bumps the MRU store *before* dispatching: the bump is a
     /// microsecond local SQLite write; the activation paths
-    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC.
+    /// (`NSWorkspace.openApplication`, `WindowActivation.raise`) involve IPC.
     /// If we lose the race we prefer a double-bump (correctly
     /// attributed to "the user tried to activate this") over a
     /// miss-bump.
@@ -496,7 +496,23 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             // `AppDiscovery.swift` for why the icon field carries the
             // path identifier.
             guard let path = entries.icon(at: row) else { return }
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            // Launch via `openApplication(at:configuration:)`, not the
+            // deprecated `open(_:)`. Passing an `.app` URL to `open(_:)` routes
+            // it through the *document-open* path, which makes macOS stamp an
+            // access-grant xattr (`com.apple.macl`) onto the target bundle to
+            // record the grant. For apps under `/Applications` that write is
+            // gated by App Management (`kTCCServiceSystemPolicyAppBundles`),
+            // which LoFi — ad-hoc signed, no entitlement — doesn't hold, so it
+            // was denied and macOS posted "LoFi was prevented from modifying
+            // apps on your Mac" on the first launch after each rebuild (the
+            // rebuild changes the cdhash that keys the one-shot TCC
+            // notification). `openApplication` uses launch semantics and
+            // writes nothing to the target bundle. Fire-and-forget: the launch
+            // is async; we dismiss immediately, as before.
+            NSWorkspace.shared.openApplication(
+                at: URL(fileURLWithPath: path),
+                configuration: NSWorkspace.OpenConfiguration()
+            )
         }
         onDismiss()
     }

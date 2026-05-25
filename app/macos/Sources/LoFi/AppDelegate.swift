@@ -242,8 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // first-wins `[bundleId: CGWindowID]` map the GNOME side
         // builds) is enough because we only need a presence
         // signal: macOS Application activation routes through
-        // `NSWorkspace.open(...)`, which finds an existing window
-        // itself, so we never use a specific window id Swift-side.
+        // `NSWorkspace.openApplication(...)`, which finds an existing
+        // window itself, so we never use a specific window id Swift-side.
         var runningBundleIds: Set<String> = []
         runningBundleIds.reserveCapacity(discoveredWindows.count)
         for w in discoveredWindows {
