@@ -59,6 +59,16 @@ sh_binary(
     srcs = ["bazel/activate.sh"],
 )
 
+# Install LoFi.app into ~/Applications and register a per-user
+# LaunchAgent so the daemon starts at login. Idempotent — re-running
+# replaces a previous install. Needs the bundle in its runfiles
+# (same dep as `:launch`).
+sh_binary(
+    name = "install",
+    srcs = ["bazel/install.sh"],
+    data = [":LoFi"],
+)
+
 # Generates `LoFi.xcodeproj` from the Bazel graph so the app can be
 # opened, built, and debugged in Xcode. The project is generated on
 # demand — `bazel run //app/macos:xcodeproj` writes it to

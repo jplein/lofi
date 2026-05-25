@@ -39,6 +39,7 @@ bazel/
   launch.sh             quit-then-extract-and-open dev cycle (`:launch`)
   close.sh              quit any running instance (`:close`)
   activate.sh           re-open event for a running instance (`:activate`)
+  install.sh            ~/Applications + LaunchAgent setup (`:install`)
 Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
@@ -64,12 +65,15 @@ Resources/
 bazelisk build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
 bazelisk run   //app/macos:launch     # quit any running instance, unzip + `open` the freshly-built bundle
 bazelisk run   //app/macos:close      # quit any running instance (idempotent)
-bazelisk run   //app/macos:activate   # bring an already-running instance to the foreground; no-op otherwise
+bazelisk run   //app/macos:activate   # send a re-open event to the running instance (summons the panel); no-op otherwise
+bazelisk run   //app/macos:install    # install to ~/Applications + register a LaunchAgent so LoFi starts at login
 bazelisk test  //app/core:ffi_test    # run the 49 FFI integration tests
 bazelisk run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
 
-`:launch` is the dev-cycle target — every invocation guarantees you are interacting with the binary Bazel just built, not a stale background process from a previous run. `:close` is the idempotent shutdown. `:activate` is the equivalent of clicking a running app's Dock icon: it sends Launch Services a re-open event, which the AppDelegate will use to summon the panel once the global-hotkey slice lands. (Today the panel just appears on launch, so `:activate` is mostly a placeholder for that slice.) All three quit-paths use a graceful AppleScript quit first and SIGTERM as a fallback, so persistent stores (`mru.sqlite`, `SavedFrameStore`) get to flush.
+`:launch` is the dev-cycle target — every invocation guarantees you are interacting with the binary Bazel just built, not a stale background process. `:close` is the idempotent shutdown. `:activate` is the production way to summon the panel — it sends Launch Services a re-open event that `AppDelegate.applicationShouldHandleReopen` translates into a `summonPanel` call. `:install` is the production setup path: it writes `LoFi.app` to `~/Applications` and a per-user LaunchAgent plist to `~/Library/LaunchAgents/dev.jplein.lofi.plist`, then `launchctl bootstrap`s the agent so the daemon starts immediately and resumes at next login. All four quit-paths use a graceful AppleScript quit first and SIGTERM as a fallback, so persistent stores (`mru.sqlite`, `SavedFrameStore`) get to flush.
+
+The LaunchAgent uses `KeepAlive = { SuccessfulExit = false }` — launchd restarts LoFi if it crashes (non-zero exit), but Cmd-Q / `:close` quits cleanly and stays quit until next login. To re-launch a stopped-but-installed daemon mid-session: `launchctl kickstart gui/$UID/dev.jplein.lofi`. To uninstall: `launchctl bootout gui/$UID/dev.jplein.lofi && rm -rf ~/Applications/LoFi.app ~/Library/LaunchAgents/dev.jplein.lofi.plist` (no dedicated `:uninstall` target — that's a one-liner).
 
 Always invoke the build through `bazelisk`, not `bazel`. The Nix devShell installs `bazelisk` (a thin launcher that reads `.bazelversion` and downloads the pinned Bazel release on demand); it does *not* install a `bazel` binary directly. Calling `bazel` outside the devShell will either fail with "command not found" or pick up a system Bazel that doesn't match `.bazelversion`.
 
@@ -182,6 +186,5 @@ Each cost real time to figure out the first time; each is permanent in the code 
 
 Each is a follow-up:
 
-- Login Item / Launch Agent autostart. LoFi is now a long-running daemon (Option+Space summons; gotchas 22-24), but starting it currently requires running `bazelisk run :launch` (or, in production, double-clicking `LoFi.app`). A Login Item registration would make the daemon resume across login sessions. Out of scope for this slice; the present manual-start flow is fine for development.
 - Workspace + power commands. (Window-action commands — center/halves/two-thirds/standard-size/minimize/toggle-maximize/toggle-fullscreen — are now **implemented**; see the *Status* section and gotchas 18-21 above.) Mutter-style workspaces have no direct macOS analog (Spaces are the closest, but they're not first-class targets the way Mutter workspaces are). Power commands could be driven via `osascript "tell application System Events to ..."` for Shut Down / Restart / Log Out / Sleep, but the wiring isn't in this slice.
 - **The window switcher (listing open windows as launcher entries).** Implemented and shipped, then disabled. Two independent macOS Tahoe limitations make it unreliable for an unprivileged-process launcher: `SLSManagedDisplaySetCurrentSpace` from a non-Dock-injected process can't actually switch Spaces (gotcha 13), and AX writes that retarget another app's key window across a display boundary are silently dropped (gotcha 14). Narrowing the listing scope to (a) active Space, then (b) active Space + active display, made the list contents depend on mouse-cursor position AND still left the cross-display focus problem within the active display when the target app had sibling windows elsewhere — picking a listed window could still fail to focus it. That's worse-than-no-feature. The only known path that *would* work is yabai-style Dock injection (SIP-disabled scripting addition routing private SkyLight calls through the Dock); that requirement is non-negotiable for the people who use it and is out of scope for a launcher. Users who want to reach a specific window should use the macOS-native flow: Cmd-Tab (with the "switch to a Space with open windows" preference on, in System Settings → Desktop & Dock), Mission Control, or Dock-click. The window-action commands (center, halves, minimize, etc.) are unaffected — they don't require the user to pick a specific window, they always act on the frontmost non-LoFi window on the active display, which IS reliably identifiable.
