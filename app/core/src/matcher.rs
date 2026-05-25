@@ -2,11 +2,38 @@ use crate::Entry;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
+/// Strip a leading reverse-DNS top-level segment (e.g. `com.`, `org.`) from a
+/// bundle/desktop ID before it enters the matcher haystack.
+///
+/// Every macOS bundle identifier starts with the same handful of TLD-style
+/// segments — `com.apple.*`, `com.google.*`, `org.mozilla.*` — so leaving
+/// them in the haystack turns short queries into noise: a one-character `m`
+/// fuzzy-matches every `com.apple.*` ID via the `m` in `com.`. Stripping the
+/// TLD segment removes that shared-letter floor while keeping the rest of
+/// the identifier searchable. `"google"` still matches
+/// `"com.google.Chrome.desktop"` (via the remaining `google.Chrome.desktop`),
+/// and `"acrobat"` still matches `"com.adobe.Acrobat"`.
+///
+/// Only the first segment is stripped — stripping the vendor too would
+/// regress the deliberate "find apps by vendor" path covered by
+/// `single_token_matches_desktop_id` below.
+fn strip_reverse_dns_tld(id: &str) -> &str {
+    const TLDS: &[&str] = &["com.", "org.", "net.", "io."];
+    for tld in TLDS {
+        if let Some(rest) = id.strip_prefix(tld) {
+            return rest;
+        }
+    }
+    id
+}
+
 /// Build the searchable text for an entry. Exhaustive on `Entry` so adding a
 /// variant is a compile error until this is updated.
 fn haystack(entry: &Entry) -> String {
     match entry {
-        Entry::Application(app) => format!("{} {}", app.name, app.desktop_id),
+        Entry::Application(app) => {
+            format!("{} {}", app.name, strip_reverse_dns_tld(&app.desktop_id))
+        }
         Entry::Window(w) => match &w.app_name {
             Some(app) => format!("{} {}", w.title, app),
             None => w.title.clone(),
@@ -182,6 +209,10 @@ mod tests {
 
     #[test]
     fn single_token_matches_name_case_insensitively() {
+        // "Files" intentionally has a reverse-DNS desktop_id. Pre-TLD-strip,
+        // "FIRE" used to fuzzy-match it via the `r` in `org.` and the `e` in
+        // `gnome` — exactly the noise the strip is designed to remove. The
+        // negative assertion below pins that this no longer happens.
         let entries = vec![
             app("Firefox", "firefox.desktop"),
             app("Files", "org.gnome.Nautilus.desktop"),
@@ -197,8 +228,8 @@ mod tests {
             name_set
         );
         assert!(
-            name_set.contains("Files"),
-            "query \"FIRE\" should fuzzy-match \"Files\" (F-I-(l)-(e)-...); got names {:?}",
+            !name_set.contains("Files"),
+            "query \"FIRE\" should NOT match \"Files\" — the previous match relied on the `r` and `e` inside the stripped `org.gnome.` prefix noise; got names {:?}",
             name_set
         );
         assert!(
@@ -228,6 +259,39 @@ mod tests {
             result.iter().any(|e| e.name() == "Chrome"),
             "query \"google\" should match the Chrome entry (com.google.Chrome.desktop); got names {:?}",
             names(&result)
+        );
+    }
+
+    #[test]
+    fn single_char_does_not_match_via_reverse_dns_tld_prefix() {
+        // Regression: every macOS bundle id begins with `com.` (or `org.`,
+        // `net.`, `io.`), so a one-character query like `"m"` would otherwise
+        // fuzzy-match every Apple app via the `m` in `com.`. The haystack
+        // strips the leading TLD segment so single-character matches must
+        // come from the name or the post-TLD portion of the id.
+        let entries = vec![
+            app("Calculator", "com.apple.Calculator"),
+            app("Safari", "com.apple.Safari"),
+            app("Maps", "com.apple.Maps"),
+        ];
+
+        let result = search(&entries, "m");
+        let name_set: HashSet<&str> = result.iter().map(|e| e.name()).collect();
+
+        assert!(
+            name_set.contains("Maps"),
+            "query \"m\" should match \"Maps\" (the name and the post-TLD id both contain `m`); got names {:?}",
+            name_set
+        );
+        assert!(
+            !name_set.contains("Calculator"),
+            "query \"m\" should NOT match \"Calculator\" — the only `m` is in the stripped `com.` prefix; got names {:?}",
+            name_set
+        );
+        assert!(
+            !name_set.contains("Safari"),
+            "query \"m\" should NOT match \"Safari\" — the only `m` is in the stripped `com.` prefix; got names {:?}",
+            name_set
         );
     }
 
