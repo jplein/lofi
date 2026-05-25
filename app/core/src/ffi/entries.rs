@@ -56,7 +56,8 @@ use crate::compute_geometry;
 use crate::matcher;
 use crate::mru::MruStore;
 use crate::{
-    Application, Command, CommandKind, Entry, EntryKind, EntryRef, Window, WorkArea,
+    Application, Command, CommandKind, Entry, EntryKind, EntryRef, PowerCommand,
+    PowerCommandKind, Window, WorkArea,
 };
 
 /// Stable English category label for `EntryKind::Application`. The UI displays
@@ -1100,4 +1101,110 @@ pub unsafe extern "C" fn lofi_entries_get_command_geometry(
         *out_h = h;
     }
     true
+}
+
+/// Stable C-string form of a `PowerCommandKind`'s id, for
+/// `lofi_entries_get_power_command_id`. Mirrors `command_id_cstr` for the
+/// window-action commands.
+///
+/// Each arm returns a process-lifetime `&'static CStr` built from a `c"..."`
+/// literal, so the pointer handed back across the FFI never dangles and is
+/// never invalidated by a later mutation.
+///
+/// The bytes here MUST stay byte-for-byte equal to the corresponding
+/// `PowerCommandKind::as_id` (`app/core/src/lib.rs`). The match is exhaustive
+/// (no `_` arm) so adding a variant is a compile error here until both maps
+/// are extended in lockstep.
+fn power_command_id_cstr(kind: PowerCommandKind) -> &'static CStr {
+    match kind {
+        PowerCommandKind::LockSession => c"lock_session",
+        PowerCommandKind::Logout => c"logout",
+        PowerCommandKind::Suspend => c"suspend",
+        PowerCommandKind::Restart => c"restart",
+        PowerCommandKind::Shutdown => c"shutdown",
+    }
+}
+
+/// Append a system-level power-command entry to the list. Unlike the window-
+/// action commands, power commands have no target window, work area, or
+/// current frame — the command always applies — so `kind_id` is the only
+/// input. Mirrors `PowerCommandKind::as_id` (e.g. `"lock_session"`,
+/// `"shutdown"`).
+///
+/// Returns `true` on success, `false` if any of:
+/// - `list` is null
+/// - `kind_id` is null
+/// - `kind_id` is not valid UTF-8
+/// - `kind_id` is not a recognized `PowerCommandKind::as_id` (unknown id;
+///   nothing is pushed)
+///
+/// A successful push invalidates every pointer previously returned by
+/// `lofi_entries_get_*` (the borrow contract). The filter is recomputed
+/// against the active query so the new command appears in `len`/`get_*` only
+/// when it matches.
+///
+/// # Safety
+///
+/// `list` must be null or a pointer obtained from `lofi_entries_new`.
+/// `kind_id` must be null or a NUL-terminated C string whose buffer remains
+/// valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_push_power_command(
+    list: *mut EntryList,
+    kind_id: *const c_char,
+) -> bool {
+    if list.is_null() || kind_id.is_null() {
+        return false;
+    }
+
+    // SAFETY: non-null and assumed-valid C string per the function contract.
+    let kind_str = match unsafe { CStr::from_ptr(kind_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let Some(kind) = PowerCommandKind::from_id(kind_str) else {
+        return false;
+    };
+
+    // SAFETY: non-null `list` precondition; we have exclusive access for the
+    // duration of this call by the single-threaded FFI contract.
+    let list_ref = unsafe { &mut *list };
+    list_ref.push(Entry::PowerCommand(PowerCommand { kind }));
+    true
+}
+
+/// Return a borrowed pointer to the entry-at-`idx`'s power-command id — the
+/// `PowerCommandKind::as_id` snake_case string for an `Entry::PowerCommand`,
+/// and null for every other variant. Mirrors `lofi_entries_get_command_id`.
+///
+/// `idx` is the *filtered* index. The returned pointer is a process-lifetime
+/// `&'static CStr` (see `power_command_id_cstr`): it is NOT invalidated by a
+/// later mutation. Swift still copies it for uniformity.
+///
+/// Returns null when `list` is null, `idx >= len`, or the entry is not a
+/// PowerCommand.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_power_command_id(
+    list: *const EntryList,
+    idx: usize,
+) -> *const c_char {
+    if list.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(entry) = list_ref.resolve_filtered_index(idx) else {
+        return ptr::null();
+    };
+    match entry {
+        Entry::PowerCommand(c) => power_command_id_cstr(c.kind).as_ptr(),
+        Entry::Application(_)
+        | Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::Command(_) => ptr::null(),
+    }
 }

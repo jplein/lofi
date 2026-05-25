@@ -192,6 +192,38 @@ final class EntryList {
         }
     }
 
+    /// Push a system-level power command onto the list. `kindId` is a
+    /// `PowerCommandKind::as_id` snake_case string (e.g. `"lock_session"`,
+    /// `"shutdown"`). Unlike `pushCommand`, power commands have no per-window
+    /// target — they always apply — so this method takes only the kind.
+    ///
+    /// Returns `false` for a null list (impossible here, we own it), a
+    /// null/invalid-UTF-8 kind id (impossible from a Swift `String`), or
+    /// an UNKNOWN kind id (a real failure mode — Rust rejects ids that
+    /// aren't a `PowerCommandKind`, pushing nothing).
+    @discardableResult
+    func pushPowerCommand(kindId: String) -> Bool {
+        return kindId.withCString { kindPtr in
+            lofi_entries_push_power_command(self.handle, kindPtr)
+        }
+    }
+
+    /// Read the power-command id (`PowerCommandKind::as_id`, e.g.
+    /// `"lock_session"`) for the `Entry::PowerCommand` at the filtered `idx`.
+    /// Returns `nil` for non-PowerCommand entries, out-of-bounds indices, or
+    /// any other case (Rust returns null). Callers should gate on
+    /// `category(at:) == "PowerCommand"` before reading.
+    ///
+    /// Like `commandId(at:)`, the Rust pointer is a process-lifetime
+    /// `&'static CStr` and is never invalidated by a later mutation, but we
+    /// copy it into a Swift `String` immediately anyway for uniformity.
+    func powerCommandId(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_power_command_id(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
     /// Push a window-action command onto the list. `kindId` is a
     /// `CommandKind::as_id` snake_case string (e.g. `"center_half"`);
     /// `targetWindowId` is the CGWindowID the command will act on. The

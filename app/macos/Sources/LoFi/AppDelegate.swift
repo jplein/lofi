@@ -252,6 +252,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pushCommands()
         }
 
+        // Power commands (Lock / Log Out / Sleep / Restart / Shutdown)
+        // are unconditional — they don't depend on the focused window,
+        // permissions, or any runtime state, so the rows always appear.
+        // Matches GNOME's `power::gather_power_commands` shape.
+        pushPowerCommands()
+
         // Apply MRU after every push so the user's recent picks
         // bubble to the top. Cheap (in-memory sort against the
         // SQLite-backed rank).
@@ -317,6 +323,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "previous_display",
     ]
 
+    /// Power-command ids in display order. Mirrors `PowerCommandKind::as_id`
+    /// (`app/core/src/lib.rs`) and matches GNOME's `power::ALL_KINDS`. These
+    /// are always available regardless of permissions — the dispatch path
+    /// (`PowerCommands.activate`) doesn't depend on the focused window or
+    /// any TCC grant. Lock/Sleep shell out to `CGSession` / `pmset`;
+    /// Log Out / Restart / Shutdown go through `loginwindow` via raw Apple
+    /// events.
+    private static let powerCommandIds = [
+        "lock_session",
+        "logout",
+        "suspend",
+        "restart",
+        "shutdown",
+    ]
+
     /// Gather the command target and push the command entries. No-op
     /// (and leaves `commandTarget` nil) when there's no usable target,
     /// so the command rows simply don't appear — GNOME parity. The
@@ -368,6 +389,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         commandTarget = target
+    }
+
+    /// Push one row per `PowerCommandKind`. Unlike the window-action
+    /// commands these don't depend on a target window or permissions,
+    /// so they appear unconditionally — the user always has Lock / Log
+    /// Out / Sleep / Restart / Shutdown available from the launcher.
+    private func pushPowerCommands() {
+        for id in Self.powerCommandIds {
+            _ = entries.pushPowerCommand(kindId: id)
+        }
     }
 
     private func installHiddenMenu() {

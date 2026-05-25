@@ -265,14 +265,21 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             }
             return "\(bareName) — \(aux.appName)"
         }()
-        // Command rows have no icon path (the Rust core returns null for
-        // `get_icon` on Command entries), so we render an SF Symbol chosen
-        // per command kind instead. Every other category keeps using the
-        // bundle-path icon. See `commandSymbolName(for:)`.
-        let symbolName: String? =
-            (category == "Command")
-            ? commandSymbolName(for: entries.commandId(at: row) ?? "")
-            : nil
+        // Command and PowerCommand rows have no icon path (the Rust core
+        // returns null for `get_icon` on either variant), so we render an
+        // SF Symbol chosen per kind instead. Every other category keeps
+        // using the bundle-path icon. See `commandSymbolName(for:)` and
+        // `powerCommandSymbolName(for:)`.
+        let symbolName: String? = {
+            switch category {
+            case "Command":
+                return commandSymbolName(for: entries.commandId(at: row) ?? "")
+            case "PowerCommand":
+                return powerCommandSymbolName(for: entries.powerCommandId(at: row) ?? "")
+            default:
+                return nil
+            }
+        }()
         // Running-indicator: only Application entries can be "running" on
         // the Rust side (the FFI accessor returns false for every other
         // variant), but we route through the same accessor regardless so
@@ -311,6 +318,22 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         case "next_display": return "arrow.right.to.line"
         case "previous_display": return "arrow.left.to.line"
         default: return "macwindow"
+        }
+    }
+
+    /// SF Symbol name for a power-command row, keyed by the
+    /// `PowerCommandKind::as_id` string. Picked from system-themed glyphs
+    /// (lock / sleep / power / restart arrow) so the rows read as
+    /// distinct from window-action commands at a glance. Unknown ids fall
+    /// back to the generic power glyph.
+    private func powerCommandSymbolName(for id: String) -> String {
+        switch id {
+        case "lock_session": return "lock"
+        case "logout": return "rectangle.portrait.and.arrow.right"
+        case "suspend": return "moon"
+        case "restart": return "arrow.clockwise"
+        case "shutdown": return "power"
+        default: return "power"
         }
     }
 
@@ -454,6 +477,10 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             }
         } else if category == "Command" {
             runCommand(row)
+        } else if category == "PowerCommand" {
+            if let id = entries.powerCommandId(at: row) {
+                _ = PowerCommands.activate(id: id)
+            }
         } else {
             // `entries.icon(at:)` returns the bundle path on macOS —
             // see the `DiscoveredApp.bundlePath` comment in
