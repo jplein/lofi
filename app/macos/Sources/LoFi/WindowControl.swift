@@ -170,8 +170,8 @@ enum AXWindowFinder {
                 &titleValue
             )
             guard titleErr == .success,
-                  let axTitle = titleValue as? String,
-                  titleMatches(cgWindowTitle: title, axTitle: axTitle)
+                let axTitle = titleValue as? String,
+                titleMatches(cgWindowTitle: title, axTitle: axTitle)
             else {
                 continue
             }
@@ -207,7 +207,8 @@ enum WindowControl {
         width: Int32,
         height: Int32
     ) -> Bool {
-        guard let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
+        guard
+            let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
         else {
             return false
         }
@@ -224,7 +225,8 @@ enum WindowControl {
     /// `kAXMinimizedAttribute` to true. Returns `false` if the window
     /// can't be found or the set fails.
     static func minimize(pid: pid_t, title: String, windowId: UInt64) -> Bool {
-        guard let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
+        guard
+            let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
         else {
             return false
         }
@@ -244,7 +246,8 @@ enum WindowControl {
     /// don't support `"AXFullScreen"`; the set then isn't `.success` and
     /// we return false (best-effort).
     static func toggleFullscreen(pid: pid_t, title: String, windowId: UInt64) -> Bool {
-        guard let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
+        guard
+            let window = AXWindowFinder.find(pid: pid, windowId: CGWindowID(windowId), title: title)
         else {
             return false
         }
@@ -298,11 +301,12 @@ enum WindowControl {
         fallbackRect: CGRect,
         store: SavedFrameStore
     ) -> Bool {
-        guard let window = AXWindowFinder.find(
-            pid: pid,
-            windowId: CGWindowID(windowId),
-            title: title
-        ),
+        guard
+            let window = AXWindowFinder.find(
+                pid: pid,
+                windowId: CGWindowID(windowId),
+                title: title
+            ),
             let currentFrame = readFrame(window)
         else {
             return false
@@ -355,11 +359,12 @@ enum WindowControl {
         let screens = NSScreen.screens
         guard screens.count >= 2 else { return false }
         guard let primary = screens.first else { return false }
-        guard let window = AXWindowFinder.find(
-            pid: pid,
-            windowId: CGWindowID(windowId),
-            title: title
-        ),
+        guard
+            let window = AXWindowFinder.find(
+                pid: pid,
+                windowId: CGWindowID(windowId),
+                title: title
+            ),
             let currentFrame = readFrame(window)
         else {
             return false
@@ -374,16 +379,17 @@ enum WindowControl {
         // `WindowCommands.workAreaTopLeft`.
         let primaryHeight = primary.frame.height
         let center = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
-        let currentIndex = screens.firstIndex { screen in
-            let f = screen.frame
-            let topLeft = CGRect(
-                x: f.origin.x,
-                y: primaryHeight - f.origin.y - f.height,
-                width: f.width,
-                height: f.height
-            )
-            return topLeft.contains(center)
-        } ?? 0
+        let currentIndex =
+            screens.firstIndex { screen in
+                let f = screen.frame
+                let topLeft = CGRect(
+                    x: f.origin.x,
+                    y: primaryHeight - f.origin.y - f.height,
+                    width: f.width,
+                    height: f.height
+                )
+                return topLeft.contains(center)
+            } ?? 0
 
         // Cyclic step. `((i + d) % n + n) % n` is the canonical
         // Euclidean modulo so `direction = -1` from index 0 wraps to
@@ -525,7 +531,7 @@ enum WindowControl {
             &sizeValue
         )
         guard posErr == .success, sizeErr == .success,
-              let posValue, let sizeValue
+            let posValue, let sizeValue
         else {
             return nil
         }
@@ -534,7 +540,7 @@ enum WindowControl {
         // `AXValueGetValue` unwraps the opaque AXValue into the requested
         // CG type; it returns false if the AXValue isn't of that type.
         guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+            AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
         else {
             return nil
         }

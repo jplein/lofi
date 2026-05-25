@@ -129,7 +129,7 @@ enum WindowDiscovery {
             // Empty / missing title -> drop. Without Screen Recording every
             // entry hits this branch.
             guard let title = dict[kCGWindowName as String] as? String,
-                  !title.isEmpty
+                !title.isEmpty
             else {
                 continue
             }
@@ -151,9 +151,9 @@ enum WindowDiscovery {
             // launcher must always carry a usable `bounds` so a command
             // targeting it has a real `current_frame`.
             guard let boundsValue = dict[kCGWindowBounds as String],
-                  let bounds = CGRect(
-                      dictionaryRepresentation: boundsValue as! CFDictionary
-                  )
+                let bounds = CGRect(
+                    dictionaryRepresentation: boundsValue as! CFDictionary
+                )
             else {
                 continue
             }
@@ -169,7 +169,8 @@ enum WindowDiscovery {
             // where the running-app lookup gives us a bundle id but no
             // URL (some system processes), in which case we ask
             // LaunchServices to translate the bundle id to a path.
-            let bundlePath: String? = runningApp?.bundleURL?.path
+            let bundlePath: String? =
+                runningApp?.bundleURL?.path
                 ?? bundleId.flatMap {
                     NSWorkspace.shared.urlForApplication(
                         withBundleIdentifier: $0

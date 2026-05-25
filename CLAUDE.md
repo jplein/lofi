@@ -34,6 +34,23 @@ reproducible build) come from Nix, and Bazel is not installed at all.
     - Linter checks with rustfmt must pass
     - The Rust tests must pass
 
+## Swift checks
+
+The macOS frontend (`app/macos`) is Swift. Formatting and linting use Apple's
+`swift-format`, which ships inside the Xcode toolchain (`xcrun swift-format`) —
+no separate install (macOS-only, like the rest of the macOS build). Run from
+`app/macos`:
+
+- `./check.sh` — lint (check-only; non-zero exit on any deviation). The gate.
+- `./check.sh --fix` — reformat in place.
+
+Config is `app/macos/.swift-format` (swift-format defaults + 4-space indent).
+Not wired into `bazel test` (rules_swift has no swift-format aspect), so run it
+separately from the Rust gate.
+
+- Before considering a task done:
+    - Swift lint/format (`./check.sh`) must pass
+
 ## TypeScript checks
 
 The GNOME Shell extension (`extension/gnome`) is written in TypeScript. Run these from `extension/gnome` — `npm run check` runs all three in sequence.

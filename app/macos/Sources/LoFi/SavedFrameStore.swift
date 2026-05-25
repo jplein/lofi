@@ -83,7 +83,7 @@ final class SavedFrameStore {
     func take(windowId: UInt64) -> CGRect? {
         var dict = rawDict()
         guard let components = dict[String(windowId)],
-              components.count == Self.frameComponentCount
+            components.count == Self.frameComponentCount
         else {
             // Absent or malformed: drop any malformed entry so it doesn't
             // linger, then report "no saved frame".

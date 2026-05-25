@@ -86,6 +86,17 @@ First-time build downloads Bazel (per `.bazelversion`), then the rule stacks, th
 
 `DEVELOPER_DIR` must point at the user's Xcode install (`/Applications/Xcode.app/Contents/Developer`) before invoking `bazelisk` — `.envrc` does this. Without that override the Nix devShell leaves `DEVELOPER_DIR` pointing at a partial nix-store SDK and `rules_swift` bails with "Could not determine Xcode version at all."
 
+## Formatting / linting
+
+Swift is formatted and linted with Apple's `swift-format`, which ships *inside* the Xcode toolchain (`xcrun swift-format`) — there is no separate tool to install or version-pin. That mirrors the reasoning for running the Rust gates through the rules_rust toolchain rather than a parallel cargo install (see `app/core/README.md`): reuse the toolchain the build already depends on. swift-format is both the formatter and the linter, so one script covers both roles:
+
+```sh
+./check.sh         # lint: check-only, non-zero exit on any deviation (the gate)
+./check.sh --fix   # reformat in place
+```
+
+The config is `app/macos/.swift-format` — swift-format's defaults with one change: 4-space `indentation` (the existing code style; swift-format defaults to 2). This is deliberately *not* wired into `bazel test`: `rules_swift` has no swift-format aspect (unlike the rules_rust clippy/rustfmt aspects the Rust gates use), so the Swift check runs standalone. swift-format is a formatter plus a *light* linter — its default rules don't cover deeper lint concerns (it won't flag, e.g., force-casts), so it complements manual review rather than replacing it.
+
 ## Permissions
 
 Window-action commands depend on two separate macOS TCC (Transparency, Consent, and Control) grants. Apps (the `.app` enumeration path) need neither — `AppDiscovery` reads bundle directories that are world-readable, and `NSWorkspace.open` does not require special entitlements. The launcher therefore degrades gracefully: if either permission is denied, the panel still lists every installed app and Enter still launches it. The Command rows are the only thing that disappears. (The window *switcher* — listing open windows — is unconditionally disabled on macOS regardless of permissions; see gotchas 13-14.)

@@ -84,11 +84,13 @@ enum WindowActivation {
 
         // Match by CGWindowID first (immune to title drift), title as a
         // fallback. Same shared matcher the window-action commands use.
-        guard let window = AXWindowFinder.match(
-            in: windowsArray,
-            windowId: windowId,
-            title: title
-        ) else {
+        guard
+            let window = AXWindowFinder.match(
+                in: windowsArray,
+                windowId: windowId,
+                title: title
+            )
+        else {
             return false
         }
 

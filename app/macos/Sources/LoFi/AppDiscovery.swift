@@ -75,16 +75,18 @@ enum AppDiscovery {
                     guard let s = s, !s.isEmpty else { return nil }
                     return s
                 }
-                let name = nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                let name =
+                    nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
                     ?? nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
                     ?? url.deletingPathExtension().lastPathComponent
 
                 seen.insert(bundleId)
-                out.append(DiscoveredApp(
-                    name: name,
-                    bundleId: bundleId,
-                    bundlePath: url.path
-                ))
+                out.append(
+                    DiscoveredApp(
+                        name: name,
+                        bundleId: bundleId,
+                        bundlePath: url.path
+                    ))
             }
         }
 
@@ -108,11 +110,12 @@ enum AppDiscovery {
     private static func collectAppBundles(under root: URL, depth: Int = 0) -> [URL] {
         let maxDepth = 5
         if depth > maxDepth { return [] }
-        let children = (try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        let children =
+            (try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []
         var out: [URL] = []
         for child in children {
             if child.pathExtension == "app" {

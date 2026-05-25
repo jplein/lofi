@@ -64,11 +64,12 @@ final class MruStore {
     /// alongside the main DB.
     static func defaultPath() -> String {
         let fm = FileManager.default
-        let appSupport = fm
+        let appSupport =
+            fm
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first
             ?? URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Library/Application Support")
+            .appendingPathComponent("Library/Application Support")
         let dir = appSupport.appendingPathComponent("dev.jplein.lofi")
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("mru.sqlite").path

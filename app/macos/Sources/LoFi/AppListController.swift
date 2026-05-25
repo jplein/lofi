@@ -513,7 +513,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// next display / previous display.
     private func runCommand(_ row: Int) {
         guard let commandId = entries.commandId(at: row),
-              let target = commandTarget
+            let target = commandTarget
         else {
             return
         }
