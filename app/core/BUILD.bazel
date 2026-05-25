@@ -17,7 +17,7 @@
 # `app/Cargo.lock` for dependency resolution so the two paths stay in
 # sync.
 
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_static_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_library", "rust_static_library", "rust_test", "rustfmt_test")
 load("@build_bazel_rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
 
 _LOFI_CORE_DEPS = [
@@ -126,5 +126,69 @@ rust_test(
     deps = [
         ":lofi_core_rlib",
         "@crates//:tempfile",
+    ],
+)
+
+# MRU integration tests. Unlike `ffi_test` these go through the public crate
+# API (`use lofi_core::{MruStore, EntryRef}`), so no `extern crate ... as _`
+# link-forcing trick is needed. Cargo discovers `tests/mru.rs` automatically;
+# Bazel needs it spelled out, otherwise this file would run under `cargo test`
+# but be invisible to the Bazel path (and so escape the clippy/rustfmt gates
+# below, which only see files belonging to a declared target).
+rust_test(
+    name = "mru_test",
+    srcs = ["tests/mru.rs"],
+    edition = "2024",
+    deps = [
+        ":lofi_core_rlib",
+        # `tests/mru.rs` opens the SQLite file directly to write a deliberately
+        # malformed row (the bad-row-tolerance case). Cargo exposes a crate's
+        # normal deps to its integration tests automatically; Bazel does not, so
+        # `rusqlite` is listed explicitly even though it is already a dep of the
+        # library under test.
+        "@crates//:rusqlite",
+        "@crates//:tempfile",
+    ],
+)
+
+# --- Lint and format gates -------------------------------------------------
+#
+# clippy and rustfmt ship as the rules_rust toolchain's own binaries, so these
+# gates reuse the exact toolchain Bazel already builds with — there is no
+# parallel cargo/rustup install to keep in sync (on the macOS/Bazel path cargo
+# is editor tooling only; see app/README.md). Both are ordinary targets in the
+# `//app/...` pattern, so `bazel test //app/...` runs compile + clippy +
+# rustfmt + the unit/integration tests in a single command.
+#
+# Coverage note: these only see the Rust that Bazel builds, which is `core`.
+# The `gnome` crate is Linux-only (gtk4/libadwaita) and still lints/formats via
+# Cargo on the Crane path in flake.nix — it has no Bazel target to attach to.
+
+# Clippy over the library and both test crates. `rust_clippy` runs clippy with
+# warnings promoted to errors by default (rules_rust passes no cap-lints flag),
+# so a new lint fails the build. `testonly` because two of its deps are tests.
+# `:lofi_core` (the staticlib) is omitted deliberately: it compiles the same
+# `src/**/*.rs` with the same features as `:lofi_core_rlib`, so linting it too
+# would only double the work for identical diagnostics.
+rust_clippy(
+    name = "clippy",
+    testonly = True,
+    deps = [
+        ":ffi_test",
+        ":lofi_core_rlib",
+        ":mru_test",
+    ],
+)
+
+# Non-mutating rustfmt check (fails if any file is unformatted). A test target
+# so `bazel test //app/...` enforces formatting. Listing the library plus both
+# test crates covers every `.rs` file under `core/` — `src/**` via the library,
+# `tests/ffi.rs` and `tests/mru.rs` via their test targets.
+rustfmt_test(
+    name = "rustfmt",
+    targets = [
+        ":ffi_test",
+        ":lofi_core_rlib",
+        ":mru_test",
     ],
 )

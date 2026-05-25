@@ -1,0 +1,12 @@
+# Directories Bazel must not descend into when expanding target patterns
+# (e.g. `//...`). All are gitignored build/environment output, not source:
+#
+# - app/target  — Cargo's output dir. The Linux/GNOME build (flake.nix, Crane)
+#   and editor tooling (rust-analyzer) write here. Bazel scanning it races with
+#   rust-analyzer's transient temp dirs ("Failed to list directory contents")
+#   and would otherwise also try to load any stray BUILD-looking files.
+# - .direnv     — direnv's `use flake` profile, which contains a full source
+#   checkout of this repo under flake-inputs/. Without this line `//...` picks
+#   up duplicate targets like `//.direnv/.../app/core:ffi_test`.
+app/target
+.direnv

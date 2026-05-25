@@ -379,3 +379,27 @@ The cbindgen file-mode path emits a `Missing [defines] entry for "feature = ffi"
 ### How the FFI integration tests link the symbols
 
 The integration test in `tests/ffi.rs` reaches each FFI function through an `extern "C"` declaration. With no Rust-side reference into `lofi_core::*`, rustc would drop the rlib from the linker's input list and the `lofi_entries_*` symbols would come out undefined. The test file pulls the rlib in explicitly with `extern crate lofi_core as _;` at the top — works under both `bazel test //app/core:ffi_test` and `cargo test -p lofi-core --features ffi`. No nested staticlib build, no `rustc-link-arg-tests` directive, no out-of-tree target directory.
+
+The MRU integration tests in `tests/mru.rs` use the public crate API directly (`use lofi_core::{MruStore, EntryRef}`), so they need none of that link-forcing — `//app/core:mru_test` is an ordinary `rust_test`. They open the SQLite file directly to write a malformed row, so the Bazel target lists `@crates//:rusqlite` explicitly even though it's already a dependency of the library under test: Cargo exposes a crate's normal deps to its integration tests automatically, Bazel does not.
+
+## Tests, clippy, and rustfmt
+
+The two platforms get their Rust toolchain from different places, so the check
+commands differ — **Bazel is macOS-only** (on Linux the toolchain and the
+reproducible build come from Nix, and Bazel is not installed).
+
+### Linux (Cargo, via direnv + `flake.nix`)
+
+Cargo discovers `src/**` unit tests and everything under `tests/` automatically, and clippy/rustfmt see the whole workspace (including the Linux-only `gnome` crate). From `app/`:
+
+- `cargo test` — unit tests plus `tests/mru.rs` (add `-p lofi-core --features ffi` for `tests/ffi.rs`).
+- `cargo clippy --all-targets` and `cargo fmt --check`.
+
+### macOS (Bazel)
+
+Bazel only sees what it builds, which is `core` (the `gnome` crate is Linux-only — gtk4/libadwaita — and has no Bazel target). And unlike Cargo, Bazel needs every test file spelled out as a target, with only files belonging to a declared target reachable by the clippy/rustfmt gates. So each test file has a `rust_test` target — `:ffi_test` and `:mru_test` — and the gates list the library plus both test crates:
+
+- `:clippy` (`rust_clippy`) runs clippy over `:lofi_core_rlib`, `:ffi_test`, and `:mru_test` with warnings promoted to errors (rules_rust's default for an explicit `rust_clippy` target). It's `testonly` because two of its deps are tests, and it omits `:lofi_core` (the staticlib) because that compiles the same sources with the same features as the rlib — identical diagnostics, double the work.
+- `:rustfmt` (`rustfmt_test`) is a non-mutating format check over the same three targets. Listing the library covers `src/**`; the two test targets cover `tests/ffi.rs` and `tests/mru.rs`.
+
+`bazelisk test //app/...` builds and runs all of it in one command — compile, clippy, rustfmt, and the unit/integration tests — because `:clippy` is a (non-test) target in the pattern and Bazel builds matched non-test targets by default. clippy and rustfmt are the rules_rust toolchain's own binaries, so this reuses the exact toolchain Bazel builds with — no parallel cargo/rustup install to keep in sync.

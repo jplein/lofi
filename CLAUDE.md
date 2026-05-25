@@ -9,6 +9,25 @@ The READMEs are the source of truth in this repo.
 
 ## Rust checks
 
+The Rust toolchain comes from a different place on each platform, so the
+commands differ. **Bazel is macOS-only** — on Linux the toolchain (and the
+reproducible build) come from Nix, and Bazel is not installed at all.
+
+- **Linux** — toolchain via direnv + `flake.nix` (Crane). Run with Cargo from
+  `app/`. These cover the whole workspace, including the Linux-only `gnome`
+  crate:
+    - `cargo test` (add `-p lofi-core --features ffi` to also run the FFI tests)
+    - `cargo clippy --all-targets`
+    - `cargo fmt --check`
+- **macOS** — toolchain via Bazel; clippy/rustfmt are the rules_rust toolchain's
+  own binaries, so there is no parallel cargo/rustup install to keep in sync
+  (cargo is editor-tooling only here — see `app/README.md`). One command does
+  everything:
+    - `bazelisk test //app/...` — compiles every Bazel-built Rust target, runs
+      `//app/core:clippy` (warnings promoted to errors) and `//app/core:rustfmt`,
+      and runs the unit/integration tests. Only `core` builds under Bazel; the
+      `gnome` crate is Linux-only.
+
 - Before considering a task done:
     - The Rust code must compile
     - Linter checks with clippy must pass
