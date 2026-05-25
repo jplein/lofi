@@ -1,6 +1,6 @@
 # LoFi
 
-LoFi is a small launcher for GNOME and macOS (planned).
+LoFi is a small launcher for GNOME and macOS.
 
 <img src="screenshot.png" width="530" alt="LoFi launcher showing a search field over a list of applications, workspaces, and commands">
 
@@ -19,20 +19,101 @@ What it can do:
 
 - Launch applications
 - Window management and navigation:
-    - Switch focus to an open window
-    - Switch to another workspace
+    - Switch focus to an open window (GNOME only)
+    - Switch to another workspace (GNOME only)
     - Operations on the active window:
         - Resize
-        - Move to another workspace
-        - Close
-- Anything that can be defined as a command:
-    - Power management
-    - Locking the screen
+        - Toggle maximize
+        - Toggle full-screen
+- Power management
+- Logout
+- Locking the screen
 
 ## System requirements: Linux
 
 - NixOS
 - GNOME
+
+## Install: Linux
+
+LoFi ships a Nix flake with a home-manager module that installs the launcher
+binary, symlinks the GNOME Shell extension into your profile, and enables the
+extension via dconf.
+
+1. **Add the LoFi input to your flake** (`flake.nix`):
+
+   ```nix
+   inputs = {
+     # ...
+     lofi = {
+       url = "github:jplein/lofi";
+       inputs.nixpkgs.follows = "nixpkgs";
+     };
+   };
+   ```
+
+   Pass your flake `inputs` through to home-manager so the module can reach
+   the `lofi` input:
+
+   ```nix
+   home-manager.extraSpecialArgs = { inherit inputs; };
+   ```
+
+2. **Add the home-manager module** to your home-manager config (e.g.
+   `home.nix`) and enable it:
+
+   ```nix
+   { inputs, ... }:
+   {
+     imports = [ inputs.lofi.homeManagerModules.lofi ];
+
+     programs.lofi.enable = true;
+   }
+   ```
+
+   Then rebuild, e.g. `sudo nixos-rebuild switch --flake .#<host>`.
+
+   If you already manage `org/gnome/shell` `enabled-extensions` elsewhere in
+   your config, the two lists will conflict on the same dconf key — wrap the
+   combined list in `lib.mkForce` and include `"lofi-shell@jplein.dev"`:
+
+   ```nix
+   dconf.settings."org/gnome/shell" = {
+     enabled-extensions = lib.mkForce [
+       # ...your other extensions...
+       "lofi-shell@jplein.dev"
+     ];
+   };
+   ```
+
+   Alternatively, set `programs.lofi.enableShellExtension = false` and add the
+   UUID to your own `enabled-extensions` list.
+
+3. **Log out and log back in.** The GNOME Shell extension only loads on session
+   start (a Wayland constraint), so it stays inactive until you start a fresh
+   session.
+
+Bind a shortcut to the `lofi` command to summon the launcher — there is no
+default. With home-manager you can add a GNOME custom keybinding via dconf, for
+example mapping `<Alt>space` to `lofi`:
+
+```nix
+dconf.settings = {
+  # Register the custom keybinding slot...
+  "org/gnome/settings-daemon/plugins/media-keys" = {
+    custom-keybindings = [
+      "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/"
+    ];
+  };
+
+  # ...then define it.
+  "org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0" = {
+    binding = "<Alt>space";
+    command = "lofi";
+    name = "LoFi";
+  };
+};
+```
 
 ## System requirements: macOS
 

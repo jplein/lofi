@@ -4,7 +4,7 @@ The platform-agnostic shared crate (`lofi-core`). Defines the cross-platform dat
 
 ## Why this crate exists
 
-LoFi runs on both GNOME (Rust + GTK4) and macOS (Swift + AppKit on top of a Rust core exposed via a C ABI; experimental, see `app/macos/README.md`). The two platforms share nothing at the windowing-system level, but they do share the *shape* of the things a launcher cares about: applications, windows, workspaces, commands.
+LoFi runs on both GNOME (Rust + GTK4) and macOS (Swift + AppKit on top of a Rust core exposed via a C ABI; see `app/macos/README.md`). The two platforms share nothing at the windowing-system level, but they do share the *shape* of the things a launcher cares about: applications, windows, workspaces, commands.
 
 `core` holds those shared types and nothing else. Keeping it free of platform dependencies is the whole point:
 
