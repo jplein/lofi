@@ -115,6 +115,7 @@ mod tests {
             desktop_id: desktop_id.into(),
             icon: None,
             recent_window_id: None,
+            is_running: false,
         })
     }
 

@@ -39,7 +39,9 @@ unsafe extern "C" {
         name: *const c_char,
         bundle_id: *const c_char,
         icon: *const c_char,
+        is_running: bool,
     ) -> bool;
+    fn lofi_entries_get_is_running(list: *const EntryList, idx: usize) -> bool;
     fn lofi_entries_len(list: *const EntryList) -> usize;
     fn lofi_entries_get_name(list: *const EntryList, idx: usize) -> *const c_char;
     fn lofi_entries_set_query(list: *mut EntryList, query: *const c_char) -> bool;
@@ -607,7 +609,19 @@ fn push_app(list: *mut EntryList, name: &str, bundle_id: &str, icon: Option<&str
     // SAFETY: the C strings are owned by this function and live across the
     // call; `lofi_entries_push_application` copies their contents per the
     // FFI contract.
-    unsafe { lofi_entries_push_application(list, name_c.as_ptr(), bundle_c.as_ptr(), icon_ptr) }
+    //
+    // `is_running = false` for the helper default — tests that need the
+    // running flag set call the FFI directly so the boolean is visible at
+    // the assertion site.
+    unsafe {
+        lofi_entries_push_application(
+            list,
+            name_c.as_ptr(),
+            bundle_c.as_ptr(),
+            icon_ptr,
+            false,
+        )
+    }
 }
 
 /// Read the name at `idx` and return it as an owned `String`. Panics if the
@@ -707,6 +721,7 @@ fn push_with_null_name_returns_false() {
             ptr::null(),
             bundle.as_ptr(),
             icon.as_ptr(),
+            false,
         );
         assert!(!ok, "push with null name must return false");
         assert_eq!(
@@ -732,6 +747,7 @@ fn push_with_null_bundle_id_returns_false() {
             name.as_ptr(),
             ptr::null(),
             icon.as_ptr(),
+            false,
         );
         assert!(!ok, "push with null bundle_id must return false");
         assert_eq!(
@@ -757,6 +773,7 @@ fn push_with_null_list_returns_false() {
             name.as_ptr(),
             bundle.as_ptr(),
             ptr::null(),
+            false,
         );
         assert!(!ok, "push with null list must return false");
     }
@@ -781,6 +798,7 @@ fn push_with_invalid_utf8_name_returns_false() {
             bad_name.as_ptr().cast::<c_char>(),
             bundle.as_ptr(),
             ptr::null(),
+            false,
         );
         assert!(!ok, "push with invalid UTF-8 name must return false");
         assert_eq!(
@@ -811,6 +829,7 @@ fn push_with_invalid_utf8_bundle_id_returns_false() {
             name.as_ptr(),
             bad_bundle.as_ptr().cast::<c_char>(),
             ptr::null(),
+            false,
         );
         assert!(!ok, "push with invalid UTF-8 bundle_id must return false");
         assert_eq!(
@@ -841,12 +860,87 @@ fn push_with_invalid_utf8_icon_returns_false() {
             name.as_ptr(),
             bundle.as_ptr(),
             bad_icon.as_ptr().cast::<c_char>(),
+            false,
         );
         assert!(!ok, "push with invalid UTF-8 icon must return false");
         assert_eq!(
             lofi_entries_len(list),
             0,
             "len must not change when push fails on invalid UTF-8 icon"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_application_with_is_running_true_round_trips() {
+    // Round-trip: pushing with `is_running = true` makes
+    // `lofi_entries_get_is_running` return `true` at the same row.
+    unsafe {
+        let list = lofi_entries_new();
+        let name = CString::new("Safari").expect("name valid");
+        let bundle = CString::new("com.apple.Safari").expect("bundle valid");
+
+        let ok = lofi_entries_push_application(
+            list,
+            name.as_ptr(),
+            bundle.as_ptr(),
+            ptr::null(),
+            true,
+        );
+        assert!(ok, "push with is_running=true should return true");
+
+        assert!(
+            lofi_entries_get_is_running(list, 0),
+            "is_running should be true at the row we just pushed with is_running=true"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn push_application_with_is_running_false_round_trips() {
+    // Negative companion: `is_running=false` (the default for the `push_app`
+    // helper) reports `false` from the accessor. Sanity-checks that the bool
+    // is actually wired, not always returning `true` regardless.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
+
+        assert!(
+            !lofi_entries_get_is_running(list, 0),
+            "is_running should be false when the app was pushed with is_running=false"
+        );
+
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn get_is_running_out_of_bounds_and_null_list_return_false() {
+    // The accessor must return `false` (not crash, not panic) for invalid
+    // inputs: null list and an out-of-bounds index. Mirrors the
+    // null-safety contract of `get_window_id`, which also returns a
+    // sentinel rather than panicking.
+    unsafe {
+        assert!(
+            !lofi_entries_get_is_running(ptr::null(), 0),
+            "is_running with null list must return false"
+        );
+
+        let list = lofi_entries_new();
+        assert!(
+            !lofi_entries_get_is_running(list, 0),
+            "is_running on an empty list must return false (idx >= len)"
+        );
+
+        assert!(push_app(list, "Solo", "com.example.Solo", None));
+        let len = lofi_entries_len(list);
+        assert!(
+            !lofi_entries_get_is_running(list, len),
+            "is_running at idx==len must return false (one past the end)"
         );
 
         lofi_entries_free(list);

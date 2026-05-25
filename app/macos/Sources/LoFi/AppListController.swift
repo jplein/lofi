@@ -44,6 +44,16 @@ import AppKit
 private let kRowHeight: CGFloat = 36
 private let kIconSize: CGFloat = 24
 private let kCategoryFontSize: CGFloat = 11
+// Running-indicator dot under the icon. Mirrors the GNOME launcher's
+// `.running-indicator` (`app/gnome/src/ui.rs`): a 6pt circular pip,
+// `secondaryLabelColor` so it adapts to light/dark mode and reads
+// quieter than the app name. The dot view is always present in the
+// row's icon column at its full size — only the layer backgroundColor
+// toggles between secondaryLabelColor and clear — so row heights don't
+// shift between running and not-running entries (the GNOME notes call
+// out the same fixed-size-empty-placeholder rationale).
+private let kRunningDotSize: CGFloat = 6
+private let kIconColumnSpacing: CGFloat = 2
 // Leading/trailing inset for row content AND the search header, so the
 // magnifier/icons and the text share one column. Sized so content clears
 // the panel's rounded corners and sits inside the rounded selection pill
@@ -243,11 +253,17 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             (category == "Command")
             ? commandSymbolName(for: entries.commandId(at: row) ?? "")
             : nil
+        // Running-indicator: only Application entries can be "running" on
+        // the Rust side (the FFI accessor returns false for every other
+        // variant), but we route through the same accessor regardless so
+        // the row factory doesn't need to know the variant rules.
+        let isRunning = entries.isRunning(at: row)
         return EntryRowView(
             name: name,
             category: category,
             iconPath: iconPath,
-            symbolName: symbolName
+            symbolName: symbolName,
+            isRunning: isRunning
         )
     }
 
@@ -501,10 +517,18 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     }
 }
 
-/// Single row view: `[icon] name <flexible spacer> [category]`. A plain
-/// `NSStackView` carries the layout; the spacer comes from the name
+/// Single row view: `[icon-column] name <flexible spacer> [category]`. A
+/// plain `NSStackView` carries the layout; the spacer comes from the name
 /// field's low horizontal content-hugging priority. The category field
 /// hugs at high priority so it never gets stretched.
+///
+/// The icon column is itself a vertical `NSStackView` containing the icon
+/// image and a fixed-size running-indicator dot below it. The dot view is
+/// always part of the layout — only its layer's backgroundColor toggles
+/// between visible and clear — so the icon column has the same height on
+/// every row whether the app is running or not (otherwise the icon would
+/// shift vertically between rows). Mirrors the GNOME launcher's icon-column
+/// design in `app/gnome/src/ui.rs`.
 private final class EntryRowView: NSView {
     /// `iconPath` (the app/window bundle path) takes precedence: if set,
     /// the icon is read via `NSWorkspace.shared.icon(forFile:)`.
@@ -512,7 +536,18 @@ private final class EntryRowView: NSView {
     /// no bundle icon — rendered as a template glyph tinted like the dimmed
     /// category labels. Both nil ⇒ an empty (but still 24×24) icon box so
     /// the name column stays aligned with the other rows.
-    init(name: String, category: String, iconPath: String?, symbolName: String?) {
+    ///
+    /// `isRunning` paints the running-indicator dot below the icon. Only
+    /// Application entries can be running on the Rust side; the row
+    /// factory passes `false` for every other category, but the view
+    /// doesn't enforce that — it just paints the dot when asked.
+    init(
+        name: String,
+        category: String,
+        iconPath: String?,
+        symbolName: String?,
+        isRunning: Bool
+    ) {
         super.init(frame: .zero)
 
         let imageView = NSImageView()
@@ -537,6 +572,27 @@ private final class EntryRowView: NSView {
         NSLayoutConstraint.activate([
             imageView.widthAnchor.constraint(equalToConstant: kIconSize),
             imageView.heightAnchor.constraint(equalToConstant: kIconSize),
+        ])
+
+        let runningDot = RunningDotView()
+        runningDot.isOn = isRunning
+        runningDot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            runningDot.widthAnchor.constraint(equalToConstant: kRunningDotSize),
+            runningDot.heightAnchor.constraint(equalToConstant: kRunningDotSize),
+        ])
+
+        let iconColumn = NSStackView(views: [imageView, runningDot])
+        iconColumn.orientation = .vertical
+        iconColumn.alignment = .centerX
+        iconColumn.spacing = kIconColumnSpacing
+        iconColumn.translatesAutoresizingMaskIntoConstraints = false
+        // Pin the column to the icon width so the outer horizontal stack
+        // sees the icon column as a fixed-width slot (the dot would
+        // otherwise have its 6pt width stretched by the stack view's
+        // distribution).
+        NSLayoutConstraint.activate([
+            iconColumn.widthAnchor.constraint(equalToConstant: kIconSize),
         ])
 
         let nameField = NSTextField(labelWithString: name)
@@ -570,7 +626,7 @@ private final class EntryRowView: NSView {
             for: .horizontal
         )
 
-        let stack = NSStackView(views: [imageView, nameField, categoryField])
+        let stack = NSStackView(views: [iconColumn, nameField, categoryField])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.distribution = .fill
@@ -594,6 +650,63 @@ private final class EntryRowView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("EntryRowView is not loadable from a NIB / coder")
+    }
+}
+
+/// Small layer-backed circle drawn below the row icon to indicate the
+/// application is currently running. Always part of the layout at its
+/// full 6×6 size so row heights don't shift between running and
+/// not-running entries; only the layer's `backgroundColor` toggles
+/// between `secondaryLabelColor` (on) and clear (off).
+///
+/// `updateLayer()` is the right hook for the color toggle: it runs in
+/// a context where the view's `effectiveAppearance` has been resolved,
+/// so `NSColor.secondaryLabelColor.cgColor` returns the correct concrete
+/// value for the current light/dark mode. `viewDidChangeEffectiveAppearance`
+/// re-marks the layer dirty so a runtime appearance flip (e.g. user toggles
+/// Dark Mode while the panel is up) repaints the dot in the new tone.
+private final class RunningDotView: NSView {
+    var isOn: Bool = false {
+        didSet {
+            if isOn != oldValue {
+                needsDisplay = true
+            }
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = kRunningDotSize / 2
+        // `masksToBounds = true` is unnecessary for a solid-color circle
+        // (no sublayers to clip) but keeps the corner-radius round when
+        // the layer's bounds change at constraint-resolution time.
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("RunningDotView is not loadable from a NIB / coder")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // `secondaryLabelColor.cgColor` resolves against the current
+        // effective appearance. AppKit calls `updateLayer` after appearance
+        // changes (we re-trigger it from
+        // `viewDidChangeEffectiveAppearance`), so the on-state color
+        // tracks light/dark mode automatically.
+        if isOn {
+            layer?.backgroundColor = NSColor.secondaryLabelColor.cgColor
+        } else {
+            layer?.backgroundColor = nil
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

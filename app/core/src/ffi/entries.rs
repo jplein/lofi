@@ -300,6 +300,16 @@ pub unsafe extern "C" fn lofi_entries_clear(list: *mut EntryList) {
 /// Append an application entry to the list. Copies every string in; the
 /// caller's C buffers may be reused or freed as soon as the call returns.
 ///
+/// `is_running` is the boolean projection of `Application::is_running` — the
+/// caller passes `true` when the application has at least one open window
+/// at gather time. This drives the running-indicator dot in the UI. The macOS
+/// platform layer derives it from a one-pass scan of the window list
+/// (`AppDelegate.summonPanel`); GNOME populates the field through the Rust
+/// `Application` struct directly and does not use this FFI. `recent_window_id`
+/// is left `None` here — the macOS activation path is
+/// `NSWorkspace.open(...)`, which finds an existing window itself, so there
+/// is no use for a real window id Swift-side.
+///
 /// Returns `true` on success, `false` if any of:
 /// - `list` is null
 /// - `name` or `bundle_id` is null
@@ -324,6 +334,7 @@ pub unsafe extern "C" fn lofi_entries_push_application(
     name: *const c_char,
     bundle_id: *const c_char,
     icon: *const c_char,
+    is_running: bool,
 ) -> bool {
     if list.is_null() || name.is_null() || bundle_id.is_null() {
         return false;
@@ -357,6 +368,7 @@ pub unsafe extern "C" fn lofi_entries_push_application(
         desktop_id: bundle_str,
         icon: icon_opt,
         recent_window_id: None,
+        is_running,
     }));
     true
 }
@@ -834,6 +846,50 @@ pub unsafe extern "C" fn lofi_entries_get_window_id(
         | Entry::Workspace(_)
         | Entry::Command(_)
         | Entry::PowerCommand(_) => 0,
+    }
+}
+
+/// Return `true` when the entry at the filtered `idx` is an `Application`
+/// whose `is_running` flag is set — i.e. the platform layer reported at
+/// least one open window for that app at gather time. Returns `false` for
+/// any other case:
+/// - `list` is null
+/// - `idx` is out of bounds
+/// - the resolved entry is not an `Entry::Application`
+/// - the Application's `is_running` field is `false`
+///
+/// Drives the running-indicator dot in the UI. The boolean return matches
+/// the GNOME `recent_window_id.is_some()` shape but does not require the
+/// macOS platform layer to plumb a real `CGWindowID` through the FFI; on
+/// macOS the activation path is `NSWorkspace.open(...)` and the launcher
+/// does not raise a specific existing window itself, so the window id
+/// would never be read.
+///
+/// Like `get_window_id`, this accessor returns a value by copy and is not
+/// subject to the borrow contract — no pointer into the list is handed out.
+///
+/// # Safety
+///
+/// `list` must be null or a valid `EntryList` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lofi_entries_get_is_running(
+    list: *const EntryList,
+    idx: usize,
+) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    // SAFETY: non-null `list` per the precondition.
+    let list_ref = unsafe { &*list };
+    let Some(entry) = list_ref.resolve_filtered_index(idx) else {
+        return false;
+    };
+    match entry {
+        Entry::Application(app) => app.is_running,
+        Entry::Window(_)
+        | Entry::Workspace(_)
+        | Entry::Command(_)
+        | Entry::PowerCommand(_) => false,
     }
 }
 

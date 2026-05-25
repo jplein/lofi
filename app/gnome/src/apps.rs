@@ -111,6 +111,7 @@ pub fn gather_applications(dirs: &[PathBuf]) -> Vec<Application> {
                 desktop_id,
                 icon,
                 recent_window_id: None,
+                is_running: false,
             });
         }
     }

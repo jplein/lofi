@@ -19,9 +19,17 @@ pub struct Application {
     /// Runtime-only state: when `Some(id)`, the application has at least one
     /// open window and `id` is the most recently focused. Set by the platform
     /// layer (`lofi-gnome::main`) after gathering windows from the extension;
-    /// not persisted, not part of `EntryRef`. `is_running` is equivalent to
-    /// `recent_window_id.is_some()`.
+    /// not persisted, not part of `EntryRef`.
     pub recent_window_id: Option<u64>,
+    /// Runtime-only state: `true` when the application has at least one open
+    /// window. Drives the running-indicator dot in the UI. Logically redundant
+    /// with `recent_window_id.is_some()` and the GNOME platform layer keeps the
+    /// two in sync, but the field is split out so the macOS platform layer can
+    /// signal "running" without paying the bookkeeping cost of tracking a real
+    /// `CGWindowID` it would never use (the macOS Application activation path
+    /// is `NSWorkspace.open(...)`, which finds an existing window itself). Not
+    /// persisted, not part of `EntryRef`.
+    pub is_running: bool,
 }
 
 /// An open window surfaced by the GNOME Shell extension over D-Bus. `app_name`
@@ -375,6 +383,7 @@ mod tests {
             desktop_id: desktop_id.to_string(),
             icon: icon.map(str::to_string),
             recent_window_id: None,
+            is_running: false,
         }
     }
 
@@ -389,6 +398,7 @@ mod tests {
             desktop_id: desktop_id.to_string(),
             icon: icon.map(str::to_string),
             recent_window_id: Some(window_id),
+            is_running: true,
         }
     }
 

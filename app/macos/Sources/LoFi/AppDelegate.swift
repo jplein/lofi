@@ -187,17 +187,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         entries.clear()
         commandTarget = nil
 
-        // Re-push the cached app set. Apps don't change between
-        // summons in the same session, but the Rust list does (we
-        // just cleared it), so we push from the cache.
-        for app in cachedApps {
-            _ = entries.pushApplication(
-                name: app.name,
-                bundleId: app.bundleId,
-                icon: app.bundlePath
-            )
-        }
-
         // Window enumeration is gated on TWO permissions: Screen
         // Recording (for `kCGWindowName`) and Accessibility (for AX
         // raise/move). Both deny? Skip the command section — the
@@ -205,20 +194,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // start by TCC, so freshly-granted permissions only take
         // effect on the next launch (relaunch via `:close` +
         // `:launch`, or Cmd-Q + `:launch`).
+        //
+        // Ordering note: window discovery happens BEFORE the
+        // application push loop so we can stamp `isRunning` on each
+        // app from the set of bundle ids that appeared as window
+        // owners. Without permissions, `runningBundleIds` is empty
+        // and every app row gets `isRunning: false` — the dot just
+        // doesn't appear, which is the right degraded behavior.
         let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
+        let discoveredWindows: [DiscoveredWindow]
         if canSeeWindows {
-            let discoveredWindows = WindowDiscovery.discover()
+            discoveredWindows = WindowDiscovery.discover()
             savedFrameStore.prune(
                 liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
             )
-            pushCommands()
         } else {
+            discoveredWindows = []
             // First-time prompt path. After this, the user has to
             // relaunch to pick up the granted permissions (TCC
             // state is frozen at process start — gotcha 10).
             if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
             if !Permissions.accessibility() { Permissions.requestAccessibility() }
             promptedForPermission = true
+        }
+
+        // Bundle ids that own at least one window in the current
+        // gather — the macOS analogue of GNOME's
+        // `recent_window_id.is_some()`. A `Set` (rather than the
+        // first-wins `[bundleId: CGWindowID]` map the GNOME side
+        // builds) is enough because we only need a presence
+        // signal: macOS Application activation routes through
+        // `NSWorkspace.open(...)`, which finds an existing window
+        // itself, so we never use a specific window id Swift-side.
+        var runningBundleIds: Set<String> = []
+        runningBundleIds.reserveCapacity(discoveredWindows.count)
+        for w in discoveredWindows {
+            if let bid = w.ownerBundleId {
+                runningBundleIds.insert(bid)
+            }
+        }
+
+        // Re-push the cached app set. Apps don't change between
+        // summons in the same session, but the Rust list does (we
+        // just cleared it), so we push from the cache. `isRunning`
+        // is recomputed every summon from the freshly-gathered
+        // window list above.
+        for app in cachedApps {
+            _ = entries.pushApplication(
+                name: app.name,
+                bundleId: app.bundleId,
+                icon: app.bundlePath,
+                isRunning: runningBundleIds.contains(app.bundleId)
+            )
+        }
+
+        if canSeeWindows {
+            pushCommands()
         }
 
         // Apply MRU after every push so the user's recent picks

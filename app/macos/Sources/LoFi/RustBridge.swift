@@ -105,12 +105,22 @@ final class EntryList {
         lofi_entries_clear(handle)
     }
 
-    /// Push an application onto the list. Returns `false` on null
-    /// args (impossible from Swift `String`) or invalid-UTF-8 — neither
-    /// is reachable in practice, but the return value matches the C
-    /// signature for future-proofing.
+    /// Push an application onto the list. `isRunning` is the boolean
+    /// projection of `Application::is_running` on the Rust side — pass
+    /// `true` when the app has at least one open window at gather time.
+    /// `AppDelegate.summonPanel` derives it from a one-pass scan of the
+    /// window list and passes it through here; the matching read on
+    /// `isRunning(at:)` drives the running-indicator dot in the row UI.
+    /// Returns `false` on null args (impossible from Swift `String`) or
+    /// invalid-UTF-8 — neither is reachable in practice, but the return
+    /// value matches the C signature for future-proofing.
     @discardableResult
-    func pushApplication(name: String, bundleId: String, icon: String?) -> Bool {
+    func pushApplication(
+        name: String,
+        bundleId: String,
+        icon: String?,
+        isRunning: Bool
+    ) -> Bool {
         return name.withCString { namePtr in
             bundleId.withCString { bundlePtr in
                 let withIcon: (UnsafePointer<CChar>?) -> Bool = { iconPtr in
@@ -118,7 +128,8 @@ final class EntryList {
                         self.handle,
                         namePtr,
                         bundlePtr,
-                        iconPtr
+                        iconPtr,
+                        isRunning
                     )
                 }
                 if let icon = icon {
@@ -299,6 +310,17 @@ final class EntryList {
     /// fallback rather than the primary signal.
     func windowId(at idx: Int) -> UInt64 {
         lofi_entries_get_window_id(handle, UInt(idx))
+    }
+
+    /// `true` when the entry at the filtered `idx` is an Application
+    /// whose `is_running` flag was set at push time — i.e. the app had
+    /// at least one open window when `AppDelegate.summonPanel` ran.
+    /// `false` for every other case: non-Application entries,
+    /// not-running apps, out-of-bounds indices, or a null list (a
+    /// degenerate case here because we own the handle). Drives the
+    /// running-indicator dot in `EntryRowView`.
+    func isRunning(at idx: Int) -> Bool {
+        lofi_entries_get_is_running(handle, UInt(idx))
     }
 
     /// Read the command id (`CommandKind::as_id`, e.g. `"center_half"`)
