@@ -911,10 +911,15 @@ pub unsafe extern "C" fn lofi_entries_get_is_running(
 fn command_id_cstr(kind: CommandKind) -> &'static CStr {
     match kind {
         CommandKind::Center => c"center",
+        CommandKind::CenterThird => c"center_third",
         CommandKind::CenterHalf => c"center_half",
         CommandKind::CenterTwoThirds => c"center_two_thirds",
+        CommandKind::LeftThird => c"left_third",
         CommandKind::LeftHalf => c"left_half",
+        CommandKind::LeftTwoThirds => c"left_two_thirds",
+        CommandKind::RightThird => c"right_third",
         CommandKind::RightHalf => c"right_half",
+        CommandKind::RightTwoThirds => c"right_two_thirds",
         CommandKind::StandardSize => c"standard_size",
         CommandKind::Minimize => c"minimize",
         CommandKind::ToggleMaximize => c"toggle_maximize",

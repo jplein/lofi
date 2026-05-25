@@ -303,10 +303,19 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private func commandSymbolName(for id: String) -> String {
         switch id {
         case "center": return "rectangle.center.inset.filled"
+        case "center_third": return "rectangle.portrait.center.inset.filled"
         case "center_half": return "rectangle.split.2x1"
         case "center_two_thirds": return "rectangle.split.3x1"
+        // Thirds use the dedicated leading/trailing-third glyphs (leading ==
+        // left in LoFi's LTR UI). SF Symbols has no "two-thirds" rectangle,
+        // so the two-thirds variants reuse the broad half-fill glyph — the
+        // row's text label disambiguates them from the plain halves.
+        case "left_third": return "rectangle.leadingthird.inset.filled"
         case "left_half": return "rectangle.lefthalf.filled"
+        case "left_two_thirds": return "rectangle.lefthalf.filled"
+        case "right_third": return "rectangle.trailingthird.inset.filled"
         case "right_half": return "rectangle.righthalf.filled"
+        case "right_two_thirds": return "rectangle.righthalf.filled"
         case "standard_size": return "rectangle.inset.filled"
         case "minimize": return "minus.rectangle"
         case "toggle_maximize": return "arrow.up.left.and.arrow.down.right"

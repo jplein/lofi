@@ -302,10 +302,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// GNOME extension yet — they appear only on macOS).
     private static let commandIdsAlwaysAvailable = [
         "center",
+        "center_third",
         "center_half",
         "center_two_thirds",
+        "left_third",
         "left_half",
+        "left_two_thirds",
+        "right_third",
         "right_half",
+        "right_two_thirds",
         "standard_size",
         "minimize",
         "toggle_maximize",

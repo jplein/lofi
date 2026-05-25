@@ -2324,17 +2324,24 @@ fn mixed_list_filtered_command_geometry_and_id() {
 
 #[test]
 fn command_id_matches_as_id_for_all_kinds() {
-    // Push all nine command kinds in display order and assert each
+    // Push all fourteen command kinds in display order and assert each
     // command_id equals its expected snake_case id. This guards the FFI's
     // command_id_cstr map against drift from CommandKind::as_id: if a new kind
     // is added or an id string changes on one side only, this test fails.
+    // (NextDisplay / PreviousDisplay are macOS-only display-order extras that
+    // the Swift layer appends conditionally; they are exercised elsewhere.)
     const TARGET_WINDOW_ID: u64 = 100;
-    const ALL_KIND_IDS: [&str; 9] = [
+    const ALL_KIND_IDS: [&str; 14] = [
         "center",
+        "center_third",
         "center_half",
         "center_two_thirds",
+        "left_third",
         "left_half",
+        "left_two_thirds",
+        "right_third",
         "right_half",
+        "right_two_thirds",
         "standard_size",
         "minimize",
         "toggle_maximize",
@@ -2354,7 +2361,7 @@ fn command_id_matches_as_id_for_all_kinds() {
         assert_eq!(
             lofi_entries_len(list),
             ALL_KIND_IDS.len(),
-            "all nine command kinds should be pushed"
+            "all fourteen command kinds should be pushed"
         );
 
         for (idx, expected_id) in ALL_KIND_IDS.iter().enumerate() {

@@ -30,6 +30,15 @@ pub fn compute_geometry(
                 h,
             ))
         }
+        CommandKind::CenterThird => {
+            let w = work_area.width / 3;
+            Some((
+                work_area.x + (work_area.width - w) / 2,
+                work_area.y,
+                w,
+                work_area.height,
+            ))
+        }
         CommandKind::CenterHalf => {
             let w = work_area.width / 2;
             Some((
@@ -48,15 +57,38 @@ pub fn compute_geometry(
                 work_area.height,
             ))
         }
+        CommandKind::LeftThird => Some((
+            work_area.x,
+            work_area.y,
+            work_area.width / 3,
+            work_area.height,
+        )),
         CommandKind::LeftHalf => Some((
             work_area.x,
             work_area.y,
             work_area.width / 2,
             work_area.height,
         )),
+        CommandKind::LeftTwoThirds => Some((
+            work_area.x,
+            work_area.y,
+            work_area.width * 2 / 3,
+            work_area.height,
+        )),
+        // Right-aligned variants anchor by `x + width - w` (not `x + w`) so
+        // the window stays flush against the work area's right edge even when
+        // integer division leaves `w` a pixel short of an exact fraction.
+        CommandKind::RightThird => {
+            let w = work_area.width / 3;
+            Some((work_area.x + work_area.width - w, work_area.y, w, work_area.height))
+        }
         CommandKind::RightHalf => {
             let w = work_area.width / 2;
             Some((work_area.x + w, work_area.y, w, work_area.height))
+        }
+        CommandKind::RightTwoThirds => {
+            let w = work_area.width * 2 / 3;
+            Some((work_area.x + work_area.width - w, work_area.y, w, work_area.height))
         }
         CommandKind::StandardSize => {
             let w = work_area.width * 2 / 3;
@@ -114,6 +146,18 @@ mod tests {
     }
 
     #[test]
+    fn center_third_geometry() {
+        // Center third: width/3 x full height, centered horizontally.
+        // w = 1800/3 = 600, x = 100 + (1800-600)/2 = 700, y = 50, h = 1000.
+        let actual = compute_geometry(CommandKind::CenterThird, &WA, ZERO_FRAME);
+        let expected = Some((700, 50, 600, 1000));
+        assert_eq!(
+            actual, expected,
+            "CenterThird should be width/3 x full height centered; got {actual:?}, want {expected:?}"
+        );
+    }
+
+    #[test]
     fn center_half_geometry() {
         // Center half: width/2 x full height, centered horizontally.
         // x = 100 + 1800/4 = 550, y = 50, w = 900, h = 1000.
@@ -157,6 +201,54 @@ mod tests {
         assert_eq!(
             actual, expected,
             "RightHalf should be width/2 x full height flush right; got {actual:?}, want {expected:?}"
+        );
+    }
+
+    #[test]
+    fn left_third_geometry() {
+        // Left third: width/3 x full height, flush left.
+        // w = 1800/3 = 600.
+        let actual = compute_geometry(CommandKind::LeftThird, &WA, ZERO_FRAME);
+        let expected = Some((100, 50, 600, 1000));
+        assert_eq!(
+            actual, expected,
+            "LeftThird should be width/3 x full height flush left; got {actual:?}, want {expected:?}"
+        );
+    }
+
+    #[test]
+    fn left_two_thirds_geometry() {
+        // Left two-thirds: width*2/3 x full height, flush left.
+        // w = 1800*2/3 = 1200.
+        let actual = compute_geometry(CommandKind::LeftTwoThirds, &WA, ZERO_FRAME);
+        let expected = Some((100, 50, 1200, 1000));
+        assert_eq!(
+            actual, expected,
+            "LeftTwoThirds should be width*2/3 x full height flush left; got {actual:?}, want {expected:?}"
+        );
+    }
+
+    #[test]
+    fn right_third_geometry() {
+        // Right third: width/3 x full height, flush right.
+        // w = 1800/3 = 600, x = 100 + 1800 - 600 = 1300.
+        let actual = compute_geometry(CommandKind::RightThird, &WA, ZERO_FRAME);
+        let expected = Some((1300, 50, 600, 1000));
+        assert_eq!(
+            actual, expected,
+            "RightThird should be width/3 x full height flush right; got {actual:?}, want {expected:?}"
+        );
+    }
+
+    #[test]
+    fn right_two_thirds_geometry() {
+        // Right two-thirds: width*2/3 x full height, flush right.
+        // w = 1800*2/3 = 1200, x = 100 + 1800 - 1200 = 700.
+        let actual = compute_geometry(CommandKind::RightTwoThirds, &WA, ZERO_FRAME);
+        let expected = Some((700, 50, 1200, 1000));
+        assert_eq!(
+            actual, expected,
+            "RightTwoThirds should be width*2/3 x full height flush right; got {actual:?}, want {expected:?}"
         );
     }
 
