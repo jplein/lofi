@@ -358,10 +358,12 @@ mod tests {
 
     #[test]
     fn matching_entries_are_returned_regardless_of_order() {
-        // search() is filter-only now: it returns matching entries in the
-        // input order (no score-based ranking, no tiebreaker). The set of
-        // matches is what callers should rely on; ordering is handled
-        // upstream by the MRU index.
+        // search() ranks matches by descending fuzzy score, but this case
+        // pins only the matched *set*, not the order: both entries share the
+        // desktop_id "z.desktop", so they score equally and the input order
+        // is the only tiebreaker. What matters here is that the set of
+        // matches is independent of input order; the MRU two-tier overlay
+        // that callers apply on top is exercised elsewhere.
         let entries = vec![app("Bravo", "z.desktop"), app("Alpha", "z.desktop")];
 
         let result = search(&entries, "z.desktop");

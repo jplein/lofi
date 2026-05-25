@@ -376,12 +376,14 @@ fn selected_entry(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>) -> Opti
 }
 
 /// Rebuild the list rows from `query`. Empty/whitespace queries pass through
-/// the full set; otherwise we run the fuzzy matcher (filter-only) and translate
+/// the full set; otherwise we run the fuzzy matcher (score-sorted) and translate
 /// result refs back into indices via pointer equality against the owning vec.
-/// The resulting index list is then stably sorted by MRU rank — entries in the
-/// persisted recency index rise to the top in most-recent-first order; entries
-/// absent from the index fall to the bottom in input order. Stable selection
-/// during typing is the whole point: see the MRU plan for context.
+/// The resulting index list is then stably sorted by MRU rank, which yields the
+/// two-tier order: entries in the persisted recency index rise to the top in
+/// most-recent-first order (their score order is overwritten), while entries
+/// absent from the index keep the matcher's descending-score order at the
+/// bottom. Stable selection during typing is the point for the MRU-known rows:
+/// see the MRU plan for context.
 fn populate_list(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>, query: &str) {
     while let Some(child) = list_box.first_child() {
         list_box.remove(&child);
