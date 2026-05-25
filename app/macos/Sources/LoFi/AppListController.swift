@@ -253,6 +253,12 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         case "minimize": return "minus.rectangle"
         case "toggle_maximize": return "arrow.up.left.and.arrow.down.right"
         case "toggle_fullscreen": return "arrow.up.left.and.arrow.down.right.rectangle"
+        // Move-to-display: directional arrows pointing to a line, the
+        // SF Symbol idiom for "send to the next position." Reads
+        // alongside the other rectangle-themed glyphs above without
+        // being mistaken for half/two-thirds layouts.
+        case "next_display": return "arrow.right.to.line"
+        case "previous_display": return "arrow.left.to.line"
         default: return "macwindow"
         }
     }
@@ -394,7 +400,8 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// Geometry kinds (`entries.commandGeometry(at:)` returns a rect) call
     /// `WindowControl.move` with the precomputed top-left-global rect from
     /// Rust's `compute_geometry`. State-toggle kinds (nil geometry)
-    /// dispatch by id: minimize / toggle fullscreen / toggle maximize.
+    /// dispatch by id: minimize / toggle fullscreen / toggle maximize /
+    /// next display / previous display.
     private func runCommand(_ row: Int) {
         guard let commandId = entries.commandId(at: row),
               let target = commandTarget
@@ -434,6 +441,20 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
                 workArea: target.workArea,
                 fallbackRect: target.standardRect,
                 store: savedFrameStore
+            )
+        case "next_display":
+            _ = WindowControl.moveToDisplay(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                direction: +1
+            )
+        case "previous_display":
+            _ = WindowControl.moveToDisplay(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                direction: -1
             )
         default:
             // An unrecognized state-toggle id (a Rust-side kind we don't

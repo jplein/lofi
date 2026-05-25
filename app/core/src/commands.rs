@@ -69,6 +69,12 @@ pub fn compute_geometry(
             ))
         }
         CommandKind::Minimize | CommandKind::ToggleMaximize | CommandKind::ToggleFullscreen => None,
+        // Move-to-display commands depend on multi-display geometry the
+        // platform layer holds (set of displays + the target's current
+        // one), not on a single work area. Returning None routes them
+        // through the platform's state-toggle dispatch path, which
+        // computes the destination rect at activation time.
+        CommandKind::NextDisplay | CommandKind::PreviousDisplay => None,
     }
 }
 
@@ -192,6 +198,28 @@ mod tests {
         assert_eq!(
             actual, None,
             "ToggleFullscreen is a state command and must return None; got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn next_display_returns_none() {
+        // NextDisplay depends on multi-display geometry the platform layer
+        // holds (set of displays + the target's current one), not the
+        // single work area threaded through this function. The platform
+        // dispatch computes the destination rect at activation time.
+        let actual = compute_geometry(CommandKind::NextDisplay, &WA, ZERO_FRAME);
+        assert_eq!(
+            actual, None,
+            "NextDisplay is platform-dispatched and must return None; got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn previous_display_returns_none() {
+        let actual = compute_geometry(CommandKind::PreviousDisplay, &WA, ZERO_FRAME);
+        assert_eq!(
+            actual, None,
+            "PreviousDisplay is platform-dispatched and must return None; got {actual:?}"
         );
     }
 }

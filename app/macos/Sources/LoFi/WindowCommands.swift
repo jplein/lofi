@@ -1,10 +1,10 @@
 // Command-target gathering — the macOS analog of GNOME's
 // `app/gnome/src/commands.rs::gather_commands`.
 //
-// The nine window-action commands (Center, halves, two-thirds, Standard
-// size, Minimize, Toggle maximize, Toggle fullscreen) all act on a single
-// *target window*: the most-recently-focused user window that isn't LoFi
-// itself. This file picks that target and captures everything the
+// The window-action commands (Center, halves, two-thirds, Standard
+// size, Minimize, Toggle maximize, Toggle fullscreen, plus Next/Previous
+// display on multi-display setups) all act on a single *target window*:
+// the most-recently-focused user window that isn't LoFi itself. This file picks that target and captures everything the
 // activation path will need so dispatch is one AX round-trip with no
 // further reads:
 //   - `windowId` / `pid` / `title` — to find and drive the AX window.

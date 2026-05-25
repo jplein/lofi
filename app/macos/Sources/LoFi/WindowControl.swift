@@ -324,6 +324,120 @@ enum WindowControl {
         }
     }
 
+    /// Move the target window to the next or previous display (with
+    /// wrap-around), preserving the window's offset from the work-area
+    /// origin and its size. Size and position are both clamped to fit
+    /// the destination display's work area.
+    ///
+    /// `direction = +1` → next display; `direction = -1` → previous.
+    /// "Next" and "previous" follow `NSScreen.screens` order (the
+    /// system-reported enumeration) — same cycle Rectangle and other
+    /// macOS launchers use for "Next Display" / "Previous Display".
+    /// Wrap-around: stepping past the last display cycles to the first
+    /// and vice versa.
+    ///
+    /// Returns `false` when:
+    ///   - fewer than 2 displays are attached (the command is a no-op
+    ///     by definition; `AppDelegate` also gates the command rows on
+    ///     `NSScreen.screens.count >= 2` so this path should not
+    ///     normally be reached),
+    ///   - the target window can't be found via AX,
+    ///   - the AX reads / sets fail.
+    ///
+    /// All coordinates internally are top-left global (same convention
+    /// as the other geometry commands).
+    static func moveToDisplay(
+        pid: pid_t,
+        title: String,
+        windowId: UInt64,
+        direction: Int
+    ) -> Bool {
+        let screens = NSScreen.screens
+        guard screens.count >= 2 else { return false }
+        guard let primary = screens.first else { return false }
+        guard let window = AXWindowFinder.find(
+            pid: pid,
+            windowId: CGWindowID(windowId),
+            title: title
+        ),
+            let currentFrame = readFrame(window)
+        else {
+            return false
+        }
+
+        // Find which display the window center sits on. Match against
+        // each screen's `frame` (not `visibleFrame`) so a window whose
+        // center is in the menu-bar / dock strip still resolves to the
+        // right screen. The flip uses the *primary* display's height
+        // because the global y-axis is anchored to the primary
+        // display, not the local one — same rule as
+        // `WindowCommands.workAreaTopLeft`.
+        let primaryHeight = primary.frame.height
+        let center = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
+        let currentIndex = screens.firstIndex { screen in
+            let f = screen.frame
+            let topLeft = CGRect(
+                x: f.origin.x,
+                y: primaryHeight - f.origin.y - f.height,
+                width: f.width,
+                height: f.height
+            )
+            return topLeft.contains(center)
+        } ?? 0
+
+        // Cyclic step. `((i + d) % n + n) % n` is the canonical
+        // Euclidean modulo so `direction = -1` from index 0 wraps to
+        // `n - 1` instead of producing a negative result.
+        let n = screens.count
+        let targetIndex = ((currentIndex + direction) % n + n) % n
+
+        let currentWA = visibleFrameTopLeft(
+            screen: screens[currentIndex], primaryHeight: primaryHeight
+        )
+        let targetWA = visibleFrameTopLeft(
+            screen: screens[targetIndex], primaryHeight: primaryHeight
+        )
+
+        // Preserve the window's offset within its current work area;
+        // clamp the size to the destination work area and the
+        // position so the window stays fully inside it. Keeping the
+        // offset means a window "near the top-left of display 1"
+        // lands "near the top-left of display 2", which is the
+        // least-surprising mapping when display sizes differ.
+        let offsetX = currentFrame.minX - currentWA.minX
+        let offsetY = currentFrame.minY - currentWA.minY
+        let newWidth = min(currentFrame.width, targetWA.width)
+        let newHeight = min(currentFrame.height, targetWA.height)
+        let maxX = targetWA.minX + targetWA.width - newWidth
+        let maxY = targetWA.minY + targetWA.height - newHeight
+        let newX = max(targetWA.minX, min(maxX, targetWA.minX + offsetX))
+        let newY = max(targetWA.minY, min(maxY, targetWA.minY + offsetY))
+
+        clearFullscreen(window)
+        disableEnhancedUI(pid: pid)
+        return setFrame(
+            window,
+            origin: CGPoint(x: newX, y: newY),
+            size: CGSize(width: newWidth, height: newHeight)
+        )
+    }
+
+    /// Convert an `NSScreen.visibleFrame` (Cocoa bottom-left) to top-left
+    /// global coords. `primaryHeight` is the primary screen's frame
+    /// height — the global y-axis is anchored to the primary display, so
+    /// this is the only correct reference even for a secondary monitor.
+    private static func visibleFrameTopLeft(
+        screen: NSScreen, primaryHeight: CGFloat
+    ) -> CGRect {
+        let vf = screen.visibleFrame
+        return CGRect(
+            x: vf.origin.x,
+            y: primaryHeight - vf.origin.y - vf.height,
+            width: vf.width,
+            height: vf.height
+        )
+    }
+
     // MARK: - AX primitives
 
     /// Move + resize a window to a top-left-global origin + size, using a

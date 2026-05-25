@@ -205,9 +205,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Window-action command ids in display order. Mirrors
-    /// `CommandKind::as_id` (`app/core/src/lib.rs`) and GNOME's
-    /// `commands.rs::ALL_KINDS` order.
-    private static let commandIds = [
+    /// `CommandKind::as_id` (`app/core/src/lib.rs`); the GNOME
+    /// platform's `commands.rs::ALL_KINDS` is the same order minus
+    /// `next_display`/`previous_display` (not implemented in the
+    /// GNOME extension yet — they appear only on macOS).
+    private static let commandIdsAlwaysAvailable = [
         "center",
         "center_half",
         "center_two_thirds",
@@ -219,9 +221,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "toggle_fullscreen",
     ]
 
-    /// Gather the command target and push the nine command entries. No-op
-    /// (and leaves `commandTarget` nil) when there's no usable target, so
-    /// the command rows simply don't appear — GNOME parity.
+    /// Multi-display command ids appended to `commandIdsAlwaysAvailable`
+    /// only when at least 2 displays are attached. Single-display users
+    /// never see "Next display" / "Previous display" rows because the
+    /// commands would be no-ops there — `WindowControl.moveToDisplay`
+    /// would just return `false` for `screens.count < 2`, so showing
+    /// the rows would be a dead affordance.
+    private static let commandIdsMultiDisplay = [
+        "next_display",
+        "previous_display",
+    ]
+
+    /// Gather the command target and push the command entries. No-op
+    /// (and leaves `commandTarget` nil) when there's no usable target,
+    /// so the command rows simply don't appear — GNOME parity. The
+    /// multi-display ids are appended only when ≥ 2 displays are
+    /// attached.
     ///
     /// After the push, fill `target.standardRect` by scanning the pushed
     /// rows for the `standard_size` command and reading its computed
@@ -233,7 +248,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pushCommands() {
         guard var target = WindowCommands.gatherTarget() else { return }
 
-        for id in Self.commandIds {
+        var ids = Self.commandIdsAlwaysAvailable
+        if NSScreen.screens.count >= 2 {
+            ids.append(contentsOf: Self.commandIdsMultiDisplay)
+        }
+        for id in ids {
             _ = entries.pushCommand(
                 kindId: id,
                 targetWindowId: target.windowId,

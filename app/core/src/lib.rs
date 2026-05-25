@@ -70,6 +70,17 @@ pub enum CommandKind {
     Minimize,
     ToggleMaximize,
     ToggleFullscreen,
+    /// Move the target window to the next display (with wrap-around), preserving
+    /// the window's offset from the work-area origin and its size. Like the
+    /// state-style commands, the platform layer computes the target geometry
+    /// at activation time (it depends on the current display set, which is
+    /// platform-side state), so `compute_geometry` returns `None`. macOS
+    /// dispatches via `WindowControl.moveToDisplay`; GNOME does not currently
+    /// implement this — it is omitted from `app/gnome/src/commands.rs`'s
+    /// `ALL_KINDS` so the rows don't appear in the Linux launcher.
+    NextDisplay,
+    /// Symmetric counterpart of `NextDisplay`. See that variant's doc.
+    PreviousDisplay,
 }
 
 impl CommandKind {
@@ -88,6 +99,8 @@ impl CommandKind {
             CommandKind::Minimize => "minimize",
             CommandKind::ToggleMaximize => "toggle_maximize",
             CommandKind::ToggleFullscreen => "toggle_fullscreen",
+            CommandKind::NextDisplay => "next_display",
+            CommandKind::PreviousDisplay => "previous_display",
         }
     }
 
@@ -105,6 +118,8 @@ impl CommandKind {
             CommandKind::Minimize => "Minimize",
             CommandKind::ToggleMaximize => "Toggle maximize",
             CommandKind::ToggleFullscreen => "Toggle fullscreen",
+            CommandKind::NextDisplay => "Next display",
+            CommandKind::PreviousDisplay => "Previous display",
         }
     }
 
@@ -122,6 +137,13 @@ impl CommandKind {
             CommandKind::Minimize => "window-minimize-symbolic",
             CommandKind::ToggleMaximize => "window-maximize-symbolic",
             CommandKind::ToggleFullscreen => "view-fullscreen-symbolic",
+            // GNOME doesn't surface these commands today (they're omitted
+            // from `app/gnome/src/commands.rs::ALL_KINDS`), but icon_name
+            // is exhaustive over CommandKind by the type system, so we
+            // still need a value. Reuse `go-next-symbolic` /
+            // `go-previous-symbolic` — Adwaita's directional arrows.
+            CommandKind::NextDisplay => "go-next-symbolic",
+            CommandKind::PreviousDisplay => "go-previous-symbolic",
         }
     }
 
@@ -140,6 +162,8 @@ impl CommandKind {
             "minimize" => Some(CommandKind::Minimize),
             "toggle_maximize" => Some(CommandKind::ToggleMaximize),
             "toggle_fullscreen" => Some(CommandKind::ToggleFullscreen),
+            "next_display" => Some(CommandKind::NextDisplay),
+            "previous_display" => Some(CommandKind::PreviousDisplay),
             _ => None,
         }
     }

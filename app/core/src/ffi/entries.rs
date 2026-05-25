@@ -820,6 +820,8 @@ fn command_id_cstr(kind: CommandKind) -> &'static CStr {
         CommandKind::Minimize => c"minimize",
         CommandKind::ToggleMaximize => c"toggle_maximize",
         CommandKind::ToggleFullscreen => c"toggle_fullscreen",
+        CommandKind::NextDisplay => c"next_display",
+        CommandKind::PreviousDisplay => c"previous_display",
     }
 }
 
