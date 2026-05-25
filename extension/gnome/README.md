@@ -34,7 +34,8 @@ multi-version compatibility layer.
 ## Linting and formatting
 
 Three checks guard the TypeScript, run from this directory (`npm run check` runs
-all three; see the `## TypeScript checks` section in the repo-root `CLAUDE.md`):
+all three). `CLAUDE.md` at the repo root lists them as the required gates before
+a task is considered done:
 
 | Script | Tool | What it does |
 |--------|------|--------------|

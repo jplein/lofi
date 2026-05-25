@@ -20,3 +20,27 @@ The shared layer defines the uniform item type that the platform layers populate
 - Commands (power management, lock screen, arbitrary user-defined commands)
 
 Each platform implementation gathers these into the shared type so the presentation and matching logic stays platform-agnostic.
+
+## Checks
+
+The Rust toolchain comes from a different place on each platform, so the check commands differ. **Bazel is macOS-only** — on Linux the toolchain (and the reproducible build) come from Nix via direnv + `flake.nix`, and Bazel is not installed at all. (On the macOS/Bazel path `cargo` is editor tooling only, not the build/check front door.)
+
+### Linux — Cargo (direnv + `flake.nix`)
+
+Run from `app/`. These cover the whole workspace, including the Linux-only `gnome` crate:
+
+- `cargo test` — unit tests + `tests/mru.rs` (add `-p lofi-core --features ffi` to also run `tests/ffi.rs`)
+- `cargo clippy --all-targets`
+- `cargo fmt --check`
+
+### macOS — Bazel
+
+One command compiles every Bazel-built Rust target, runs clippy (warnings promoted to errors) and rustfmt, and runs the tests:
+
+- `bazelisk test //app/...`
+
+Only `core` builds under Bazel; the `gnome` crate is Linux-only (gtk4 / libadwaita) and has no Bazel target, so it is covered by the Cargo path above. For how the Bazel clippy/rustfmt/test targets are wired (and why), see [core/README.md](core/README.md#tests-clippy-and-rustfmt).
+
+### Swift (macOS only)
+
+The macOS frontend is Swift, checked with Apple's `swift-format` (`app/macos/check.sh`). See [macos/README.md](macos/README.md#formatting--linting).

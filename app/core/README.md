@@ -384,18 +384,7 @@ The MRU integration tests in `tests/mru.rs` use the public crate API directly (`
 
 ## Tests, clippy, and rustfmt
 
-The two platforms get their Rust toolchain from different places, so the check
-commands differ — **Bazel is macOS-only** (on Linux the toolchain and the
-reproducible build come from Nix, and Bazel is not installed).
-
-### Linux (Cargo, via direnv + `flake.nix`)
-
-Cargo discovers `src/**` unit tests and everything under `tests/` automatically, and clippy/rustfmt see the whole workspace (including the Linux-only `gnome` crate). From `app/`:
-
-- `cargo test` — unit tests plus `tests/mru.rs` (add `-p lofi-core --features ffi` for `tests/ffi.rs`).
-- `cargo clippy --all-targets` and `cargo fmt --check`.
-
-### macOS (Bazel)
+How to run the checks on each platform (Linux Cargo vs macOS Bazel) lives in [app/README.md](../README.md#checks). This section covers only how the Bazel (macOS) targets are wired and why.
 
 Bazel only sees what it builds, which is `core` (the `gnome` crate is Linux-only — gtk4/libadwaita — and has no Bazel target). And unlike Cargo, Bazel needs every test file spelled out as a target, with only files belonging to a declared target reachable by the clippy/rustfmt gates. So each test file has a `rust_test` target — `:ffi_test` and `:mru_test` — and the gates list the library plus both test crates:
 
