@@ -96,12 +96,31 @@ final class EntryList {
         lofi_entries_free(handle)
     }
 
-    /// Push an application onto the list. Returns `false` on null
-    /// args (impossible from Swift `String`) or invalid-UTF-8 — neither
-    /// is reachable in practice, but the return value matches the C
-    /// signature for future-proofing.
+    /// Reset the list to empty (no entries, no query, no filter, no
+    /// MRU state). The daemon calls this on every global-hotkey
+    /// summon before re-pushing apps + commands, so the command
+    /// target reflects the frontmost-non-LoFi window *now*, not at
+    /// process-start time.
+    func clear() {
+        lofi_entries_clear(handle)
+    }
+
+    /// Push an application onto the list. `isRunning` is the boolean
+    /// projection of `Application::is_running` on the Rust side — pass
+    /// `true` when the app has at least one open window at gather time.
+    /// `AppDelegate.summonPanel` derives it from a one-pass scan of the
+    /// window list and passes it through here; the matching read on
+    /// `isRunning(at:)` drives the running-indicator dot in the row UI.
+    /// Returns `false` on null args (impossible from Swift `String`) or
+    /// invalid-UTF-8 — neither is reachable in practice, but the return
+    /// value matches the C signature for future-proofing.
     @discardableResult
-    func pushApplication(name: String, bundleId: String, icon: String?) -> Bool {
+    func pushApplication(
+        name: String,
+        bundleId: String,
+        icon: String?,
+        isRunning: Bool
+    ) -> Bool {
         return name.withCString { namePtr in
             bundleId.withCString { bundlePtr in
                 let withIcon: (UnsafePointer<CChar>?) -> Bool = { iconPtr in
@@ -109,7 +128,8 @@ final class EntryList {
                         self.handle,
                         namePtr,
                         bundlePtr,
-                        iconPtr
+                        iconPtr,
+                        isRunning
                     )
                 }
                 if let icon = icon {
@@ -169,6 +189,81 @@ final class EntryList {
                 return appName.withCString { withApp($0) }
             }
             return withApp(nil)
+        }
+    }
+
+    /// Push a system-level power command onto the list. `kindId` is a
+    /// `PowerCommandKind::as_id` snake_case string (e.g. `"lock_session"`,
+    /// `"shutdown"`). Unlike `pushCommand`, power commands have no per-window
+    /// target — they always apply — so this method takes only the kind.
+    ///
+    /// Returns `false` for a null list (impossible here, we own it), a
+    /// null/invalid-UTF-8 kind id (impossible from a Swift `String`), or
+    /// an UNKNOWN kind id (a real failure mode — Rust rejects ids that
+    /// aren't a `PowerCommandKind`, pushing nothing).
+    @discardableResult
+    func pushPowerCommand(kindId: String) -> Bool {
+        return kindId.withCString { kindPtr in
+            lofi_entries_push_power_command(self.handle, kindPtr)
+        }
+    }
+
+    /// Read the power-command id (`PowerCommandKind::as_id`, e.g.
+    /// `"lock_session"`) for the `Entry::PowerCommand` at the filtered `idx`.
+    /// Returns `nil` for non-PowerCommand entries, out-of-bounds indices, or
+    /// any other case (Rust returns null). Callers should gate on
+    /// `category(at:) == "PowerCommand"` before reading.
+    ///
+    /// Like `commandId(at:)`, the Rust pointer is a process-lifetime
+    /// `&'static CStr` and is never invalidated by a later mutation, but we
+    /// copy it into a Swift `String` immediately anyway for uniformity.
+    func powerCommandId(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_power_command_id(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
+    /// Push a window-action command onto the list. `kindId` is a
+    /// `CommandKind::as_id` snake_case string (e.g. `"center_half"`);
+    /// `targetWindowId` is the CGWindowID the command will act on. The
+    /// work area (`waX/waY/waW/waH`) and current frame (`frameX/frameY/
+    /// frameW/frameH`) are plain `Int32` in the caller's coordinate space
+    /// (top-left global on macOS) — taken as scalars rather than CGRects
+    /// to keep this bridge CoreGraphics-free; the caller rounds CGFloat
+    /// components with `.rounded()` before converting.
+    ///
+    /// Returns `false` for a null list (impossible here, we own it), a
+    /// null/invalid-UTF-8 kind id (impossible from a Swift `String`), or
+    /// an UNKNOWN kind id (a real failure mode — Rust rejects ids that
+    /// aren't a `CommandKind`, pushing nothing).
+    @discardableResult
+    func pushCommand(
+        kindId: String,
+        targetWindowId: UInt64,
+        waX: Int32,
+        waY: Int32,
+        waW: Int32,
+        waH: Int32,
+        frameX: Int32,
+        frameY: Int32,
+        frameW: Int32,
+        frameH: Int32
+    ) -> Bool {
+        return kindId.withCString { kindPtr in
+            lofi_entries_push_command(
+                self.handle,
+                kindPtr,
+                targetWindowId,
+                waX,
+                waY,
+                waW,
+                waH,
+                frameX,
+                frameY,
+                frameW,
+                frameH
+            )
         }
     }
 
@@ -247,6 +342,59 @@ final class EntryList {
     /// fallback rather than the primary signal.
     func windowId(at idx: Int) -> UInt64 {
         lofi_entries_get_window_id(handle, UInt(idx))
+    }
+
+    /// `true` when the entry at the filtered `idx` is an Application
+    /// whose `is_running` flag was set at push time — i.e. the app had
+    /// at least one open window when `AppDelegate.summonPanel` ran.
+    /// `false` for every other case: non-Application entries,
+    /// not-running apps, out-of-bounds indices, or a null list (a
+    /// degenerate case here because we own the handle). Drives the
+    /// running-indicator dot in `EntryRowView`.
+    func isRunning(at idx: Int) -> Bool {
+        lofi_entries_get_is_running(handle, UInt(idx))
+    }
+
+    /// Read the command id (`CommandKind::as_id`, e.g. `"center_half"`)
+    /// for the `Entry::Command` at the filtered `idx`. Returns `nil` for
+    /// non-Command entries, out-of-bounds indices, or any other case
+    /// (Rust returns null). Callers should gate on
+    /// `category(at:) == "Command"` before reading.
+    ///
+    /// Unlike the other string accessors the Rust pointer is a
+    /// process-lifetime `&'static CStr` and is never invalidated by a
+    /// later mutation, but we copy it into a Swift `String` immediately
+    /// anyway for uniformity with `name(at:)`.
+    func commandId(at idx: Int) -> String? {
+        guard let cstr = lofi_entries_get_command_id(handle, UInt(idx)) else {
+            return nil
+        }
+        return String(cString: cstr)
+    }
+
+    /// Read the computed geometry for the command at the filtered `idx`,
+    /// as `(x, y, w, h)` in the coordinate space the command was pushed in
+    /// (top-left global on macOS). Returns the tuple only for *geometry*
+    /// command kinds; returns `nil` for state-toggle kinds (minimize /
+    /// toggle_maximize / toggle_fullscreen), non-Command entries,
+    /// out-of-bounds indices, or a null list. A `nil` here means "dispatch
+    /// by `commandId(at:)` instead" — the state-toggle commands have no
+    /// rectangle.
+    func commandGeometry(at idx: Int) -> (x: Int32, y: Int32, w: Int32, h: Int32)? {
+        var x: Int32 = 0
+        var y: Int32 = 0
+        var w: Int32 = 0
+        var h: Int32 = 0
+        let ok = lofi_entries_get_command_geometry(
+            handle,
+            UInt(idx),
+            &x,
+            &y,
+            &w,
+            &h
+        )
+        guard ok else { return nil }
+        return (x, y, w, h)
     }
 
     /// Reorder the underlying entries by recency (most-recently-used

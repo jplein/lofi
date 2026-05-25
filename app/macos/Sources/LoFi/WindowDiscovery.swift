@@ -38,6 +38,15 @@ import ApplicationServices
 /// `workspace` is always 0 on macOS: there's no Mutter-style workspace
 /// concept. The field exists for cross-platform parity with the GNOME
 /// pipeline, which uses `Shell.WindowTracker.get_workspace().index`.
+///
+/// `bounds` is the window's on-screen rectangle from `kCGWindowBounds`,
+/// already in **top-left global display coordinates** (origin top-left of
+/// the primary display, y growing downward). This is the same coordinate
+/// space the Accessibility `kAXPositionAttribute`/`kAXSizeAttribute` use,
+/// so the rect can be handed straight to `compute_geometry` (as the
+/// command target's `current_frame`) and back to AX without a flip. The
+/// work area, by contrast, comes from `NSScreen.visibleFrame` (Cocoa
+/// bottom-left) and *does* need flipping — see `WindowCommands`.
 struct DiscoveredWindow {
     let id: CGWindowID
     let title: String
@@ -46,25 +55,53 @@ struct DiscoveredWindow {
     let ownerBundleId: String?
     let ownerBundlePath: String?
     let workspace: Int32
+    let bounds: CGRect
 }
 
 enum WindowDiscovery {
     /// Returns the user-relevant on-screen windows owned by other
-    /// applications. Filters:
+    /// applications on the **active macOS Space**, in reliable
+    /// front-to-back z-order. Filters:
     ///   - `kCGWindowLayer == 0` (regular app windows, not menus / panels /
     ///     system UI — those live at non-zero layers).
     ///   - `kCGWindowOwnerPID != getpid()` (don't list LoFi.app's own panel).
-    ///   - non-empty `kCGWindowName` (a titleless window is uninteresting
-    ///     in a launcher, and also a strong signal that Screen Recording
-    ///     is denied).
+    ///   - non-empty `kCGWindowName` (a titleless window is uninteresting,
+    ///     and also a strong signal that Screen Recording is denied).
     /// Caller must hold both Screen Recording and Accessibility
     /// permissions; this function does not gate on them.
+    ///
+    /// **Used only by the window-action command target** today.
+    /// `WindowCommands.gatherTarget` calls this to pick the frontmost
+    /// non-LoFi window as the target for center/halves/standard-size/
+    /// minimize/toggle-* / next-display / previous-display commands.
+    /// `SavedFrameStore.prune` also reads the live-id list to
+    /// garbage-collect dropped frame records. The window *switcher*
+    /// (per-window launcher rows) used to call this too but is
+    /// disabled on macOS — see README gotchas 13-14 for the macOS
+    /// limitations that ruled it out.
+    ///
+    /// **No active-display filter.** An earlier iteration filtered
+    /// by the cursor's display, which was needed by the (now-disabled)
+    /// window switcher to avoid the cross-display focus problem. For
+    /// command targeting it was actively wrong: picking the frontmost
+    /// non-LoFi window *on the cursor's display* targets a different
+    /// window than the user expects whenever a previous command has
+    /// moved the foreground window to a different display (e.g.
+    /// "Previous display" moves Ghostty to display 1, cursor stays on
+    /// display 0, user summons LoFi expecting "Next display" to move
+    /// Ghostty back — but `gatherTarget` returns whatever happens to
+    /// be on display 0 instead). The right scope for command targeting
+    /// is the global frontmost non-LoFi window (GNOME parity), and
+    /// the command's *work area* is derived from the *target window's*
+    /// display via `WindowCommands.workAreaTopLeft`, not from the
+    /// cursor's display.
+    ///
+    /// `.optionOnScreenOnly` gives the front-to-back z-order
+    /// `gatherTarget` depends on AND restricts the result to the
+    /// active Space (the only Space we can reliably activate anything
+    /// on — see gotcha 13).
     static func discover() -> [DiscoveredWindow] {
-        // No `optionOnScreenOnly` — that flag restricts the result to
-        // windows on the *current* macOS Space. Dropping it picks up
-        // windows on every Space (and minimized windows, which the
-        // user reasonably expects to be able to switch to).
-        let options: CGWindowListOption = [.excludeDesktopElements]
+        let options: CGWindowListOption = [.excludeDesktopElements, .optionOnScreenOnly]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
             return []
         }
@@ -105,6 +142,21 @@ enum WindowDiscovery {
                 continue
             }
             let windowId = CGWindowID(numberRaw)
+            // `kCGWindowBounds` is a CFDictionary (`{X, Y, Width, Height}`),
+            // not a raw CGRect — bridge it via
+            // `CGRect(dictionaryRepresentation:)`. The rect is already in
+            // top-left global coordinates (see `DiscoveredWindow.bounds`).
+            // Skip the window if bounds can't be read, mirroring the
+            // skip-on-missing-field pattern above: a window surfaced to the
+            // launcher must always carry a usable `bounds` so a command
+            // targeting it has a real `current_frame`.
+            guard let boundsValue = dict[kCGWindowBounds as String],
+                  let bounds = CGRect(
+                      dictionaryRepresentation: boundsValue as! CFDictionary
+                  )
+            else {
+                continue
+            }
             // Single `NSRunningApplication` lookup, two derived fields:
             // `bundleIdentifier` (stable id, used for `EntryRef`) and
             // `bundleURL.path` (used by the UI to resolve the icon via
@@ -132,7 +184,8 @@ enum WindowDiscovery {
                     ownerPid: pidValue,
                     ownerBundleId: bundleId,
                     ownerBundlePath: bundlePath,
-                    workspace: 0
+                    workspace: 0,
+                    bounds: bounds
                 )
             )
         }

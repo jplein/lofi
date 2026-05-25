@@ -15,10 +15,15 @@ const LOFI_DESKTOP_ID: &str = "dev.jplein.LoFi.desktop";
 /// Every command kind, in the order they appear in the launcher list.
 const ALL_KINDS: &[CommandKind] = &[
     CommandKind::Center,
+    CommandKind::CenterThird,
     CommandKind::CenterHalf,
     CommandKind::CenterTwoThirds,
+    CommandKind::LeftThird,
     CommandKind::LeftHalf,
+    CommandKind::LeftTwoThirds,
+    CommandKind::RightThird,
     CommandKind::RightHalf,
+    CommandKind::RightTwoThirds,
     CommandKind::StandardSize,
     CommandKind::Minimize,
     CommandKind::ToggleMaximize,

@@ -19,9 +19,17 @@ pub struct Application {
     /// Runtime-only state: when `Some(id)`, the application has at least one
     /// open window and `id` is the most recently focused. Set by the platform
     /// layer (`lofi-gnome::main`) after gathering windows from the extension;
-    /// not persisted, not part of `EntryRef`. `is_running` is equivalent to
-    /// `recent_window_id.is_some()`.
+    /// not persisted, not part of `EntryRef`.
     pub recent_window_id: Option<u64>,
+    /// Runtime-only state: `true` when the application has at least one open
+    /// window. Drives the running-indicator dot in the UI. Logically redundant
+    /// with `recent_window_id.is_some()` and the GNOME platform layer keeps the
+    /// two in sync, but the field is split out so the macOS platform layer can
+    /// signal "running" without paying the bookkeeping cost of tracking a real
+    /// `CGWindowID` it would never use (the macOS Application activation path
+    /// is `NSWorkspace.open(...)`, which finds an existing window itself). Not
+    /// persisted, not part of `EntryRef`.
+    pub is_running: bool,
 }
 
 /// An open window surfaced by the GNOME Shell extension over D-Bus. `app_name`
@@ -62,14 +70,30 @@ pub struct Workspace {
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
     Center,
+    CenterThird,
     CenterHalf,
     CenterTwoThirds,
+    LeftThird,
     LeftHalf,
+    LeftTwoThirds,
+    RightThird,
     RightHalf,
+    RightTwoThirds,
     StandardSize,
     Minimize,
     ToggleMaximize,
     ToggleFullscreen,
+    /// Move the target window to the next display (with wrap-around), preserving
+    /// the window's offset from the work-area origin and its size. Like the
+    /// state-style commands, the platform layer computes the target geometry
+    /// at activation time (it depends on the current display set, which is
+    /// platform-side state), so `compute_geometry` returns `None`. macOS
+    /// dispatches via `WindowControl.moveToDisplay`; GNOME does not currently
+    /// implement this — it is omitted from `app/gnome/src/commands.rs`'s
+    /// `ALL_KINDS` so the rows don't appear in the Linux launcher.
+    NextDisplay,
+    /// Symmetric counterpart of `NextDisplay`. See that variant's doc.
+    PreviousDisplay,
 }
 
 impl CommandKind {
@@ -80,14 +104,21 @@ impl CommandKind {
     pub fn as_id(&self) -> &'static str {
         match self {
             CommandKind::Center => "center",
+            CommandKind::CenterThird => "center_third",
             CommandKind::CenterHalf => "center_half",
             CommandKind::CenterTwoThirds => "center_two_thirds",
+            CommandKind::LeftThird => "left_third",
             CommandKind::LeftHalf => "left_half",
+            CommandKind::LeftTwoThirds => "left_two_thirds",
+            CommandKind::RightThird => "right_third",
             CommandKind::RightHalf => "right_half",
+            CommandKind::RightTwoThirds => "right_two_thirds",
             CommandKind::StandardSize => "standard_size",
             CommandKind::Minimize => "minimize",
             CommandKind::ToggleMaximize => "toggle_maximize",
             CommandKind::ToggleFullscreen => "toggle_fullscreen",
+            CommandKind::NextDisplay => "next_display",
+            CommandKind::PreviousDisplay => "previous_display",
         }
     }
 
@@ -97,14 +128,21 @@ impl CommandKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             CommandKind::Center => "Center",
+            CommandKind::CenterThird => "Center third",
             CommandKind::CenterHalf => "Center half",
             CommandKind::CenterTwoThirds => "Center two-thirds",
+            CommandKind::LeftThird => "Left third",
             CommandKind::LeftHalf => "Left half",
+            CommandKind::LeftTwoThirds => "Left two-thirds",
+            CommandKind::RightThird => "Right third",
             CommandKind::RightHalf => "Right half",
+            CommandKind::RightTwoThirds => "Right two-thirds",
             CommandKind::StandardSize => "Standard size",
             CommandKind::Minimize => "Minimize",
             CommandKind::ToggleMaximize => "Toggle maximize",
             CommandKind::ToggleFullscreen => "Toggle fullscreen",
+            CommandKind::NextDisplay => "Next display",
+            CommandKind::PreviousDisplay => "Previous display",
         }
     }
 
@@ -114,14 +152,26 @@ impl CommandKind {
     pub fn icon_name(&self) -> &'static str {
         match self {
             CommandKind::Center => "focus-windows-symbolic",
+            CommandKind::CenterThird => "view-dual-symbolic",
             CommandKind::CenterHalf => "view-dual-symbolic",
             CommandKind::CenterTwoThirds => "sidebar-show-symbolic",
+            CommandKind::LeftThird => "view-dual-symbolic",
             CommandKind::LeftHalf => "view-dual-symbolic",
+            CommandKind::LeftTwoThirds => "sidebar-show-symbolic",
+            CommandKind::RightThird => "view-dual-symbolic",
             CommandKind::RightHalf => "view-dual-symbolic",
+            CommandKind::RightTwoThirds => "sidebar-show-symbolic",
             CommandKind::StandardSize => "focus-windows-symbolic",
             CommandKind::Minimize => "window-minimize-symbolic",
             CommandKind::ToggleMaximize => "window-maximize-symbolic",
             CommandKind::ToggleFullscreen => "view-fullscreen-symbolic",
+            // GNOME doesn't surface these commands today (they're omitted
+            // from `app/gnome/src/commands.rs::ALL_KINDS`), but icon_name
+            // is exhaustive over CommandKind by the type system, so we
+            // still need a value. Reuse `go-next-symbolic` /
+            // `go-previous-symbolic` — Adwaita's directional arrows.
+            CommandKind::NextDisplay => "go-next-symbolic",
+            CommandKind::PreviousDisplay => "go-previous-symbolic",
         }
     }
 
@@ -132,14 +182,21 @@ impl CommandKind {
     pub fn from_id(id: &str) -> Option<CommandKind> {
         match id {
             "center" => Some(CommandKind::Center),
+            "center_third" => Some(CommandKind::CenterThird),
             "center_half" => Some(CommandKind::CenterHalf),
             "center_two_thirds" => Some(CommandKind::CenterTwoThirds),
+            "left_third" => Some(CommandKind::LeftThird),
             "left_half" => Some(CommandKind::LeftHalf),
+            "left_two_thirds" => Some(CommandKind::LeftTwoThirds),
+            "right_third" => Some(CommandKind::RightThird),
             "right_half" => Some(CommandKind::RightHalf),
+            "right_two_thirds" => Some(CommandKind::RightTwoThirds),
             "standard_size" => Some(CommandKind::StandardSize),
             "minimize" => Some(CommandKind::Minimize),
             "toggle_maximize" => Some(CommandKind::ToggleMaximize),
             "toggle_fullscreen" => Some(CommandKind::ToggleFullscreen),
+            "next_display" => Some(CommandKind::NextDisplay),
+            "previous_display" => Some(CommandKind::PreviousDisplay),
             _ => None,
         }
     }
@@ -351,6 +408,7 @@ mod tests {
             desktop_id: desktop_id.to_string(),
             icon: icon.map(str::to_string),
             recent_window_id: None,
+            is_running: false,
         }
     }
 
@@ -365,6 +423,7 @@ mod tests {
             desktop_id: desktop_id.to_string(),
             icon: icon.map(str::to_string),
             recent_window_id: Some(window_id),
+            is_running: true,
         }
     }
 
@@ -883,10 +942,15 @@ mod tests {
     /// extends it.
     const ALL_COMMAND_KINDS: &[CommandKind] = &[
         CommandKind::Center,
+        CommandKind::CenterThird,
         CommandKind::CenterHalf,
         CommandKind::CenterTwoThirds,
+        CommandKind::LeftThird,
         CommandKind::LeftHalf,
+        CommandKind::LeftTwoThirds,
+        CommandKind::RightThird,
         CommandKind::RightHalf,
+        CommandKind::RightTwoThirds,
         CommandKind::StandardSize,
         CommandKind::Minimize,
         CommandKind::ToggleMaximize,

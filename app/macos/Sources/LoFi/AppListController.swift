@@ -41,9 +41,39 @@
 
 import AppKit
 
-private let kRowHeight: CGFloat = 36
+// Row height is 44pt (vs. 36pt before the running-indicator slice). The
+// icon-plus-dot column is 32pt tall (24 + 2 + 6) and sits slightly below
+// the row's vertical center (`kIconColumnVerticalOffset`), so the row has
+// ~9pt of padding above the icon and ~3pt below the dot. The padding is
+// uniform across every row — command rows with no dot still see the
+// same margins, because the dot view is always part of the icon column
+// (only its layer's `backgroundColor` toggles). The selection pill
+// (`RoundedSelectionRowView`) stays inset 2pt vertically, so it grows
+// in lockstep with the row height.
+private let kRowHeight: CGFloat = 44
+// Nudge the icon+dot column slightly below the row's vertical center.
+// The text in the row (aligned to the icon's center) reads as noticeably
+// high when the block is exactly centered, because the dot occupies the
+// lower half of the column. Offsetting the whole block downward by a
+// couple of points trades a bit of bottom padding for text that visually
+// sits near the row's vertical center.
+private let kIconColumnVerticalOffset: CGFloat = 3
 private let kIconSize: CGFloat = 24
 private let kCategoryFontSize: CGFloat = 11
+// Running-indicator dot under the icon. Mirrors the GNOME launcher's
+// `.running-indicator` (`app/gnome/src/ui.rs`): a 6pt circular pip,
+// `secondaryLabelColor` so it adapts to light/dark mode and reads
+// quieter than the app name. The dot is a sibling of the icon in the
+// row view — not an arranged subview of the outer stack — so its
+// presence doesn't shift the icon's vertical position. The dot view
+// is always created and pinned at its full size; only the layer's
+// `backgroundColor` toggles between `secondaryLabelColor` and clear,
+// so running and not-running rows look pixel-identical above the
+// baseline.
+private let kRunningDotSize: CGFloat = 6
+// Vertical gap between the bottom of the icon (≈ text baseline, see
+// `.lastBaseline` alignment in `EntryRowView`) and the top of the dot.
+private let kRunningDotTopGap: CGFloat = 2
 // Leading/trailing inset for row content AND the search header, so the
 // magnifier/icons and the text share one column. Sized so content clears
 // the panel's rounded corners and sits inside the rounded selection pill
@@ -54,6 +84,9 @@ private let kCellSpacing: CGFloat = 8
 // `kIconSize`-wide column the list icons use (see `SearchHeaderView`) so
 // the glyph lines up with the app icons below.
 private let kSearchGlyphSize: CGFloat = 18
+// SF Symbol point size for command rows (whose icon is an SF Symbol, not
+// a bundle icon). Sized to read like the app icons in the same 24×24 box.
+private let kCommandGlyphSize: CGFloat = 16
 // Search input font size. Larger than the list rows' default body text
 // for a Spotlight-like prompt.
 private let kSearchFontSize: CGFloat = 22
@@ -85,7 +118,32 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// `tableView(_:viewFor:row:)` reads `appName` to render the
     /// Window-row label as `"Title — App"`. See `AppDelegate.windowAux`
     /// for why this lives Swift-side rather than crossing the FFI.
-    private let windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+    private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+    /// The window-action command target captured at the most recent
+    /// summon (frontmost non-LoFi window + its work area + current
+    /// frame). `nil` when there is no usable target, in which case
+    /// no command rows were pushed and the `"Command"` branch in
+    /// `launchRow` is unreachable — it bails safely anyway. Carries
+    /// the StandardSize fallback rect that `toggleMaximize` uses
+    /// when no previous frame was saved.
+    ///
+    /// **Mutable** because the daemon refreshes it on every
+    /// global-hotkey summon — the previously-frontmost window
+    /// changes between summons. `AppDelegate.summonPanel` calls
+    /// `setCommandTarget(_:)` after pushing the fresh entries.
+    private var commandTarget: WindowCommands.CommandTarget?
+    /// Persistent per-window pre-maximize frame store. Held for the
+    /// process lifetime so `toggleMaximize`'s save (on maximize) and
+    /// take (on un-maximize, possibly in a later run) hit the same backing
+    /// store. See `SavedFrameStore`.
+    private let savedFrameStore: SavedFrameStore
+    /// Called when the user finishes interacting with the panel — either
+    /// because they activated an entry (Enter / click) or dismissed it
+    /// (Esc). The daemon's `AppDelegate.dismissPanel` hides the panel
+    /// and steps LoFi back to background. In the pre-hotkey era this
+    /// was `NSApp.terminate(nil)`; now LoFi stays running between
+    /// summons.
+    private let onDismiss: () -> Void
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -107,11 +165,17 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     init(
         entries: EntryList,
         mruStore: MruStore?,
-        windowAux: [UInt64: (pid: pid_t, title: String, appName: String)]
+        windowAux: [UInt64: (pid: pid_t, title: String, appName: String)],
+        commandTarget: WindowCommands.CommandTarget?,
+        savedFrameStore: SavedFrameStore,
+        onDismiss: @escaping () -> Void
     ) {
         self.entries = entries
         self.mruStore = mruStore
         self.windowAux = windowAux
+        self.commandTarget = commandTarget
+        self.savedFrameStore = savedFrameStore
+        self.onDismiss = onDismiss
 
         // Non-zero initial size. NSScrollView does NOT auto-resize its
         // documentView, so without an explicit frame the table sits at
@@ -201,7 +265,85 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             }
             return "\(bareName) — \(aux.appName)"
         }()
-        return EntryRowView(name: name, category: category, iconPath: iconPath)
+        // Command and PowerCommand rows have no icon path (the Rust core
+        // returns null for `get_icon` on either variant), so we render an
+        // SF Symbol chosen per kind instead. Every other category keeps
+        // using the bundle-path icon. See `commandSymbolName(for:)` and
+        // `powerCommandSymbolName(for:)`.
+        let symbolName: String? = {
+            switch category {
+            case "Command":
+                return commandSymbolName(for: entries.commandId(at: row) ?? "")
+            case "PowerCommand":
+                return powerCommandSymbolName(for: entries.powerCommandId(at: row) ?? "")
+            default:
+                return nil
+            }
+        }()
+        // Running-indicator: only Application entries can be "running" on
+        // the Rust side (the FFI accessor returns false for every other
+        // variant), but we route through the same accessor regardless so
+        // the row factory doesn't need to know the variant rules.
+        let isRunning = entries.isRunning(at: row)
+        return EntryRowView(
+            name: name,
+            category: category,
+            iconPath: iconPath,
+            symbolName: symbolName,
+            isRunning: isRunning
+        )
+    }
+
+    /// SF Symbol name for a window-action command row, keyed by the
+    /// `CommandKind::as_id` string. Picked to communicate either the
+    /// geometry shape (halves / center / inset rectangles) or the action
+    /// (minimize / fullscreen). Unknown ids fall back to a generic window
+    /// glyph so a future Rust-side kind still renders something rather than
+    /// a blank icon column.
+    private func commandSymbolName(for id: String) -> String {
+        switch id {
+        case "center": return "rectangle.center.inset.filled"
+        case "center_third": return "rectangle.portrait.center.inset.filled"
+        case "center_half": return "rectangle.split.2x1"
+        case "center_two_thirds": return "rectangle.split.3x1"
+        // Thirds use the dedicated leading/trailing-third glyphs (leading ==
+        // left in LoFi's LTR UI). SF Symbols has no "two-thirds" rectangle,
+        // so the two-thirds variants reuse the broad half-fill glyph — the
+        // row's text label disambiguates them from the plain halves.
+        case "left_third": return "rectangle.leadingthird.inset.filled"
+        case "left_half": return "rectangle.lefthalf.filled"
+        case "left_two_thirds": return "rectangle.lefthalf.filled"
+        case "right_third": return "rectangle.trailingthird.inset.filled"
+        case "right_half": return "rectangle.righthalf.filled"
+        case "right_two_thirds": return "rectangle.righthalf.filled"
+        case "standard_size": return "rectangle.inset.filled"
+        case "minimize": return "minus.rectangle"
+        case "toggle_maximize": return "arrow.up.left.and.arrow.down.right"
+        case "toggle_fullscreen": return "arrow.up.left.and.arrow.down.right.rectangle"
+        // Move-to-display: directional arrows pointing to a line, the
+        // SF Symbol idiom for "send to the next position." Reads
+        // alongside the other rectangle-themed glyphs above without
+        // being mistaken for half/two-thirds layouts.
+        case "next_display": return "arrow.right.to.line"
+        case "previous_display": return "arrow.left.to.line"
+        default: return "macwindow"
+        }
+    }
+
+    /// SF Symbol name for a power-command row, keyed by the
+    /// `PowerCommandKind::as_id` string. Picked from system-themed glyphs
+    /// (lock / sleep / power / restart arrow) so the rows read as
+    /// distinct from window-action commands at a glance. Unknown ids fall
+    /// back to the generic power glyph.
+    private func powerCommandSymbolName(for id: String) -> String {
+        switch id {
+        case "lock_session": return "lock"
+        case "logout": return "rectangle.portrait.and.arrow.right"
+        case "suspend": return "moon"
+        case "restart": return "arrow.clockwise"
+        case "shutdown": return "power"
+        default: return "power"
+        }
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -248,11 +390,33 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             launchRow(tableView.selectedRow)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            NSApp.terminate(nil)
+            onDismiss()
             return true
         default:
             return false
         }
+    }
+
+    /// Update the captured command target. Called by
+    /// `AppDelegate.summonPanel` after re-gathering the
+    /// frontmost-non-LoFi window on each global-hotkey summon, so
+    /// commands like "Center" or "Next display" target the window
+    /// the user was just using rather than whichever was front when
+    /// the daemon started.
+    func setCommandTarget(_ target: WindowCommands.CommandTarget?) {
+        self.commandTarget = target
+    }
+
+    /// Re-prepare the list for a fresh summon: empty the search input,
+    /// reset the filter on the underlying Rust list, reload the table,
+    /// and select row 0 so Enter immediately fires the top match.
+    /// Called by `AppDelegate.summonPanel` after the entry list has
+    /// been rebuilt.
+    func reset() {
+        searchInput.stringValue = ""
+        _ = entries.setQuery("")
+        tableView.reloadData()
+        selectFirstRowIfAny()
     }
 
     // MARK: - Selection + activation
@@ -290,25 +454,41 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     ///
     /// Bumps the MRU store *before* dispatching: the bump is a
     /// microsecond local SQLite write; the activation paths
-    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC plus
-    /// our immediate `NSApp.terminate`. If we lose the race we prefer a
-    /// double-bump (correctly attributed to "the user tried to activate
-    /// this") over a miss-bump.
+    /// (`NSWorkspace.open`, `WindowActivation.raise`) involve IPC.
+    /// If we lose the race we prefer a double-bump (correctly
+    /// attributed to "the user tried to activate this") over a
+    /// miss-bump.
     ///
-    /// Branches on the stable English category label from the FFI: a
-    /// `"Window"` row routes through AX (raise the specific window via
-    /// pid + title looked up in `windowAux`); every other category
-    /// (currently only `"Application"`) opens the `.app` bundle via
-    /// LaunchServices.
+    /// Branches on the stable English category label from the FFI:
+    ///   - `"Window"` routes through AX (raise the specific window by its
+    ///     `CGWindowID`, with pid + title from `windowAux` for the AX lookup
+    ///     and its title fallback).
+    ///   - `"Command"` runs a window-action command against the captured
+    ///     `commandTarget`: geometry kinds (a non-nil
+    ///     `entries.commandGeometry(at:)`) call `WindowControl.move`;
+    ///     state-toggle kinds dispatch by command id.
+    ///   - every other category (currently only `"Application"`) opens the
+    ///     `.app` bundle via LaunchServices.
     private func launchRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
         if let store = mruStore {
             entries.bumpMru(store: store, at: row)
         }
-        if entries.category(at: row) == "Window" {
+        let category = entries.category(at: row)
+        if category == "Window" {
             let id = entries.windowId(at: row)
             if let aux = windowAux[id] {
-                _ = WindowActivation.raise(pid: aux.pid, title: aux.title)
+                _ = WindowActivation.raise(
+                    pid: aux.pid,
+                    windowId: CGWindowID(id),
+                    title: aux.title
+                )
+            }
+        } else if category == "Command" {
+            runCommand(row)
+        } else if category == "PowerCommand" {
+            if let id = entries.powerCommandId(at: row) {
+                _ = PowerCommands.activate(id: id)
             }
         } else {
             // `entries.icon(at:)` returns the bundle path on macOS —
@@ -318,22 +498,146 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             guard let path = entries.icon(at: row) else { return }
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
         }
-        NSApp.terminate(nil)
+        onDismiss()
+    }
+
+    /// Run the window-action command at `row` against `commandTarget`.
+    /// Bails (no-op) when the command id can't be read or there is no
+    /// target — both impossible in practice once a command row exists, but
+    /// the launcher quits regardless via `launchRow`.
+    ///
+    /// Geometry kinds (`entries.commandGeometry(at:)` returns a rect) call
+    /// `WindowControl.move` with the precomputed top-left-global rect from
+    /// Rust's `compute_geometry`. State-toggle kinds (nil geometry)
+    /// dispatch by id: minimize / toggle fullscreen / toggle maximize /
+    /// next display / previous display.
+    private func runCommand(_ row: Int) {
+        guard let commandId = entries.commandId(at: row),
+              let target = commandTarget
+        else {
+            return
+        }
+        if let geo = entries.commandGeometry(at: row) {
+            _ = WindowControl.move(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                x: geo.x,
+                y: geo.y,
+                width: geo.w,
+                height: geo.h
+            )
+            return
+        }
+        switch commandId {
+        case "minimize":
+            _ = WindowControl.minimize(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId
+            )
+        case "toggle_fullscreen":
+            _ = WindowControl.toggleFullscreen(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId
+            )
+        case "toggle_maximize":
+            _ = WindowControl.toggleMaximize(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                workArea: target.workArea,
+                fallbackRect: target.standardRect,
+                store: savedFrameStore
+            )
+        case "next_display":
+            _ = WindowControl.moveToDisplay(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                direction: +1
+            )
+        case "previous_display":
+            _ = WindowControl.moveToDisplay(
+                pid: target.pid,
+                title: target.title,
+                windowId: target.windowId,
+                direction: -1
+            )
+        default:
+            // An unrecognized state-toggle id (a Rust-side kind we don't
+            // know how to dispatch yet). Do nothing rather than guess.
+            break
+        }
     }
 }
 
-/// Single row view: `[icon] name <flexible spacer> [category]`. A plain
-/// `NSStackView` carries the layout; the spacer comes from the name
-/// field's low horizontal content-hugging priority. The category field
-/// hugs at high priority so it never gets stretched.
+/// Single row view: `[icon + dot below] name <flexible spacer> [category]`.
+///
+/// The layout splits into two horizontally-positioned pieces:
+///
+///   - `iconColumn` — vertical `NSStackView` containing the icon image
+///     and a fixed-size running-indicator dot below it. The column has
+///     a stable 32pt height (24pt icon + 2pt gap + 6pt dot) regardless
+///     of whether the dot is painted, so command and non-running
+///     application rows have icons in the same vertical position as
+///     running application rows. The column is centered vertically
+///     against the row's `centerYAnchor`, which is what gives the
+///     symmetric ~6pt of padding above the icon and below the dot in
+///     the 44pt row.
+///
+///   - `textStack` — horizontal `NSStackView` of `[nameField,
+///     categoryField]`. Its vertical center is pinned to the **icon's**
+///     center, not the row's, so the text reads as visually aligned
+///     with the icon (centered on the same y) rather than offset down
+///     toward the row's vertical center. Without this pin the text
+///     would float ~3pt below the icon center because the icon column
+///     sits in the upper half of the row to make room for the dot.
+///
+/// Mirrors the GNOME launcher's icon-with-running-indicator design in
+/// `app/gnome/src/ui.rs`. The cross-platform difference: GTK accepts
+/// the icon-text vertical offset that block-centering produces; the
+/// macOS version pins the text to the icon center to keep them
+/// visually aligned.
 private final class EntryRowView: NSView {
-    init(name: String, category: String, iconPath: String?) {
+    /// `iconPath` (the app/window bundle path) takes precedence: if set,
+    /// the icon is read via `NSWorkspace.shared.icon(forFile:)`.
+    /// `symbolName` is the SF Symbol fallback for command rows, which have
+    /// no bundle icon — rendered as a template glyph tinted like the dimmed
+    /// category labels. Both nil ⇒ an empty (but still 24×24) icon box so
+    /// the name column stays aligned with the other rows.
+    ///
+    /// `isRunning` paints the running-indicator dot below the icon. Only
+    /// Application entries can be running on the Rust side; the row
+    /// factory passes `false` for every other category, but the view
+    /// doesn't enforce that — it just paints the dot when asked.
+    init(
+        name: String,
+        category: String,
+        iconPath: String?,
+        symbolName: String?,
+        isRunning: Bool
+    ) {
         super.init(frame: .zero)
 
         let imageView = NSImageView()
         imageView.imageScaling = .scaleProportionallyDown
         if let path = iconPath {
             imageView.image = NSWorkspace.shared.icon(forFile: path)
+        } else if let symbolName = symbolName {
+            imageView.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: nil
+            )
+            imageView.symbolConfiguration = NSImage.SymbolConfiguration(
+                pointSize: kCommandGlyphSize,
+                weight: .regular
+            )
+            // Template SF Symbol; tint it like the dimmed category labels
+            // and the search magnifier so command rows read as actions
+            // rather than launchable apps.
+            imageView.contentTintColor = .secondaryLabelColor
         }
         imageView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -372,30 +676,128 @@ private final class EntryRowView: NSView {
             for: .horizontal
         )
 
-        let stack = NSStackView(views: [imageView, nameField, categoryField])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.distribution = .fill
-        stack.spacing = kCellSpacing
-        stack.edgeInsets = NSEdgeInsets(
-            top: 0,
-            left: kCellHorizontalPadding,
-            bottom: 0,
-            right: kCellHorizontalPadding
-        )
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        // Running-indicator dot — fixed 6x6, always part of the icon column
+        // so command and non-running rows have the same icon position.
+        let runningDot = RunningDotView()
+        runningDot.isOn = isRunning
+        runningDot.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            runningDot.widthAnchor.constraint(equalToConstant: kRunningDotSize),
+            runningDot.heightAnchor.constraint(equalToConstant: kRunningDotSize),
+        ])
+
+        // Vertical icon column: imageView on top, runningDot 2pt below.
+        // Width is locked to the icon size so the column is a fixed-width
+        // slot (the dot would otherwise have its 6pt width stretched).
+        let iconColumn = NSStackView(views: [imageView, runningDot])
+        iconColumn.orientation = .vertical
+        iconColumn.alignment = .centerX
+        iconColumn.spacing = kRunningDotTopGap
+        iconColumn.translatesAutoresizingMaskIntoConstraints = false
+
+        // Horizontal text stack: name + flexible space + category.
+        let textStack = NSStackView(views: [nameField, categoryField])
+        textStack.orientation = .horizontal
+        textStack.alignment = .centerY
+        textStack.distribution = .fill
+        textStack.spacing = kCellSpacing
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(iconColumn)
+        addSubview(textStack)
+
+        NSLayoutConstraint.activate([
+            // iconColumn: leading position, centered vertically in the row
+            // with a small downward nudge so the text (which follows the
+            // icon's centerY below) reads close to the row's visual center
+            // instead of floating into the upper half.
+            iconColumn.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: kCellHorizontalPadding
+            ),
+            iconColumn.centerYAnchor.constraint(
+                equalTo: centerYAnchor,
+                constant: kIconColumnVerticalOffset
+            ),
+            iconColumn.widthAnchor.constraint(equalToConstant: kIconSize),
+
+            // textStack: starts after the icon column, fills to trailing,
+            // and is vertically aligned to the imageView's center (not the
+            // row's). The icon column sits in the upper portion of the row
+            // (because the dot occupies the lower portion), so pinning the
+            // text to the row center would put it visibly below the icon.
+            textStack.leadingAnchor.constraint(
+                equalTo: iconColumn.trailingAnchor,
+                constant: kCellSpacing
+            ),
+            textStack.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -kCellHorizontalPadding
+            ),
+            textStack.centerYAnchor.constraint(equalTo: imageView.centerYAnchor),
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("EntryRowView is not loadable from a NIB / coder")
+    }
+}
+
+/// Small layer-backed circle drawn below the row icon to indicate the
+/// application is currently running. Always part of the layout at its
+/// full 6×6 size so row heights don't shift between running and
+/// not-running entries; only the layer's `backgroundColor` toggles
+/// between `secondaryLabelColor` (on) and clear (off).
+///
+/// `updateLayer()` is the right hook for the color toggle: it runs in
+/// a context where the view's `effectiveAppearance` has been resolved,
+/// so `NSColor.secondaryLabelColor.cgColor` returns the correct concrete
+/// value for the current light/dark mode. `viewDidChangeEffectiveAppearance`
+/// re-marks the layer dirty so a runtime appearance flip (e.g. user toggles
+/// Dark Mode while the panel is up) repaints the dot in the new tone.
+private final class RunningDotView: NSView {
+    var isOn: Bool = false {
+        didSet {
+            if isOn != oldValue {
+                needsDisplay = true
+            }
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = kRunningDotSize / 2
+        // `masksToBounds = true` is unnecessary for a solid-color circle
+        // (no sublayers to clip) but keeps the corner-radius round when
+        // the layer's bounds change at constraint-resolution time.
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("RunningDotView is not loadable from a NIB / coder")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // `secondaryLabelColor.cgColor` resolves against the current
+        // effective appearance. AppKit calls `updateLayer` after appearance
+        // changes (we re-trigger it from
+        // `viewDidChangeEffectiveAppearance`), so the on-state color
+        // tracks light/dark mode automatically.
+        if isOn {
+            layer?.backgroundColor = NSColor.secondaryLabelColor.cgColor
+        } else {
+            layer?.backgroundColor = nil
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 

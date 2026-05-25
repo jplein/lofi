@@ -51,10 +51,13 @@ fn on_activate(app: &adw::Application) {
     }
 
     // Annotate each Application with the recent-window id we just computed.
-    // This is what drives both the running-indicator dot in `ui.rs` and the
-    // focus-vs-launch branch in `launch.rs`.
+    // `is_running` is the boolean projection — kept in lockstep here so the
+    // running-indicator dot (which reads `is_running` for cross-platform
+    // parity with the macOS path) and the focus-vs-launch branch in
+    // `launch.rs` (which reads the window id) stay consistent.
     for app in &mut applications {
         app.recent_window_id = mru.get(&app.desktop_id).copied();
+        app.is_running = app.recent_window_id.is_some();
     }
 
     let mut entries: Vec<Entry> = Vec::with_capacity(
