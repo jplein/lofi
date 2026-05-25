@@ -20,6 +20,9 @@ narrow schema, so we publish our own surface here.
   [`@girs/gjs`](https://www.npmjs.com/package/@girs/gjs) for type definitions
   over the Mutter / Shell / Clutter / GIO APIs.
 - D-Bus as the IPC surface to the LoFi launcher (Gio.DBusExportedObject).
+- [ESLint](https://eslint.org/) (flat config + `typescript-eslint`) for linting
+  and [Prettier](https://prettier.io/) for formatting — see *Linting and
+  formatting* below.
 
 ## Version targeting
 
@@ -27,6 +30,42 @@ A single GNOME version is supported at a time, pinned via `shell-version` in
 `metadata.json`. The current pin is GNOME **49**. When the developer's NixOS
 system bumps GNOME, the extension is updated to match; there is no
 multi-version compatibility layer.
+
+## Linting and formatting
+
+Three checks guard the TypeScript, run from this directory (`npm run check` runs
+all three; see the `## TypeScript checks` section in the repo-root `CLAUDE.md`):
+
+| Script | Tool | What it does |
+|--------|------|--------------|
+| `npm run typecheck` | `tsc --noEmit` | Strict type check (no output). |
+| `npm run lint` / `npm run lint:fix` | ESLint | Catches real mistakes (unused vars, accidental `any`, shadowing). |
+| `npm run format:check` / `npm run format` | Prettier | Enforces / applies formatting over `**/*.ts`. |
+
+**ESLint** uses flat config (`eslint.config.js`): `@eslint/js` recommended plus
+`typescript-eslint` recommended, with `eslint-config-prettier` applied **last**
+so ESLint owns correctness and Prettier owns formatting (the two never fight
+over style). The base `no-undef` rule is switched **off for `.ts` files** on
+purpose: GJS code reaches for ambient globals like `global` that ESLint can't
+see, while TypeScript already proves every identifier is defined via the
+`@girs` ambient declarations (`ambient.d.ts`) — a second, weaker check would
+only produce false positives. This is typescript-eslint's own recommendation.
+Linting is intentionally close to the recommended presets rather than a bespoke
+ruleset: this is a small extension and the payoff is catching bugs, not
+enforcing house style.
+
+**Prettier** config lives in `.prettierrc.json`: `tabWidth: 4` and
+`singleQuote: true`, chosen to match the code that already existed so adopting
+the formatter was a near-no-op rather than a churn-everything rewrite (Prettier's
+other defaults — semicolons, `trailingComma: "all"`, 80-col width — already
+matched). `.prettierignore` keeps it off build output, dependencies, the lock
+file, and the packaged `.zip`.
+
+Neither tool is wired into `build.sh` or the Nix build (there is no CI); they
+are developer-run gates per `CLAUDE.md`. Note that the ESLint/Prettier packages
+are `devDependencies`, so adding them changed `package-lock.json` and therefore
+`flake.nix`'s `npmDepsHash` — see the *Build → Via Nix* note about regenerating
+that hash.
 
 ## D-Bus surface
 
@@ -163,9 +202,12 @@ workspace, not to navigate.
 ```
 extension/gnome/
   metadata.json           - GNOME extension manifest (uuid, shell-version)
-  package.json            - TS toolchain devDeps (private)
+  package.json            - TS toolchain devDeps + check/build scripts (private)
   package-lock.json       - committed; required by Nix's buildNpmPackage
   tsconfig.json           - strict mode, ES2022, bundler resolution
+  eslint.config.js        - ESLint flat config (typescript-eslint + prettier)
+  .prettierrc.json        - Prettier config (4-space, single-quote)
+  .prettierignore         - keeps Prettier off dist / deps / lock / zip
   ambient.d.ts            - pulls in @girs/* ambient declarations
   dbus-interface.xml      - D-Bus introspection XML
   build.sh                - tsc + zip pipeline; produces .shell-extension.zip
@@ -188,7 +230,7 @@ extension/gnome/
 nix develop
 cd extension/gnome
 npm install      # first time only, regenerates node_modules from the lock file
-npm run typecheck
+npm run check    # typecheck + eslint + prettier (see "Linting and formatting")
 npm run build
 ```
 

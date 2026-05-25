@@ -6,10 +6,7 @@ import { dbusXml } from './dbus-xml.js';
 import * as windows from './windows.js';
 import * as workspaces from './workspaces.js';
 import * as displays from './displays.js';
-import {
-    windowNotFound,
-    workspaceOutOfRange,
-} from './errors.js';
+import { windowNotFound, workspaceOutOfRange } from './errors.js';
 
 const BUS_NAME = 'dev.jplein.LoFi.Shell';
 const OBJECT_PATH = '/dev/jplein/LoFi/Shell';
@@ -145,7 +142,10 @@ export class WindowManagerService {
                 throw workspaceOutOfRange(targetIndex);
             }
             if (targetIndex === wm.n_workspaces) {
-                wm.append_new_workspace(false, global.display.get_current_time_roundtrip());
+                wm.append_new_workspace(
+                    false,
+                    global.display.get_current_time_roundtrip(),
+                );
             }
         } else if (targetIndex >= wm.n_workspaces) {
             throw workspaceOutOfRange(targetIndex);

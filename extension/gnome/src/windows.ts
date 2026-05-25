@@ -55,7 +55,7 @@ function resolveAppInfo(win: Meta.Window): AppInfo {
     }
     const name = maybeApp.get_name() ?? '';
     const gicon = maybeApp.get_icon();
-    const icon = gicon === null ? '' : gicon.to_string() ?? '';
+    const icon = gicon === null ? '' : (gicon.to_string() ?? '');
     const desktop_id = maybeApp.get_id() ?? '';
     return { name, icon, desktop_id };
 }
@@ -74,8 +74,7 @@ function workspaceIndex(win: Meta.Window): number {
 export function serialize(win: Meta.Window): WindowDict {
     const rect = win.get_frame_rect();
     const focused = win === global.display.focus_window;
-    const maximized =
-        win.maximized_horizontally && win.maximized_vertically;
+    const maximized = win.maximized_horizontally && win.maximized_vertically;
     const info = resolveAppInfo(win);
     const dict: WindowDict = {
         id: GLib.Variant.new_uint64(win.get_id()),
@@ -111,7 +110,7 @@ export function list(): WindowDict[] {
 export function listMRU(): WindowDict[] {
     const display = global.display;
     const list = display.get_tab_list(Meta.TabList.NORMAL_ALL, null);
-    return list.filter(w => !w.is_override_redirect()).map(serialize);
+    return list.filter((w) => !w.is_override_redirect()).map(serialize);
 }
 
 export function active(): WindowDict | null {

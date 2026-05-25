@@ -68,7 +68,7 @@
           # Hash of the offline npm dependencies tree. Regenerate by
           # setting this to pkgs.lib.fakeHash and running `nix build .#extension`
           # — Nix will print the correct value to paste back here.
-          npmDepsHash = "sha256-WIsAmlMt3KxQttps/B03Os1oSJ+V8DhusnOYBEcfn3I=";
+          npmDepsHash = "sha256-l+E6txyiwHqt3dl8TO9JGgn3TGT3i9qYaJYB3j0YDoA=";
 
           nativeBuildInputs = [ pkgs.zip ];
 
