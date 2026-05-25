@@ -21,7 +21,7 @@ The two frontends share nothing at the windowing-system level, so they're separa
 Same pattern as `app/gnome/`: the platform layer is the gatherer, the core is the canonical store.
 
 - `AppDiscovery.discover()` walks `/System/Applications`, `/Applications`, and `~/Applications`, dedups by bundle identifier (first-wins, in that root order so Apple's stock apps shadow any same-bundle-id third-party installs), and returns a sorted list. Mirrors GNOME's `app/gnome/src/apps.rs` first-dir-wins policy.
-- `AppDelegate` pushes each discovered `.app` into the Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After that point the list belongs to Rust; Swift only reads it back through `lofi_entries_len` / `lofi_entries_get_name`.
+- `AppDelegate` pushes each discovered `.app` into the Rust-owned `EntryList` via `lofi_entries_push_application(...)`. After that point the list belongs to Rust; Swift reads it back through `lofi_entries_len` and the `lofi_entries_get_*` accessors (name, bundle id, category, icon, window id, running flag, command id/geometry, power-command id). See `app/core/README.md` for the authoritative FFI surface.
 
 This shape leaves the matcher, MRU, and future activation logic on the Rust side without having to expose `Application`/`Entry` as Swift types. Adding an `EntryRef`-based MRU lookup in a future slice is a Rust change, not a Swift one.
 
