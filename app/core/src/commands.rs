@@ -80,7 +80,12 @@ pub fn compute_geometry(
         // integer division leaves `w` a pixel short of an exact fraction.
         CommandKind::RightThird => {
             let w = work_area.width / 3;
-            Some((work_area.x + work_area.width - w, work_area.y, w, work_area.height))
+            Some((
+                work_area.x + work_area.width - w,
+                work_area.y,
+                w,
+                work_area.height,
+            ))
         }
         CommandKind::RightHalf => {
             let w = work_area.width / 2;
@@ -88,7 +93,12 @@ pub fn compute_geometry(
         }
         CommandKind::RightTwoThirds => {
             let w = work_area.width * 2 / 3;
-            Some((work_area.x + work_area.width - w, work_area.y, w, work_area.height))
+            Some((
+                work_area.x + work_area.width - w,
+                work_area.y,
+                w,
+                work_area.height,
+            ))
         }
         CommandKind::StandardSize => {
             let w = work_area.width * 2 / 3;
@@ -411,9 +421,7 @@ mod tests {
 
     /// Collect `(kind, target_index, name, as_id)` tuples so tests can assert on
     /// the whole emitted set in one comparison.
-    fn rows(
-        cmds: &[crate::WorkspaceCommand],
-    ) -> Vec<(WorkspaceCommandKind, i32, String, String)> {
+    fn rows(cmds: &[crate::WorkspaceCommand]) -> Vec<(WorkspaceCommandKind, i32, String, String)> {
         cmds.iter()
             .map(|c| (c.kind, c.target_index, c.name.clone(), c.as_id()))
             .collect()
@@ -428,12 +436,42 @@ mod tests {
         assert_eq!(
             rows(&cmds),
             vec![
-                (WorkspaceCommandKind::MoveToWorkspace, 0, "Move to workspace 1".into(), "move_to_workspace_0".into()),
-                (WorkspaceCommandKind::MoveToWorkspace, 1, "Move to workspace 2".into(), "move_to_workspace_1".into()),
-                (WorkspaceCommandKind::MoveToWorkspace, 2, "Move to workspace 3".into(), "move_to_workspace_2".into()),
-                (WorkspaceCommandKind::MoveToWorkspace, 3, "Move to workspace 4".into(), "move_to_workspace_3".into()),
-                (WorkspaceCommandKind::MoveToPreviousWorkspace, 0, "Move to previous workspace".into(), "move_to_previous_workspace".into()),
-                (WorkspaceCommandKind::MoveToNextWorkspace, 2, "Move to next workspace".into(), "move_to_next_workspace".into()),
+                (
+                    WorkspaceCommandKind::MoveToWorkspace,
+                    0,
+                    "Move to workspace 1".into(),
+                    "move_to_workspace_0".into()
+                ),
+                (
+                    WorkspaceCommandKind::MoveToWorkspace,
+                    1,
+                    "Move to workspace 2".into(),
+                    "move_to_workspace_1".into()
+                ),
+                (
+                    WorkspaceCommandKind::MoveToWorkspace,
+                    2,
+                    "Move to workspace 3".into(),
+                    "move_to_workspace_2".into()
+                ),
+                (
+                    WorkspaceCommandKind::MoveToWorkspace,
+                    3,
+                    "Move to workspace 4".into(),
+                    "move_to_workspace_3".into()
+                ),
+                (
+                    WorkspaceCommandKind::MoveToPreviousWorkspace,
+                    0,
+                    "Move to previous workspace".into(),
+                    "move_to_previous_workspace".into()
+                ),
+                (
+                    WorkspaceCommandKind::MoveToNextWorkspace,
+                    2,
+                    "Move to next workspace".into(),
+                    "move_to_next_workspace".into()
+                ),
             ],
             "expected 4 absolute moves (including the current workspace) plus prev→0 and next→2"
         );
@@ -456,7 +494,10 @@ mod tests {
             .iter()
             .find(|c| c.kind == WorkspaceCommandKind::MoveToNextWorkspace)
             .expect("a 'next' command should be present on the first of three workspaces");
-        assert_eq!(next.target_index, 1, "'next' from workspace 0 should target index 1");
+        assert_eq!(
+            next.target_index, 1,
+            "'next' from workspace 0 should target index 1"
+        );
     }
 
     #[test]
@@ -472,7 +513,10 @@ mod tests {
             .iter()
             .find(|c| c.kind == WorkspaceCommandKind::MoveToPreviousWorkspace)
             .expect("a 'previous' command should be present on the last of three workspaces");
-        assert_eq!(prev.target_index, 1, "'previous' from workspace 2 should target index 1");
+        assert_eq!(
+            prev.target_index, 1,
+            "'previous' from workspace 2 should target index 1"
+        );
     }
 
     #[test]

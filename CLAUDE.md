@@ -6,3 +6,10 @@ The READMEs are the source of truth in this repo.
 - Maintain thorough READMEs about the repo
     - Each directory maintains READMEs about its contents
 - It is more important to document why something was implemented in a certain way than to document how it works
+
+## Rust checks
+
+- Before considering a task done:
+    - Linter checks with clippy must pass
+    - Linter checks with rustfmt must pass
+    - The Rust tests must pass

@@ -56,8 +56,8 @@ use crate::compute_geometry;
 use crate::matcher;
 use crate::mru::MruStore;
 use crate::{
-    Application, Command, CommandKind, Entry, EntryKind, EntryRef, PowerCommand,
-    PowerCommandKind, Window, WorkArea,
+    Application, Command, CommandKind, Entry, EntryKind, EntryRef, PowerCommand, PowerCommandKind,
+    Window, WorkArea,
 };
 
 /// Stable English category label for `EntryKind::Application`. The UI displays
@@ -211,8 +211,9 @@ impl EntryList {
         }
         // Stable sort descending by score; equal-score ties keep push
         // order (which mirrors GNOME's `.desktop` enumeration or
-        // macOS's `AppDiscovery` order).
-        scored_part.sort_by(|a, b| b.0.cmp(&a.0));
+        // macOS's `AppDiscovery` order). `sort_by_key` is stable, so the
+        // tie behaviour is unchanged from the previous `sort_by`.
+        scored_part.sort_by_key(|pair| std::cmp::Reverse(pair.0));
 
         let mut indices = Vec::with_capacity(mru_part.len() + scored_part.len());
         indices.extend(mru_part);
@@ -494,9 +495,7 @@ pub unsafe extern "C" fn lofi_entries_get_name(
         };
         cache[real_idx] = Some(cstring);
     }
-    cache[real_idx]
-        .as_ref()
-        .map_or(ptr::null(), |s| s.as_ptr())
+    cache[real_idx].as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
 /// Return a borrowed pointer to the entry-at-`idx`'s bundle id. Only
@@ -550,9 +549,7 @@ pub unsafe extern "C" fn lofi_entries_get_bundle_id(
         };
         cache[real_idx] = Some(cstring);
     }
-    cache[real_idx]
-        .as_ref()
-        .map_or(ptr::null(), |s| s.as_ptr())
+    cache[real_idx].as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
 /// Return a borrowed pointer to the entry-at-`idx`'s stable English category
@@ -600,9 +597,7 @@ pub unsafe extern "C" fn lofi_entries_get_category(
         };
         cache[real_idx] = Some(cstring);
     }
-    cache[real_idx]
-        .as_ref()
-        .map_or(ptr::null(), |s| s.as_ptr())
+    cache[real_idx].as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
 /// Return a borrowed pointer to the entry-at-`idx`'s icon identifier. For
@@ -839,10 +834,7 @@ pub unsafe extern "C" fn lofi_entries_push_window(
 ///
 /// `list` must be null or a valid `EntryList` pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lofi_entries_get_window_id(
-    list: *const EntryList,
-    idx: usize,
-) -> u64 {
+pub unsafe extern "C" fn lofi_entries_get_window_id(list: *const EntryList, idx: usize) -> u64 {
     if list.is_null() {
         return 0;
     }
@@ -884,10 +876,7 @@ pub unsafe extern "C" fn lofi_entries_get_window_id(
 ///
 /// `list` must be null or a valid `EntryList` pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn lofi_entries_get_is_running(
-    list: *const EntryList,
-    idx: usize,
-) -> bool {
+pub unsafe extern "C" fn lofi_entries_get_is_running(list: *const EntryList, idx: usize) -> bool {
     if list.is_null() {
         return false;
     }

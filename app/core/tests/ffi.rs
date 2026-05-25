@@ -65,11 +65,7 @@ unsafe extern "C" {
     // inside is opaque by design, same shape as `EntryList`.
     fn lofi_mru_open(path: *const c_char) -> *mut MruStore;
     fn lofi_mru_free(store: *mut MruStore);
-    fn lofi_mru_bump_entry(
-        store: *const MruStore,
-        list: *const EntryList,
-        idx: usize,
-    ) -> bool;
+    fn lofi_mru_bump_entry(store: *const MruStore, list: *const EntryList, idx: usize) -> bool;
     fn lofi_entries_apply_mru(list: *mut EntryList, store: *const MruStore) -> bool;
 
     // Window FFI surface (added in the macOS windows slice). Mirrors the C
@@ -350,7 +346,10 @@ fn mru_persists_across_open() {
     // SAFETY: standard FFI lifecycle for store B and its list.
     unsafe {
         let store_b = lofi_mru_open(cstr.as_ptr());
-        assert!(!store_b.is_null(), "second open at the same path should succeed");
+        assert!(
+            !store_b.is_null(),
+            "second open at the same path should succeed"
+        );
 
         let list_b = lofi_entries_new();
         assert!(push_app(list_b, "Alpha", "com.example.alpha", None));
@@ -402,11 +401,17 @@ fn apply_mru_invalidates_caches() {
         // Bump Chrome (idx 2) and apply. This is the mutation; `p` is now
         // not guaranteed valid and we do not touch it again.
         assert!(lofi_mru_bump_entry(store, list, 2), "bump should succeed");
-        assert!(lofi_entries_apply_mru(list, store), "apply_mru should succeed");
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru should succeed"
+        );
 
         // Fresh borrow: must reflect the new top entry, not the cached one.
         let p2 = lofi_entries_get_name(list, 0);
-        assert!(!p2.is_null(), "post-mutation get_name(0) should be non-null");
+        assert!(
+            !p2.is_null(),
+            "post-mutation get_name(0) should be non-null"
+        );
         let after: Vec<u8> = CStr::from_ptr(p2).to_bytes().to_vec();
         assert_eq!(
             after, b"Chrome",
@@ -432,12 +437,7 @@ fn apply_mru_with_query_active_keeps_filter() {
     // SAFETY: standard FFI lifecycle.
     unsafe {
         let list = lofi_entries_new();
-        assert!(push_app(
-            list,
-            "Firefox",
-            "org.mozilla.firefox",
-            None,
-        ));
+        assert!(push_app(list, "Firefox", "org.mozilla.firefox", None,));
         assert!(push_app(
             list,
             "Firefox Developer Edition",
@@ -614,13 +614,7 @@ fn push_app(list: *mut EntryList, name: &str, bundle_id: &str, icon: Option<&str
     // running flag set call the FFI directly so the boolean is visible at
     // the assertion site.
     unsafe {
-        lofi_entries_push_application(
-            list,
-            name_c.as_ptr(),
-            bundle_c.as_ptr(),
-            icon_ptr,
-            false,
-        )
+        lofi_entries_push_application(list, name_c.as_ptr(), bundle_c.as_ptr(), icon_ptr, false)
     }
 }
 
@@ -656,7 +650,12 @@ fn round_trip_push_len_and_get_name() {
             "first push should return true"
         );
         assert!(
-            push_app(list, "Terminal", "com.apple.Terminal", Some("terminal-icon")),
+            push_app(
+                list,
+                "Terminal",
+                "com.apple.Terminal",
+                Some("terminal-icon")
+            ),
             "second push should return true"
         );
 
@@ -716,13 +715,8 @@ fn push_with_null_name_returns_false() {
 
         let bundle = CString::new("com.example.NoName").expect("bundle id valid");
         let icon = CString::new("icon").expect("icon valid");
-        let ok = lofi_entries_push_application(
-            list,
-            ptr::null(),
-            bundle.as_ptr(),
-            icon.as_ptr(),
-            false,
-        );
+        let ok =
+            lofi_entries_push_application(list, ptr::null(), bundle.as_ptr(), icon.as_ptr(), false);
         assert!(!ok, "push with null name must return false");
         assert_eq!(
             lofi_entries_len(list),
@@ -742,13 +736,8 @@ fn push_with_null_bundle_id_returns_false() {
 
         let name = CString::new("Anonymous").expect("name valid");
         let icon = CString::new("icon").expect("icon valid");
-        let ok = lofi_entries_push_application(
-            list,
-            name.as_ptr(),
-            ptr::null(),
-            icon.as_ptr(),
-            false,
-        );
+        let ok =
+            lofi_entries_push_application(list, name.as_ptr(), ptr::null(), icon.as_ptr(), false);
         assert!(!ok, "push with null bundle_id must return false");
         assert_eq!(
             lofi_entries_len(list),
@@ -882,13 +871,8 @@ fn push_application_with_is_running_true_round_trips() {
         let name = CString::new("Safari").expect("name valid");
         let bundle = CString::new("com.apple.Safari").expect("bundle valid");
 
-        let ok = lofi_entries_push_application(
-            list,
-            name.as_ptr(),
-            bundle.as_ptr(),
-            ptr::null(),
-            true,
-        );
+        let ok =
+            lofi_entries_push_application(list, name.as_ptr(), bundle.as_ptr(), ptr::null(), true);
         assert!(ok, "push with is_running=true should return true");
 
         assert!(
@@ -1177,7 +1161,10 @@ fn set_query_empty_restores_all() {
         let list = lofi_entries_new();
         push_three_apps(list);
 
-        assert!(set_query(list, "fire"), "narrowing set_query should succeed");
+        assert!(
+            set_query(list, "fire"),
+            "narrowing set_query should succeed"
+        );
         assert_eq!(
             lofi_entries_len(list),
             1,
@@ -1278,7 +1265,10 @@ fn set_query_invalidates_get_name_borrow() {
         assert!(push_app(list, "Calculator", "com.apple.calculator", None));
 
         let p = lofi_entries_get_name(list, 0);
-        assert!(!p.is_null(), "name at idx 0 should be non-null pre-mutation");
+        assert!(
+            !p.is_null(),
+            "name at idx 0 should be non-null pre-mutation"
+        );
 
         // Copy the bytes out BEFORE the mutating call.
         let owned: Vec<u8> = CStr::from_ptr(p).to_bytes().to_vec();
@@ -1398,7 +1388,10 @@ fn set_query_null_clears_filter() {
         let list = lofi_entries_new();
         push_three_apps(list);
 
-        assert!(set_query(list, "fire"), "narrowing set_query should succeed");
+        assert!(
+            set_query(list, "fire"),
+            "narrowing set_query should succeed"
+        );
         assert_eq!(
             lofi_entries_len(list),
             1,
@@ -1469,8 +1462,8 @@ fn push_window_named(
     let title_c = CString::new(title).expect("title must be valid for CString");
     let app_name_c = app_name.map(|s| CString::new(s).expect("app_name must be valid for CString"));
     let icon_c = icon.map(|s| CString::new(s).expect("icon must be valid for CString"));
-    let app_desktop_id_c = app_desktop_id
-        .map(|s| CString::new(s).expect("app_desktop_id must be valid for CString"));
+    let app_desktop_id_c =
+        app_desktop_id.map(|s| CString::new(s).expect("app_desktop_id must be valid for CString"));
     let app_name_ptr: *const c_char = match &app_name_c {
         Some(s) => s.as_ptr(),
         None => ptr::null(),
@@ -1768,14 +1761,7 @@ fn mixed_list_search_then_window_id() {
         assert!(push_app(list, "Calculator", "com.apple.Calculator", None));
         assert!(push_app(list, "Calendar", "com.apple.iCal", None));
         assert!(
-            push_window_named(
-                list,
-                WINDOW_ID,
-                "Cron Job Notes",
-                Some("Notes"),
-                None,
-                None,
-            ),
+            push_window_named(list, WINDOW_ID, "Cron Job Notes", Some("Notes"), None, None,),
             "push_window should succeed for the mixed-list search test"
         );
 
@@ -1884,14 +1870,9 @@ fn command_geometry_at(list: *const EntryList, idx: usize) -> Option<(i32, i32, 
     let mut h = GEOMETRY_SENTINEL;
     // SAFETY: the four out-pointers reference live stack locals that outlive
     // the call; the FFI either writes all four (true) or none (false).
-    let ok = unsafe {
-        lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h)
-    };
-    if ok {
-        Some((x, y, w, h))
-    } else {
-        None
-    }
+    let ok =
+        unsafe { lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h) };
+    if ok { Some((x, y, w, h)) } else { None }
 }
 
 #[test]
@@ -2077,9 +2058,7 @@ fn command_geometry_leaves_out_params_untouched_on_false() {
             let mut h = GEOMETRY_SENTINEL;
             // SAFETY: out-pointers reference live stack locals; this is the
             // false path under test, so no write should occur.
-            let ok = lofi_entries_get_command_geometry(
-                list, idx, &mut x, &mut y, &mut w, &mut h,
-            );
+            let ok = lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h);
             assert!(!ok, "get_command_geometry should return false for {case}");
             assert_eq!(x, GEOMETRY_SENTINEL, "out_x must be untouched for {case}");
             assert_eq!(y, GEOMETRY_SENTINEL, "out_y must be untouched for {case}");
@@ -2188,7 +2167,10 @@ fn push_command_null_kind_id_returns_false() {
             FRAME.2,
             FRAME.3,
         );
-        assert!(!ok_null_list, "push_command with a null list must return false");
+        assert!(
+            !ok_null_list,
+            "push_command with a null list must return false"
+        );
 
         lofi_entries_free(list);
     }

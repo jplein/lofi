@@ -94,8 +94,8 @@ pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
         .iter()
         .filter_map(|entry| score(entry, &tokens, &matcher).map(|s| (s, entry)))
         .collect();
-    // Descending by score; ties retain input order (sort_by is stable).
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    // Descending by score; ties retain input order (sort_by_key is stable).
+    scored.sort_by_key(|pair| std::cmp::Reverse(pair.0));
     scored.into_iter().map(|(_, e)| e).collect()
 }
 

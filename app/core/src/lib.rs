@@ -1527,7 +1527,10 @@ mod tests {
 
         // Missing id returns None.
         assert_eq!(
-            resolve(&entries, &EntryRef::WorkspaceCommand("move_to_workspace_9".into())),
+            resolve(
+                &entries,
+                &EntryRef::WorkspaceCommand("move_to_workspace_9".into())
+            ),
             None,
             "resolve should return None for a WorkspaceCommand id not in the slice"
         );
@@ -1544,8 +1547,8 @@ mod tests {
             "EntryRef::WorkspaceCommand should serialize with tag=type/content=id and snake_case variant; got {serialized}"
         );
 
-        let round_tripped: EntryRef =
-            serde_json::from_str(&serialized).expect("EntryRef::WorkspaceCommand should deserialize");
+        let round_tripped: EntryRef = serde_json::from_str(&serialized)
+            .expect("EntryRef::WorkspaceCommand should deserialize");
         assert_eq!(
             round_tripped, r,
             "EntryRef::WorkspaceCommand should round-trip via serde_json; got {round_tripped:?}"
