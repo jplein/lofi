@@ -142,13 +142,6 @@ final class PanelController {
         panel.orderOut(nil)
     }
 
-    /// Whether the panel is currently on screen. Used by
-    /// `AppDelegate.toggleOrSummonPanel` to decide between summon and
-    /// dismiss when the hotkey fires.
-    var isVisible: Bool {
-        panel.isVisible
-    }
-
     /// Builds the rounded, translucent background the search field and
     /// list sit on. On macOS 26 (Tahoe) this is a true Liquid Glass
     /// surface via `NSGlassEffectView`; the deployment target is 15.0, so

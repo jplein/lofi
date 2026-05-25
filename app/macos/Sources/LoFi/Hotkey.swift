@@ -83,7 +83,7 @@ final class GlobalHotkey {
             eventKind: UInt32(kEventHotKeyPressed)
         )
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(
+        let status = InstallEventHandler(
             GetApplicationEventTarget(),
             { _, _, userData in
                 guard let userData else { return noErr }
@@ -97,6 +97,12 @@ final class GlobalHotkey {
             selfPtr,
             &handlerRef
         )
+        // A failed install means the hotkey silently never fires (the launcher
+        // then only responds to the `:activate` reopen path) — log so it's
+        // diagnosable rather than a mystery.
+        if status != noErr {
+            NSLog("LoFi: InstallEventHandler failed (OSStatus \(status))")
+        }
     }
 
     private func registerHotKey(keyCode: UInt32, modifiers: UInt32) {
@@ -104,7 +110,7 @@ final class GlobalHotkey {
         // hotkey identifier; if we ever register multiple hotkeys
         // here, give each its own id.
         let id = EventHotKeyID(signature: 0x4C46_4849, id: 1)
-        RegisterEventHotKey(
+        let status = RegisterEventHotKey(
             keyCode,
             modifiers,
             id,
@@ -112,5 +118,10 @@ final class GlobalHotkey {
             0,
             &hotKeyRef
         )
+        // Registration fails if the combo is already claimed; log rather than
+        // leave the user with a dead hotkey and no signal why.
+        if status != noErr {
+            NSLog("LoFi: RegisterEventHotKey failed (OSStatus \(status))")
+        }
     }
 }

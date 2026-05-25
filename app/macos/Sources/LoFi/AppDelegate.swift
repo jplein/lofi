@@ -82,7 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // macOS-side companion data for Window entries (the window
     // switcher feature is disabled — see README gotchas 13-14 — so
     // this stays empty; the field exists because `AppListController`
-    // expects it).
+    // expects it). NOTE: unlike `commandTarget`, this is handed to the
+    // controller once at construction and never refreshed per-summon
+    // (there is no `setWindowAux`). Harmless while empty; if Window rows
+    // are ever re-enabled, refresh it each summon like `commandTarget`.
     private var windowAux: [UInt64: (pid: pid_t, title: String, appName: String)] = [:]
     // Set once, on the first summon that finds a permission missing,
     // right before we fire the TCC prompts and bail without showing

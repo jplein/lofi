@@ -150,10 +150,8 @@ enum WindowDiscovery {
             // skip-on-missing-field pattern above: a window surfaced to the
             // launcher must always carry a usable `bounds` so a command
             // targeting it has a real `current_frame`.
-            guard let boundsValue = dict[kCGWindowBounds as String],
-                let bounds = CGRect(
-                    dictionaryRepresentation: boundsValue as! CFDictionary
-                )
+            guard let boundsDict = dict[kCGWindowBounds as String] as? NSDictionary,
+                let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
             else {
                 continue
             }

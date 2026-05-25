@@ -537,8 +537,11 @@ enum WindowControl {
         }
         var origin = CGPoint.zero
         var size = CGSize.zero
-        // `AXValueGetValue` unwraps the opaque AXValue into the requested
-        // CG type; it returns false if the AXValue isn't of that type.
+        // The `as!` is safe here: a downcast from CFTypeRef to a CoreFoundation
+        // type is not a real runtime check and never traps (an `as?` would warn
+        // "will always succeed"). The actual validation is `AXValueGetValue`,
+        // which returns false if the value isn't an AXValue of the requested CG
+        // type — so a malformed attribute degrades to `nil`, never a crash.
         guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
             AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
         else {
