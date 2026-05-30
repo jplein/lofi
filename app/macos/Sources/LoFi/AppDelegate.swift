@@ -220,12 +220,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         entries.clear()
         commandTarget = nil
 
-        // Ordering note: window discovery happens BEFORE the
-        // application push loop so we can stamp `isRunning` on each
-        // app from the set of bundle ids that appeared as window
-        // owners. Without permissions, `runningBundleIds` is empty
-        // and every app row gets `isRunning: false` — the dot just
-        // doesn't appear, which is the right degraded behavior.
+        // Window discovery is still needed by the command-target push
+        // and the saved-frame store's prune step. It's NOT the source
+        // of the running-app set anymore (see below).
         let discoveredWindows: [DiscoveredWindow]
         if canSeeWindows {
             discoveredWindows = WindowDiscovery.discover()
@@ -236,18 +233,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             discoveredWindows = []
         }
 
-        // Bundle ids that own at least one window in the current
-        // gather — the macOS analogue of GNOME's
-        // `recent_window_id.is_some()`. A `Set` (rather than the
-        // first-wins `[bundleId: CGWindowID]` map the GNOME side
-        // builds) is enough because we only need a presence
-        // signal: macOS Application activation routes through
-        // `NSWorkspace.openApplication(...)`, which finds an existing
-        // window itself, so we never use a specific window id Swift-side.
+        // Bundle ids of currently-running processes. `runningApplications`
+        // returns every process regardless of which macOS Space its
+        // windows live on, which is what fixes the cross-Space miss:
+        // deriving the set from `WindowDiscovery.discover()` (which
+        // uses `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)`)
+        // only saw windows on the *active* Space, so e.g. Firefox
+        // Developer Edition on Space 2 was reported as not running
+        // while the user was on Space 1.
+        //
+        // Trade: this marks menu-bar agents (Karabiner, Rectangle, …) as
+        // running whenever their process is alive, even without a window.
+        // That's a small semantic shift from "has a window" to "process
+        // is up" — acceptable because the dot reads as "this app is
+        // alive" to users, and the alternative (a second CGWindowList
+        // pass without `.optionOnScreenOnly`) is more code for parity
+        // with a model the user doesn't actually distinguish from "is
+        // running."
+        //
+        // No TCC grant required, so the indicator works in degraded
+        // (apps-only) mode too.
         var runningBundleIds: Set<String> = []
-        runningBundleIds.reserveCapacity(discoveredWindows.count)
-        for w in discoveredWindows {
-            if let bid = w.ownerBundleId {
+        for running in NSWorkspace.shared.runningApplications {
+            if let bid = running.bundleIdentifier {
                 runningBundleIds.insert(bid)
             }
         }
