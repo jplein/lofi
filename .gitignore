@@ -8,3 +8,5 @@
 # `MODULE.bazel.lock` is committed.
 /bazel-*
 .DS_Store
+
+.worktrees
