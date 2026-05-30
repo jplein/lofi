@@ -27,7 +27,7 @@ narrow schema, so we publish our own surface here.
 ## Version targeting
 
 A single GNOME version is supported at a time, pinned via `shell-version` in
-`metadata.json`. The current pin is GNOME **49**. When the developer's NixOS
+`metadata.json`. The current pin is GNOME **50**. When the developer's NixOS
 system bumps GNOME, the extension is updated to match; there is no
 multi-version compatibility layer.
 
