@@ -2,6 +2,6 @@
   "uuid": "lofi-shell@jplein.dev",
   "name": "LoFi Shell",
   "description": "D-Bus surface for the LoFi launcher: window, workspace, and display management.",
-  "shell-version": ["49"],
+  "shell-version": ["50"],
   "url": "https://github.com/jplein/lofi"
 }
