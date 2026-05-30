@@ -112,6 +112,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Inline unit tests for `#[cfg(test)]` modules in `src/**/*.rs`. `rust_test`
+# with `crate = ":lofi_core_rlib"` rebuilds the library with `--test --cfg
+# test`, which is the only way to make Bazel see every `#[test]` declared
+# *inside* the library (in `matcher.rs`, `lib.rs`, `commands.rs`, `mru.rs`).
+# Without this target the inline cases run under `cargo test` but are
+# invisible to Bazel — and so escape the clippy gate below, which only lints
+# what it builds. The crate features and `srcs` are inherited via `crate=`;
+# `tempfile` is the only dev-dependency the inline tests reach for
+# (`mru.rs::tests` uses `tempfile::tempdir()`) so it's the only extra dep.
+rust_test(
+    name = "lofi_core_lib_test",
+    crate = ":lofi_core_rlib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
 # FFI integration tests. The cases in `tests/ffi.rs` reach the
 # `#[unsafe(no_mangle)]` symbols only because `extern crate lofi_core
 # as _;` forces the rlib onto the linker's input set; see the comment
@@ -164,9 +181,13 @@ rust_test(
 # The `gnome` crate is Linux-only (gtk4/libadwaita) and still lints/formats via
 # Cargo on the Crane path in flake.nix — it has no Bazel target to attach to.
 
-# Clippy over the library and both test crates. `rust_clippy` runs clippy with
-# warnings promoted to errors by default (rules_rust passes no cap-lints flag),
-# so a new lint fails the build. `testonly` because two of its deps are tests.
+# Clippy over the library, the inline-unit-test rebuild, and both integration
+# test crates. `rust_clippy` runs clippy with warnings promoted to errors by
+# default (rules_rust passes no cap-lints flag), so a new lint fails the build.
+# `testonly` because three of its deps are tests. `:lofi_core_lib_test` is
+# listed in addition to `:lofi_core_rlib` because clippy on the rlib alone
+# runs without `--cfg test` and so does not see `#[cfg(test)]` modules — the
+# inline test code is only linted via the `--test` rebuild that target wraps.
 # `:lofi_core` (the staticlib) is omitted deliberately: it compiles the same
 # `src/**/*.rs` with the same features as `:lofi_core_rlib`, so linting it too
 # would only double the work for identical diagnostics.
@@ -175,19 +196,23 @@ rust_clippy(
     testonly = True,
     deps = [
         ":ffi_test",
+        ":lofi_core_lib_test",
         ":lofi_core_rlib",
         ":mru_test",
     ],
 )
 
 # Non-mutating rustfmt check (fails if any file is unformatted). A test target
-# so `bazel test //app/...` enforces formatting. Listing the library plus both
-# test crates covers every `.rs` file under `core/` — `src/**` via the library,
+# so `bazel test //app/...` enforces formatting. Listing the library plus
+# every test target covers every `.rs` file under `core/` — `src/**` via the
+# library (the `:lofi_core_lib_test` rebuild reuses the same `srcs` and
+# contributes no new files, but is listed for symmetry with the clippy gate),
 # `tests/ffi.rs` and `tests/mru.rs` via their test targets.
 rustfmt_test(
     name = "rustfmt",
     targets = [
         ":ffi_test",
+        ":lofi_core_lib_test",
         ":lofi_core_rlib",
         ":mru_test",
     ],
