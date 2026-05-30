@@ -2,29 +2,30 @@ use crate::Entry;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-/// Strip a leading reverse-DNS top-level segment (e.g. `com.`, `org.`) from a
-/// bundle/desktop ID before it enters the matcher haystack.
+/// Strip the reverse-DNS prefix from a bundle/desktop ID, returning only the
+/// final app-specific segment.
 ///
-/// Every macOS bundle identifier starts with the same handful of TLD-style
-/// segments — `com.apple.*`, `com.google.*`, `org.mozilla.*` — so leaving
-/// them in the haystack turns short queries into noise: a one-character `m`
-/// fuzzy-matches every `com.apple.*` ID via the `m` in `com.`. Stripping the
-/// TLD segment removes that shared-letter floor while keeping the rest of
-/// the identifier searchable. `"google"` still matches
-/// `"com.google.Chrome.desktop"` (via the remaining `google.Chrome.desktop`),
-/// and `"acrobat"` still matches `"com.adobe.Acrobat"`.
+/// macOS bundle identifiers and GNOME desktop IDs both encode the vendor as
+/// a reverse-DNS prefix (`com.apple.Safari`,
+/// `org.mozilla.FirefoxDeveloperEdition`, `org.gnome.Nautilus.desktop`).
+/// Leaving any of that prefix in the haystack turns short queries into
+/// noise: `"maxi"` fuzzy-matches `org.mozilla.FirefoxDeveloperEdition` via
+/// the `m`/`a` of `mozilla` and the `x`/`i` of `Firefox`, surfacing Firefox
+/// Developer Edition for a query about something else entirely. Stripping
+/// back to the last segment removes every such accidental letter run while
+/// keeping the app-specific portion (`Safari`,
+/// `FirefoxDeveloperEdition`, `Nautilus`) searchable.
 ///
-/// Only the first segment is stripped — stripping the vendor too would
-/// regress the deliberate "find apps by vendor" path covered by
-/// `single_token_matches_desktop_id` below.
-fn strip_reverse_dns_tld(id: &str) -> &str {
-    const TLDS: &[&str] = &["com.", "org.", "net.", "io."];
-    for tld in TLDS {
-        if let Some(rest) = id.strip_prefix(tld) {
-            return rest;
-        }
-    }
-    id
+/// `.desktop` suffixes (GNOME) are removed first so a Linux ID like
+/// `org.gnome.Nautilus.desktop` collapses to `Nautilus` rather than the
+/// useless trailing `desktop`. IDs with no period are returned unchanged.
+///
+/// The trade-off is that vendor-only queries (`"google"` against
+/// `com.google.Chrome`) no longer match via the ID — those have to come
+/// from the entry's `name` field instead.
+fn strip_reverse_dns_prefix(id: &str) -> &str {
+    let stem = id.strip_suffix(".desktop").unwrap_or(id);
+    stem.rsplit_once('.').map(|(_, tail)| tail).unwrap_or(stem)
 }
 
 /// Build the searchable text for an entry. Exhaustive on `Entry` so adding a
@@ -32,7 +33,7 @@ fn strip_reverse_dns_tld(id: &str) -> &str {
 fn haystack(entry: &Entry) -> String {
     match entry {
         Entry::Application(app) => {
-            format!("{} {}", app.name, strip_reverse_dns_tld(&app.desktop_id))
+            format!("{} {}", app.name, strip_reverse_dns_prefix(&app.desktop_id))
         }
         Entry::Window(w) => match &w.app_name {
             Some(app) => format!("{} {}", w.title, app),
@@ -211,10 +212,10 @@ mod tests {
 
     #[test]
     fn single_token_matches_name_case_insensitively() {
-        // "Files" intentionally has a reverse-DNS desktop_id. Pre-TLD-strip,
-        // "FIRE" used to fuzzy-match it via the `r` in `org.` and the `e` in
-        // `gnome` — exactly the noise the strip is designed to remove. The
-        // negative assertion below pins that this no longer happens.
+        // "Files" intentionally has a reverse-DNS desktop_id whose only
+        // app-specific segment is `Nautilus`. The negative assertion below
+        // pins that "FIRE" no longer fuzzy-matches it via the vendor prefix
+        // (`org.gnome.` used to leak `r` and `e` into the haystack).
         let entries = vec![
             app("Firefox", "firefox.desktop"),
             app("Files", "org.gnome.Nautilus.desktop"),
@@ -242,39 +243,48 @@ mod tests {
     }
 
     #[test]
-    fn single_token_matches_desktop_id() {
+    fn single_token_matches_desktop_id_app_segment() {
+        // The id's final app-specific segment contributes to the haystack,
+        // so a query that hits only the segment (and not the display name)
+        // still matches. Vendor segments (`com.microsoft.`) are stripped
+        // and no longer participate.
         let entries = vec![
-            app("Chrome", "com.google.Chrome.desktop"),
-            app("Maps", "org.gnome.Maps.desktop"),
-            app("Firefox", "firefox.desktop"),
+            app("Code", "com.microsoft.VSCode"),
+            app("Firefox", "org.mozilla.firefox"),
         ];
 
-        let result = search(&entries, "google");
-
-        assert_eq!(
-            result.len(),
-            1,
-            "query \"google\" should match exactly one entry by desktop_id; got names {:?}",
+        let result = search(&entries, "VSCode");
+        assert!(
+            result.iter().any(|e| e.name() == "Code"),
+            "query \"VSCode\" should match \"Code\" via the id's last segment; got names {:?}",
             names(&result)
         );
+
+        let vendor_result = search(&entries, "microsoft");
         assert!(
-            result.iter().any(|e| e.name() == "Chrome"),
-            "query \"google\" should match the Chrome entry (com.google.Chrome.desktop); got names {:?}",
-            names(&result)
+            !vendor_result.iter().any(|e| e.name() == "Code"),
+            "query \"microsoft\" should NOT match \"Code\" — vendor segments no longer contribute to the haystack; got names {:?}",
+            names(&vendor_result)
         );
     }
 
     #[test]
-    fn single_char_does_not_match_via_reverse_dns_tld_prefix() {
-        // Regression: every macOS bundle id begins with `com.` (or `org.`,
-        // `net.`, `io.`), so a one-character query like `"m"` would otherwise
-        // fuzzy-match every Apple app via the `m` in `com.`. The haystack
-        // strips the leading TLD segment so single-character matches must
-        // come from the name or the post-TLD portion of the id.
+    fn query_does_not_match_via_reverse_dns_prefix() {
+        // Regression: macOS bundle ids carry a long reverse-DNS prefix
+        // (`com.apple.*`, `org.mozilla.*`). Leaving any of it in the
+        // haystack lets short or scattered queries fuzzy-match via prefix
+        // letters: `"m"` would hit every `com.apple.*` via the `m` in
+        // `com.`, and `"maxi"` would hit `org.mozilla.FirefoxDeveloperEdition`
+        // via the `m`/`a` of `mozilla` plus the `x`/`i` of `Firefox`.
+        // Stripping back to the last segment kills both.
         let entries = vec![
             app("Calculator", "com.apple.Calculator"),
             app("Safari", "com.apple.Safari"),
             app("Maps", "com.apple.Maps"),
+            app(
+                "Firefox Developer Edition",
+                "org.mozilla.FirefoxDeveloperEdition",
+            ),
         ];
 
         let result = search(&entries, "m");
@@ -282,18 +292,26 @@ mod tests {
 
         assert!(
             name_set.contains("Maps"),
-            "query \"m\" should match \"Maps\" (the name and the post-TLD id both contain `m`); got names {:?}",
+            "query \"m\" should match \"Maps\" (the name and the id's last segment both contain `m`); got names {:?}",
             name_set
         );
         assert!(
             !name_set.contains("Calculator"),
-            "query \"m\" should NOT match \"Calculator\" — the only `m` is in the stripped `com.` prefix; got names {:?}",
+            "query \"m\" should NOT match \"Calculator\" — the only `m` is in the stripped `com.apple.` prefix; got names {:?}",
             name_set
         );
         assert!(
             !name_set.contains("Safari"),
-            "query \"m\" should NOT match \"Safari\" — the only `m` is in the stripped `com.` prefix; got names {:?}",
+            "query \"m\" should NOT match \"Safari\" — the only `m` is in the stripped `com.apple.` prefix; got names {:?}",
             name_set
+        );
+
+        let maxi = search(&entries, "maxi");
+        let maxi_names: HashSet<&str> = maxi.iter().map(|e| e.name()).collect();
+        assert!(
+            !maxi_names.contains("Firefox Developer Edition"),
+            "query \"maxi\" should NOT match \"Firefox Developer Edition\" — the scattered match relied on `mozilla` leaking into the haystack; got names {:?}",
+            maxi_names
         );
     }
 
@@ -366,12 +384,12 @@ mod tests {
         // that callers apply on top is exercised elsewhere.
         let entries = vec![app("Bravo", "z.desktop"), app("Alpha", "z.desktop")];
 
-        let result = search(&entries, "z.desktop");
+        let result = search(&entries, "z");
 
         assert_eq!(
             result.len(),
             2,
-            "both entries should match \"z.desktop\"; got names {:?}",
+            "both entries should match \"z\"; got names {:?}",
             names(&result)
         );
 
