@@ -69,6 +69,23 @@ sh_binary(
     data = [":LoFi"],
 )
 
+# swift-format lint over the entire Sources/ tree, gated through
+# `bazelisk test`. rules_swift has no swift-format aspect (cf. the
+# rules_rust clippy/rustfmt aspects that gate the Rust path), so this
+# is a coarse sh_test rather than a per-target aspect — fine for a
+# small Swift crate. See `bazel/swift_format_test.sh` for the runfiles
+# layout the script depends on.
+sh_test(
+    name = "swift_format_test",
+    srcs = ["bazel/swift_format_test.sh"],
+    data = glob(["Sources/LoFi/*.swift"]) + [".swift-format"],
+    # Bazel's test sandbox strips DEVELOPER_DIR, so `xcrun` can't locate
+    # the toolchain. The script has an `xcode-select -p` fallback; this
+    # `env_inherit` is for the override case (e.g. CI pinning a specific
+    # Xcode via DEVELOPER_DIR before invoking bazelisk).
+    env_inherit = ["DEVELOPER_DIR"],
+)
+
 # Generates `LoFi.xcodeproj` from the Bazel graph so the app can be
 # opened, built, and debugged in Xcode. The project is generated on
 # demand — `bazel run //app/macos:xcodeproj` writes it to

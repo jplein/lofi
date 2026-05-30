@@ -35,12 +35,12 @@ Run from `app/`. These cover the whole workspace, including the Linux-only `gnom
 
 ### macOS — Bazel
 
-One command compiles every Bazel-built Rust target, runs clippy (warnings promoted to errors) and rustfmt, and runs the tests:
+One command runs the full check matrix — every Rust unit test, the FFI integration test, clippy (warnings promoted to errors), rustfmt, **and** swift-format lint over the Swift frontend:
 
 - `bazelisk test //app/...`
 
-Only `core` builds under Bazel; the `gnome` crate is Linux-only (gtk4 / libadwaita) and has no Bazel target, so it is covered by the Cargo path above. For how the Bazel clippy/rustfmt/test targets are wired (and why), see [core/README.md](core/README.md#tests-clippy-and-rustfmt).
+That single invocation is the gate; there is no separate Rust-only or Swift-only step on the macOS path. Under the hood it's wired three ways: rules_rust aspects (`//app/core:rustfmt`, clippy promoted via build-time flag, `cargo_test`-style tests for `ffi_test` / `lofi_core_lib_test` / `mru_test`), and a coarse `sh_test` for Swift formatting (`//app/macos:swift_format_test`, sandboxed `xcrun swift-format lint --strict` over `app/macos/Sources/`). For how the Bazel Rust targets are wired (and why), see [core/README.md](core/README.md#tests-clippy-and-rustfmt); for the Swift sh_test's `DEVELOPER_DIR` plumbing, see [macos/README.md](macos/README.md#formatting--linting).
 
-### Swift (macOS only)
+Only `core` builds under Bazel; the `gnome` crate is Linux-only (gtk4 / libadwaita) and has no Bazel target, so it is covered by the Cargo path above.
 
-The macOS frontend is Swift, checked with Apple's `swift-format` (`app/macos/check.sh`). See [macos/README.md](macos/README.md#formatting--linting).
+`app/macos/check.sh --fix` is a companion to the Bazel gate, not a separate check: it runs `swift-format format --in-place` to *rewrite* the sources, which the Bazel `sh_test` (sandboxed, read-only) cannot do. Bare `./check.sh` is no longer a lint entry point.

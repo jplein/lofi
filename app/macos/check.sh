@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
 #
-# Swift formatting gate for the macOS frontend.
+# In-place Swift reformat for the macOS frontend.
 #
-# Uses Apple's swift-format, which ships *inside* the Xcode toolchain
-# (`xcrun swift-format`) — there is no separate tool to install or pin. That is
-# the same reasoning behind running clippy/rustfmt through the rules_rust
-# toolchain rather than a parallel cargo install (see app/core/README.md):
-# reuse the toolchain the build already depends on. swift-format is both the
-# formatter and the linter, so this one script covers both roles.
+# The Swift lint *gate* runs under Bazel as `//app/macos:swift_format_test`
+# (gated as part of `bazelisk test //app/...`). This script is only the
+# `--fix` companion: swift-format's `format --in-place` mode rewrites
+# sources, which a Bazel `sh_test` (sandboxed, read-only) cannot do.
+#
+# Uses Apple's swift-format from inside the Xcode toolchain
+# (`xcrun swift-format`) — same reasoning as the Rust gates going through
+# the rules_rust toolchain rather than a parallel cargo install: reuse the
+# toolchain the build already depends on.
 #
 # Usage:
-#   ./check.sh         Lint only — check formatting, non-zero exit on any
-#                      deviation. This is the gate (CI / pre-commit).
 #   ./check.sh --fix   Reformat the sources in place.
-#
-# Not wired into `bazel test`: rules_swift has no swift-format aspect, so this
-# runs standalone. The Rust gates remain `bazelisk test //app/...`.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-config="$here/.swift-format"
-sources="$here/Sources"
-
-if [[ "${1:-}" == "--fix" ]]; then
-    exec xcrun swift-format format --in-place --parallel --recursive \
-        --configuration "$config" "$sources"
+if [[ "${1:-}" != "--fix" ]]; then
+    echo "usage: $(basename "$0") --fix" >&2
+    echo "" >&2
+    echo "Lint runs under Bazel; use 'bazelisk test //app/macos:swift_format_test'." >&2
+    exit 2
 fi
 
-exec xcrun swift-format lint --strict --parallel --recursive \
-    --configuration "$config" "$sources"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec xcrun swift-format format --in-place --parallel --recursive \
+    --configuration "$here/.swift-format" "$here/Sources"

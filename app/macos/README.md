@@ -68,7 +68,7 @@ bazelisk run   //app/macos:launch     # quit any running instance, unzip + `open
 bazelisk run   //app/macos:close      # quit any running instance (idempotent)
 bazelisk run   //app/macos:activate   # send a re-open event to the running instance (summons the panel); no-op otherwise
 bazelisk run   //app/macos:install    # install to ~/Applications + register a LaunchAgent so LoFi starts at login
-bazelisk test  //app/core:ffi_test    # run the 52 FFI integration tests
+bazelisk test  //app/...              # full macOS check matrix: Rust tests + clippy + rustfmt + Swift lint
 bazelisk run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
 
@@ -88,14 +88,17 @@ First-time build downloads Bazel (per `.bazelversion`), then the rule stacks, th
 
 ## Formatting / linting
 
-Swift is formatted and linted with Apple's `swift-format`, which ships *inside* the Xcode toolchain (`xcrun swift-format`) — there is no separate tool to install or version-pin. That mirrors the reasoning for running the Rust gates through the rules_rust toolchain rather than a parallel cargo install (see `app/core/README.md`): reuse the toolchain the build already depends on. swift-format is both the formatter and the linter, so one script covers both roles:
+Swift is formatted and linted with Apple's `swift-format`, which ships *inside* the Xcode toolchain (`xcrun swift-format`) — there is no separate tool to install or version-pin. That mirrors the reasoning for running the Rust gates through the rules_rust toolchain rather than a parallel cargo install (see `app/core/README.md`): reuse the toolchain the build already depends on. swift-format is both the formatter and the linter, and the gate runs through Bazel:
 
 ```sh
-./check.sh         # lint: check-only, non-zero exit on any deviation (the gate)
-./check.sh --fix   # reformat in place
+bazelisk test //app/...                       # full macOS check matrix: Rust tests + clippy + rustfmt + Swift lint
+bazelisk test //app/macos:swift_format_test   # just the Swift lint (a subset of the above)
+./check.sh --fix                              # reformat in place (no Bazel `fix` mode)
 ```
 
-The config is `app/macos/.swift-format` — swift-format's defaults with one change: 4-space `indentation` (the existing code style; swift-format defaults to 2). This is deliberately *not* wired into `bazel test`: `rules_swift` has no swift-format aspect (unlike the rules_rust clippy/rustfmt aspects the Rust gates use), so the Swift check runs standalone. swift-format is a formatter plus a *light* linter — its default rules don't cover deeper lint concerns (it won't flag, e.g., force-casts), so it complements manual review rather than replacing it.
+`bazelisk test //app/...` is the one command developers should reach for — it runs every Rust test plus clippy, rustfmt, and the Swift swift-format lint. The Swift lint is the same `xcrun swift-format lint --strict` invocation, wired through a coarse `sh_test` over the whole `Sources/` tree (`//app/macos:swift_format_test`). The wrapper is whole-tree rather than per-target because `rules_swift` has no swift-format aspect (and the crate is small enough that whole-tree re-runs are essentially free). `check.sh` still exists for the `--fix` reformat path, since the Bazel `sh_test` only knows how to lint — there is no `bazel run` form that reaches back into the workspace to rewrite sources. Bare `./check.sh` (no `--fix`) is no longer a lint entry point — it prints a usage message pointing at the Bazel command and exits non-zero.
+
+The config is `app/macos/.swift-format` — swift-format's defaults with one change: 4-space `indentation` (the existing code style; swift-format defaults to 2). The sh_test wrapper (`bazel/swift_format_test.sh`) has to inject `DEVELOPER_DIR` itself — Bazel's test sandbox strips it, so `xcrun` fails with "unable to find sdk: 'macosx'" out of the box; the script falls back to `xcode-select -p`, and the BUILD file `env_inherit`s `DEVELOPER_DIR` so a CI pin still propagates. swift-format is a formatter plus a *light* linter — its default rules don't cover deeper lint concerns (it won't flag, e.g., force-casts), so it complements manual review rather than replacing it.
 
 ## Permissions
 
