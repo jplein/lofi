@@ -51,6 +51,12 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import os
+
+// `os.Logger` rather than `NSLog`: Tahoe redacts every NSLog message body
+// to `<private>` in the unified log, and a daemon launched via `open` /
+// launchd has no stdout to fall back to. See *Logging* in the README.
+private let log = Logger(subsystem: "dev.jplein.lofi", category: "power")
 
 enum PowerCommands {
     /// Dispatch the power command identified by `id` — a stable
@@ -143,7 +149,9 @@ enum PowerCommands {
         var errInfo: NSDictionary?
         let result = script.executeAndReturnError(&errInfo)
         if let err = errInfo {
-            NSLog("PowerCommands.runAppleEvent(\(event)): \(err)")
+            log.error(
+                "runAppleEvent(\(event, privacy: .public)): \(String(describing: err), privacy: .public)"
+            )
             return false
         }
         // `result` is a valid (possibly empty) descriptor on success;
@@ -166,7 +174,9 @@ enum PowerCommands {
             try process.run()
             return true
         } catch {
-            NSLog("PowerCommands.runProcess(\(path)): \(error)")
+            log.error(
+                "runProcess(\(path, privacy: .public)): \(String(describing: error), privacy: .public)"
+            )
             return false
         }
     }

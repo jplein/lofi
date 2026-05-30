@@ -46,6 +46,12 @@
 
 import AppKit
 import Carbon.HIToolbox
+import os
+
+// `os.Logger` rather than `NSLog`: Tahoe redacts every NSLog message body
+// to `<private>` in the unified log, and a daemon launched via `open` /
+// launchd has no stdout to fall back to. See *Logging* in the README.
+private let log = Logger(subsystem: "dev.jplein.lofi", category: "hotkey")
 
 /// Registers a single system-wide hotkey through Carbon's
 /// `RegisterEventHotKey`. The press handler is invoked on the main
@@ -101,7 +107,7 @@ final class GlobalHotkey {
         // then only responds to the `:activate` reopen path) — log so it's
         // diagnosable rather than a mystery.
         if status != noErr {
-            NSLog("LoFi: InstallEventHandler failed (OSStatus \(status))")
+            log.error("InstallEventHandler failed (OSStatus \(status))")
         }
     }
 
@@ -121,7 +127,7 @@ final class GlobalHotkey {
         // Registration fails if the combo is already claimed; log rather than
         // leave the user with a dead hotkey and no signal why.
         if status != noErr {
-            NSLog("LoFi: RegisterEventHotKey failed (OSStatus \(status))")
+            log.error("RegisterEventHotKey failed (OSStatus \(status))")
         }
     }
 }
