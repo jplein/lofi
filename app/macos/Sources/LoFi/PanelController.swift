@@ -159,6 +159,17 @@ final class PanelController {
             let glass = NSGlassEffectView()
             glass.cornerRadius = kCornerRadius
             glass.contentView = host
+            // `NSGlassEffectView.cornerRadius` rounds the visible glass
+            // surface, but the view's layer alpha mask is still rectangular
+            // — so the window's `hasShadow` silhouette (and any inherent
+            // edge stroke the Liquid Glass effect draws at its bounds)
+            // traces the square panel rect, leaving a sharp 90° outline
+            // cutting across the rounded corners. Layer-clipping the view
+            // to the same radius makes the rendered alpha mask round too,
+            // so the shadow hugs the rounded shape like the README claims.
+            glass.wantsLayer = true
+            glass.layer?.cornerRadius = kCornerRadius
+            glass.layer?.masksToBounds = true
             container = glass
         } else {
             let effect = NSVisualEffectView()
