@@ -42,9 +42,9 @@
 import AppKit
 
 // Row height is 44pt (vs. 36pt before the running-indicator slice). The
-// icon-plus-dot column is 32pt tall (24 + 2 + 6) and sits slightly below
+// icon-plus-dot column is 29pt tall (24 + 2 + 3) and sits slightly below
 // the row's vertical center (`kIconColumnVerticalOffset`), so the row has
-// ~9pt of padding above the icon and ~3pt below the dot. The padding is
+// ~10pt of padding above the icon and ~4pt below the dot. The padding is
 // uniform across every row — command rows with no dot still see the
 // same margins, because the dot view is always part of the icon column
 // (only its layer's `backgroundColor` toggles). The selection pill
@@ -61,7 +61,7 @@ private let kIconColumnVerticalOffset: CGFloat = 3
 private let kIconSize: CGFloat = 24
 private let kCategoryFontSize: CGFloat = 11
 // Running-indicator dot under the icon. Mirrors the GNOME launcher's
-// `.running-indicator` (`app/gnome/src/ui.rs`): a 6pt circular pip,
+// `.running-indicator` (`app/gnome/src/ui.rs`): a 3pt circular pip,
 // `secondaryLabelColor` so it adapts to light/dark mode and reads
 // quieter than the app name. The dot is a sibling of the icon in the
 // row view — not an arranged subview of the outer stack — so its
@@ -70,7 +70,7 @@ private let kCategoryFontSize: CGFloat = 11
 // `backgroundColor` toggles between `secondaryLabelColor` and clear,
 // so running and not-running rows look pixel-identical above the
 // baseline.
-private let kRunningDotSize: CGFloat = 6
+private let kRunningDotSize: CGFloat = 3
 // Vertical gap between the bottom of the icon (≈ text baseline, see
 // `.lastBaseline` alignment in `EntryRowView`) and the top of the dot.
 private let kRunningDotTopGap: CGFloat = 2
@@ -595,13 +595,13 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
 ///
 ///   - `iconColumn` — vertical `NSStackView` containing the icon image
 ///     and a fixed-size running-indicator dot below it. The column has
-///     a stable 32pt height (24pt icon + 2pt gap + 6pt dot) regardless
+///     a stable 29pt height (24pt icon + 2pt gap + 3pt dot) regardless
 ///     of whether the dot is painted, so command and non-running
 ///     application rows have icons in the same vertical position as
 ///     running application rows. The column is centered vertically
 ///     against the row's `centerYAnchor`, which is what gives the
-///     symmetric ~6pt of padding above the icon and below the dot in
-///     the 44pt row.
+///     ~7.5pt of padding above the icon and below the dot in the 44pt
+///     row (before `kIconColumnVerticalOffset` nudges the column down).
 ///
 ///   - `textStack` — horizontal `NSStackView` of `[nameField,
 ///     categoryField]`. Its vertical center is pinned to the **icon's**
@@ -692,7 +692,7 @@ private final class EntryRowView: NSView {
             for: .horizontal
         )
 
-        // Running-indicator dot — fixed 6x6, always part of the icon column
+        // Running-indicator dot — fixed 3x3, always part of the icon column
         // so command and non-running rows have the same icon position.
         let runningDot = RunningDotView()
         runningDot.isOn = isRunning
@@ -704,7 +704,7 @@ private final class EntryRowView: NSView {
 
         // Vertical icon column: imageView on top, runningDot 2pt below.
         // Width is locked to the icon size so the column is a fixed-width
-        // slot (the dot would otherwise have its 6pt width stretched).
+        // slot (the dot would otherwise have its 3pt width stretched).
         let iconColumn = NSStackView(views: [imageView, runningDot])
         iconColumn.orientation = .vertical
         iconColumn.alignment = .centerX
