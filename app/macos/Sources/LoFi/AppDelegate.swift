@@ -33,17 +33,20 @@
 //
 // Permissions
 // -----------
-// Both Screen Recording and Accessibility are checked at process
-// start (TCC freezes the answer there — gotcha 10). The first summon
-// that finds either missing fires the system prompts and returns
-// WITHOUT showing the panel: our `.floating`-level panel composites
-// on top of the centered TCC dialogs (window level beats activation
-// for z-order, so `ignoringOtherApps` can't push it behind), so we
-// let the dialogs own the screen instead. The prompt fires exactly
-// once (`promptedForPermission`); later summons in the same process
-// show the panel in degraded apps-only mode. After the user grants
-// and relaunches, the new process sees the permissions and runs the
-// full path from its first summon.
+// Window-action commands need the **Accessibility** TCC grant, checked
+// at process start (TCC freezes the answer there — gotcha 10). The
+// first summon that finds it missing fires the system prompt and returns
+// WITHOUT showing the panel: our `.floating`-level panel composites on
+// top of the centered TCC dialog (window level beats activation for
+// z-order, so `ignoringOtherApps` can't push it behind), so we let the
+// dialog own the screen instead. The prompt fires exactly once
+// (`promptedForPermission`); later summons in the same process show the
+// panel in degraded apps-only mode (apps + power commands; no window
+// commands). After the user grants and relaunches, the new process sees
+// Accessibility and runs the full path from its first summon. LoFi
+// deliberately does NOT request Screen Recording — `WindowDiscovery`
+// reads the user's foreground window via AX, so the second TCC grant
+// other launchers (and earlier LoFi builds) needed is gone.
 
 import AppKit
 import Carbon.HIToolbox
@@ -184,35 +187,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// call.
     ///
     /// Command-target gathering happens *before* `NSApp.activate`
-    /// so `WindowDiscovery.discover` reads CGWindowList while LoFi
-    /// is still background — meaning the frontmost-non-LoFi
-    /// window is the one the user was just using, not LoFi
-    /// itself. (`WindowDiscovery` filters by pid anyway, but the
-    /// z-order it gets is more useful when LoFi isn't at the top
-    /// of it.)
+    /// so `WindowDiscovery.frontmostNonLoFi` reads
+    /// `NSWorkspace.frontmostApplication` while LoFi is still
+    /// background — meaning the foreground app is the one the user
+    /// was just using, not LoFi itself. (`WindowDiscovery` filters
+    /// by pid and bundle id anyway as belt-and-suspenders.)
     private func summonPanel() {
-        // Window enumeration is gated on TWO permissions: Screen
-        // Recording (for `kCGWindowName`) and Accessibility (for AX
-        // raise/move). Both are captured at process start by TCC, so
-        // freshly-granted permissions only take effect on the next
-        // launch (relaunch via `:close` + `:launch`, or Cmd-Q +
-        // `:launch`).
-        let canSeeWindows = Permissions.screenRecording() && Permissions.accessibility()
+        // Window-action commands are gated on the Accessibility TCC grant
+        // (AX raise/move/resize). It's captured at process start, so
+        // freshly-granted access only takes effect on the next launch
+        // (relaunch via `:close` + `:launch`, or Cmd-Q + `:launch`).
+        // Screen Recording is no longer needed — `WindowDiscovery` reads
+        // the foreground window via AX.
+        let canSeeWindows = Permissions.accessibility()
 
-        // First summon that finds a permission missing: fire the TCC
-        // prompts and bail BEFORE showing the panel. Our `.floating`
-        // panel composites on top of the centered system dialogs
-        // (window level beats activation for z-order, so
-        // `ignoringOtherApps` can't push it behind), so showing it
-        // would bury them — instead we let the dialogs own the screen.
-        // Runs once per process (`promptedForPermission`); the user
-        // grants, relaunches (gotcha 10), and the next process takes
-        // the full path. Later missing-permission summons fall through
-        // and show the panel in degraded apps-only mode.
+        // First summon that finds Accessibility missing: fire the TCC
+        // prompt and bail BEFORE showing the panel. Our `.floating` panel
+        // composites on top of the centered system dialog (window level
+        // beats activation for z-order, so `ignoringOtherApps` can't push
+        // it behind), so showing it would bury the dialog. Runs once per
+        // process (`promptedForPermission`); the user grants, relaunches
+        // (gotcha 10), and the next process takes the full path. Later
+        // missing-permission summons fall through and show the panel in
+        // degraded apps-only mode.
         if !canSeeWindows && !promptedForPermission {
             promptedForPermission = true
-            if !Permissions.screenRecording() { Permissions.requestScreenRecording() }
-            if !Permissions.accessibility() { Permissions.requestAccessibility() }
+            Permissions.requestAccessibility()
             return
         }
 
@@ -220,39 +220,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         entries.clear()
         commandTarget = nil
 
-        // Window discovery is still needed by the command-target push
-        // and the saved-frame store's prune step. It's NOT the source
-        // of the running-app set anymore (see below).
-        let discoveredWindows: [DiscoveredWindow]
-        if canSeeWindows {
-            discoveredWindows = WindowDiscovery.discover()
-            savedFrameStore.prune(
-                liveWindowIds: Set(discoveredWindows.map { UInt64($0.id) })
-            )
-        } else {
-            discoveredWindows = []
-        }
-
-        // Bundle ids of currently-running processes. `runningApplications`
-        // returns every process regardless of which macOS Space its
-        // windows live on, which is what fixes the cross-Space miss:
-        // deriving the set from `WindowDiscovery.discover()` (which
-        // uses `CGWindowListCopyWindowInfo(.optionOnScreenOnly, ...)`)
-        // only saw windows on the *active* Space, so e.g. Firefox
-        // Developer Edition on Space 2 was reported as not running
-        // while the user was on Space 1.
-        //
-        // Trade: this marks menu-bar agents (Karabiner, Rectangle, …) as
-        // running whenever their process is alive, even without a window.
-        // That's a small semantic shift from "has a window" to "process
-        // is up" — acceptable because the dot reads as "this app is
-        // alive" to users, and the alternative (a second CGWindowList
-        // pass without `.optionOnScreenOnly`) is more code for parity
-        // with a model the user doesn't actually distinguish from "is
-        // running."
-        //
-        // No TCC grant required, so the indicator works in degraded
-        // (apps-only) mode too.
+        // Bundle ids of currently-running processes, used to stamp
+        // `isRunning` on app rows. `runningApplications` returns every
+        // process regardless of which macOS Space its windows live on, so
+        // an app whose only window is on a different Space (e.g. Firefox
+        // Developer Edition on Space 2 while the user is on Space 1) is
+        // still reported as running. The trade: menu-bar agents
+        // (Karabiner, Rectangle, …) show the dot whenever their process
+        // is alive, even without a window — a small semantic shift from
+        // "has a window" to "process is up." No TCC grant required, so
+        // the indicator works in degraded (apps-only) mode too.
         var runningBundleIds: Set<String> = []
         for running in NSWorkspace.shared.runningApplications {
             if let bid = running.bundleIdentifier {

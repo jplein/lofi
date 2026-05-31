@@ -13,13 +13,15 @@
 //   - `workArea` — the window's screen's visible frame, used as the
 //     bounding box by every geometry command via `compute_geometry`.
 //
-// WHY "first non-LoFi window" (GNOME parity)
-// ------------------------------------------
-// `CGWindowListCopyWindowInfo` returns windows front-to-back, so the
-// first non-LoFi entry is the frontmost other window — the analog of
+// WHY "frontmost non-LoFi window" (GNOME parity)
+// ----------------------------------------------
+// `WindowDiscovery.frontmostNonLoFi` reads
+// `NSWorkspace.shared.frontmostApplication`'s AX focused window. Since
+// the gather always runs BEFORE `NSApp.activate(...)` in `summonPanel`,
+// the frontmost app is the user's previous app — the direct analog of
 // GNOME's first non-LoFi `ListWindowsMRU` entry. `WindowDiscovery`
-// already excludes LoFi (it skips `pid == getpid()`), and we
-// belt-and-suspenders against the bundle id as well.
+// already excludes LoFi by both `pid == getpid()` and bundle id, so
+// `gatherTarget` doesn't need its own filter on top.
 //
 // WHY top-left coordinates everywhere
 // -----------------------------------
@@ -40,11 +42,6 @@
 import AppKit
 
 enum WindowCommands {
-    /// Bundle identifier of LoFi itself, used as a second guard (beyond
-    /// `WindowDiscovery`'s pid filter) so no command ever targets the
-    /// launcher's own window.
-    private static let lofiBundleId = "dev.jplein.lofi"
-
     /// Everything the command activation path needs about the target
     /// window, captured once at gather time. Mirrors the fields GNOME's
     /// `Command` carries (target id + work area + current frame) plus the
@@ -68,22 +65,21 @@ enum WindowCommands {
 
     /// Pick the command target (frontmost non-LoFi window) and capture its
     /// frame + work area, all in top-left global coordinates. Returns nil
-    /// when there's no usable target (no non-LoFi window, or no screen to
-    /// derive a work area from), which drops the command rows entirely.
+    /// when there's no usable target (no foreground non-LoFi window, no AX
+    /// focused window for that app, or no screen to derive a work area
+    /// from), which drops the command rows entirely.
     ///
     /// `standardRect` is initialized to `.zero` here as a placeholder;
     /// `AppDelegate` overwrites it post-push with the computed StandardSize
     /// rect (see `CommandTarget.standardRect`).
     static func gatherTarget() -> CommandTarget? {
-        // `WindowDiscovery.discover` returns the current Space's windows in
-        // reliable front-to-back z-order, so the first non-LoFi entry is the
-        // genuinely frontmost window the user was just using. `WindowDiscovery`
-        // already excludes LoFi by pid; skip the LoFi bundle id too as a
-        // belt-and-suspenders guard.
-        let target = WindowDiscovery.discover().first { window in
-            window.ownerBundleId != lofiBundleId
-        }
-        guard let target else { return nil }
+        // `WindowDiscovery.frontmostNonLoFi` reads
+        // `NSWorkspace.frontmostApplication`'s AX focused window. Called
+        // before `NSApp.activate(...)` in `summonPanel`, so the foreground
+        // app is the user's previous app — the window they were just using.
+        // `WindowDiscovery` already excludes LoFi by pid AND bundle id, so
+        // no additional filter is needed here.
+        guard let target = WindowDiscovery.frontmostNonLoFi() else { return nil }
         guard let workArea = workAreaTopLeft(forWindowBounds: target.bounds) else {
             return nil
         }

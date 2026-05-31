@@ -1,52 +1,60 @@
-// On-screen window enumeration via Core Graphics.
+// AX-based lookup of the user's frontmost non-LoFi window.
 //
-// Why CGWindowList over ScreenCaptureKit: ScreenCaptureKit is async and
-// streaming; we want a one-shot snapshot at launch. `CGWindowListCopyWindowInfo`
-// is the simpler, synchronous API and returns enough metadata
-// (kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowNumber)
-// to populate the launcher row plus the Swift-side `windowAux` activation
-// map.
+// Why AX over CGWindowListCopyWindowInfo
+// --------------------------------------
+// CGWindowList is the natural API for an across-process snapshot of every
+// on-screen window, but it gates `kCGWindowName` (window titles) behind
+// the **Screen Recording** TCC service — even though LoFi never records
+// anything. That extra grant is jarring for a launcher (Raycast / Alfred
+// don't ask for it), so we drive the lookup entirely through the
+// **Accessibility** grant we already need for raise/move/resize, and drop
+// the Screen Recording dependency.
 //
-// Caller contract: this function does *not* check Screen Recording or
-// Accessibility itself — that's the AppDelegate's job. Without Screen
-// Recording, `kCGWindowName` is nil or empty on every entry, so the
-// non-empty-title filter below effectively drops every window. We keep
-// that as a robustness fallback rather than the primary gate.
+// The cross-process z-order CGWindowList gave us for free isn't actually
+// needed: the only consumer is `WindowCommands.gatherTarget`, which wants
+// "the window the user was just using" — i.e. the focused window of the
+// foreground process. `NSWorkspace.frontmostApplication` (the OS-level
+// foreground app) plus AX `kAXFocusedWindowAttribute` on that app's
+// AXApplication element is the direct expression of that intent, and
+// runs against permissions we already hold. The summon path always
+// gathers BEFORE `NSApp.activate(...)`, so at the moment this is called
+// LoFi is still in the background and `frontmostApplication` is the
+// user's previous app, not us.
+//
+// Caller contract: this function does *not* check the Accessibility
+// grant itself — that's the AppDelegate's job. When Accessibility is
+// denied, the AX reads here return `kAXErrorAPIDisabled`, no focused
+// window resolves, and we return nil — which is fine because AppDelegate
+// doesn't call us in that state anyway.
 
 import AppKit
 import ApplicationServices
 
-/// One on-screen window's metadata, sufficient to render a launcher row
-/// and to later activate the window via `WindowActivation.raise(pid:title:)`.
-///
-/// `ownerBundleId` is optional because `NSRunningApplication(processIdentifier:)`
-/// can return nil for system processes (e.g. WindowServer-owned shells).
-/// The Window entry still appears in the list — `WindowActivation` works
-/// off pid+title, not bundle id.
+/// One on-screen window's metadata, sufficient to populate a
+/// `WindowCommands.CommandTarget` and later drive AX from
+/// `WindowControl`.
 ///
 /// Two related but distinct fields about the owning app, mirroring the
 /// `AppDiscovery.swift` split:
 ///   - `ownerBundlePath` — absolute filesystem path to the owning app's
-///     `.app` bundle. This is the *icon-resolution input*: the Swift UI
-///     hands it to `NSWorkspace.shared.icon(forFile:)` at draw time.
-///     Optional because `NSRunningApplication.bundleURL` can be nil for
-///     system processes.
-///   - `ownerBundleId` — the stable identifier (`CFBundleIdentifier`)
-///     used for `EntryRef` / cross-platform parity. Not a path; never
-///     pass this to `NSWorkspace.shared.icon(forFile:)`.
+///     `.app` bundle. Optional because `NSRunningApplication.bundleURL`
+///     can be nil for system processes.
+///   - `ownerBundleId` — the stable identifier (`CFBundleIdentifier`),
+///     used as a belt-and-suspenders LoFi filter alongside the pid check.
+///     Not a path; never pass this to `NSWorkspace.shared.icon(forFile:)`.
 ///
 /// `workspace` is always 0 on macOS: there's no Mutter-style workspace
 /// concept. The field exists for cross-platform parity with the GNOME
-/// pipeline, which uses `Shell.WindowTracker.get_workspace().index`.
+/// pipeline.
 ///
-/// `bounds` is the window's on-screen rectangle from `kCGWindowBounds`,
-/// already in **top-left global display coordinates** (origin top-left of
-/// the primary display, y growing downward). This is the same coordinate
-/// space the Accessibility `kAXPositionAttribute`/`kAXSizeAttribute` use,
-/// so the rect can be handed straight to `compute_geometry` (as the
-/// command target's `current_frame`) and back to AX without a flip. The
-/// work area, by contrast, comes from `NSScreen.visibleFrame` (Cocoa
-/// bottom-left) and *does* need flipping — see `WindowCommands`.
+/// `bounds` is the window's on-screen rectangle from
+/// `kAXPositionAttribute` + `kAXSizeAttribute`, in **top-left global
+/// display coordinates** (origin top-left of the primary display, y
+/// growing downward) — the same coordinate space AX uses for sets, so
+/// the rect can be handed straight to `compute_geometry` and back to
+/// AX without a flip. The work area, by contrast, comes from
+/// `NSScreen.visibleFrame` (Cocoa bottom-left) and *does* need flipping
+/// — see `WindowCommands`.
 struct DiscoveredWindow {
     let id: CGWindowID
     let title: String
@@ -59,136 +67,122 @@ struct DiscoveredWindow {
 }
 
 enum WindowDiscovery {
-    /// Returns the user-relevant on-screen windows owned by other
-    /// applications on the **active macOS Space**, in reliable
-    /// front-to-back z-order. Filters:
-    ///   - `kCGWindowLayer == 0` (regular app windows, not menus / panels /
-    ///     system UI — those live at non-zero layers).
-    ///   - `kCGWindowOwnerPID != getpid()` (don't list LoFi.app's own panel).
-    ///   - non-empty `kCGWindowName` (a titleless window is uninteresting,
-    ///     and also a strong signal that Screen Recording is denied).
-    /// Caller must hold both Screen Recording and Accessibility
-    /// permissions; this function does not gate on them.
+    /// LoFi's bundle identifier, used as the foreground-app filter so the
+    /// launcher never targets its own window when LoFi happens to be the
+    /// frontmost process (e.g. a second summon without a prior dismiss).
+    private static let lofiBundleId = "dev.jplein.lofi"
+
+    /// Return the user's **frontmost non-LoFi window** via AX. Used by
+    /// `WindowCommands.gatherTarget` as the target for every window-action
+    /// command (center, halves, minimize, toggle*, move-to-display).
     ///
-    /// **Used only by the window-action command target** today.
-    /// `WindowCommands.gatherTarget` calls this to pick the frontmost
-    /// non-LoFi window as the target for center/halves/standard-size/
-    /// minimize/toggle-* / next-display / previous-display commands.
-    /// `SavedFrameStore.prune` also reads the live-id list to
-    /// garbage-collect dropped frame records. The window *switcher*
-    /// (per-window launcher rows) used to call this too but is
-    /// disabled on macOS — see README gotchas 13-14 for the macOS
-    /// limitations that ruled it out.
-    ///
-    /// **No active-display filter.** An earlier iteration filtered
-    /// by the cursor's display, which was needed by the (now-disabled)
-    /// window switcher to avoid the cross-display focus problem. For
-    /// command targeting it was actively wrong: picking the frontmost
-    /// non-LoFi window *on the cursor's display* targets a different
-    /// window than the user expects whenever a previous command has
-    /// moved the foreground window to a different display (e.g.
-    /// "Previous display" moves Ghostty to display 1, cursor stays on
-    /// display 0, user summons LoFi expecting "Next display" to move
-    /// Ghostty back — but `gatherTarget` returns whatever happens to
-    /// be on display 0 instead). The right scope for command targeting
-    /// is the global frontmost non-LoFi window (GNOME parity), and
-    /// the command's *work area* is derived from the *target window's*
-    /// display via `WindowCommands.workAreaTopLeft`, not from the
-    /// cursor's display.
-    ///
-    /// `.optionOnScreenOnly` gives the front-to-back z-order
-    /// `gatherTarget` depends on AND restricts the result to the
-    /// active Space (the only Space we can reliably activate anything
-    /// on — see gotcha 13).
-    static func discover() -> [DiscoveredWindow] {
-        let options: CGWindowListOption = [.excludeDesktopElements, .optionOnScreenOnly]
-        guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
-            return []
+    /// Returns nil when:
+    ///   - There is no foreground application (system mid-transition).
+    ///   - The foreground application IS LoFi.
+    ///   - The foreground app has no AX focused window. The AX runtime may
+    ///     be asleep on first contact (Firefox, some Chromium derivatives —
+    ///     gotcha 12); `AXWindowFinder.windowsForApp` does the wakeup
+    ///     before we read the focused window, so a nil here means AX is
+    ///     genuinely closed to us (sandboxed app, AX-hostile toolkit).
+    ///   - The focused window has no usable `CGWindowID` via the private
+    ///     `_AXUIElementGetWindow` bridge (gotcha 11). Without an id we
+    ///     can't key into `SavedFrameStore` for toggle-maximize, and the
+    ///     id-first AX match in `WindowControl` would fail too — refuse
+    ///     the target rather than ship a partially-functional row set.
+    static func frontmostNonLoFi() -> DiscoveredWindow? {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            return nil
         }
-        guard let dicts = rawList as? [[String: Any]] else {
-            return []
+        let pid = app.processIdentifier
+        if pid == getpid() || app.bundleIdentifier == lofiBundleId {
+            return nil
         }
 
-        let ourPid = getpid()
-        var results: [DiscoveredWindow] = []
-        results.reserveCapacity(dicts.count)
+        // Side-effect-only call: wake the AX runtime if needed (Firefox /
+        // Chromium derivatives ship with it asleep — gotcha 12) so the
+        // `kAXFocusedWindowAttribute` read below sees a populated app.
+        // Returned list is intentionally discarded.
+        _ = AXWindowFinder.windowsForApp(pid: pid)
 
-        for dict in dicts {
-            // Skip non-window layers (menu bar, dock items, system UI).
-            // `kCGWindowLayer` is documented as `CFNumber` (int32).
-            guard let layer = dict[kCGWindowLayer as String] as? Int, layer == 0 else {
-                continue
-            }
-            // Skip our own panel.
-            guard let pidValue = dict[kCGWindowOwnerPID as String] as? pid_t else {
-                continue
-            }
-            if pidValue == ourPid {
-                continue
-            }
-            // Empty / missing title -> drop. Without Screen Recording every
-            // entry hits this branch.
-            guard let title = dict[kCGWindowName as String] as? String,
-                !title.isEmpty
-            else {
-                continue
-            }
-            let ownerName =
-                (dict[kCGWindowOwnerName as String] as? String) ?? ""
-            // `kCGWindowNumber` is `CFNumber` (int32). Cast through `UInt32`
-            // because `CGWindowID` is a `UInt32` alias and `Int` -> `UInt32`
-            // is a runtime check we don't need to take.
-            guard let numberRaw = dict[kCGWindowNumber as String] as? UInt32 else {
-                continue
-            }
-            let windowId = CGWindowID(numberRaw)
-            // `kCGWindowBounds` is a CFDictionary (`{X, Y, Width, Height}`),
-            // not a raw CGRect — bridge it via
-            // `CGRect(dictionaryRepresentation:)`. The rect is already in
-            // top-left global coordinates (see `DiscoveredWindow.bounds`).
-            // Skip the window if bounds can't be read, mirroring the
-            // skip-on-missing-field pattern above: a window surfaced to the
-            // launcher must always carry a usable `bounds` so a command
-            // targeting it has a real `current_frame`.
-            guard let boundsDict = dict[kCGWindowBounds as String] as? NSDictionary,
-                let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
-            else {
-                continue
-            }
-            // Single `NSRunningApplication` lookup, two derived fields:
-            // `bundleIdentifier` (stable id, used for `EntryRef`) and
-            // `bundleURL.path` (used by the UI to resolve the icon via
-            // `NSWorkspace.shared.icon(forFile:)`). Both can be nil for
-            // system processes.
-            let runningApp = NSRunningApplication(processIdentifier: pidValue)
-            let bundleId = runningApp?.bundleIdentifier
-            // Path first, bundle-id fallback. `bundleURL` is normally
-            // populated for ordinary apps; the fallback covers edge cases
-            // where the running-app lookup gives us a bundle id but no
-            // URL (some system processes), in which case we ask
-            // LaunchServices to translate the bundle id to a path.
-            let bundlePath: String? =
-                runningApp?.bundleURL?.path
-                ?? bundleId.flatMap {
-                    NSWorkspace.shared.urlForApplication(
-                        withBundleIdentifier: $0
-                    )?.path
-                }
+        let appElement = AXUIElementCreateApplication(pid)
+        var focused: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            &focused
+        )
+        guard err == .success, let focused else { return nil }
+        // CFTypeRef → AXUIElement is a CoreFoundation downcast (no
+        // runtime check); the `as!` mirrors `WindowControl.readFrame`.
+        let window = focused as! AXUIElement
 
-            results.append(
-                DiscoveredWindow(
-                    id: windowId,
-                    title: title,
-                    ownerName: ownerName,
-                    ownerPid: pidValue,
-                    ownerBundleId: bundleId,
-                    ownerBundlePath: bundlePath,
-                    workspace: 0,
-                    bounds: bounds
-                )
-            )
+        guard let windowId = AXWindowFinder.cgWindowId(of: window) else {
+            return nil
         }
 
-        return results
+        // Title via AX. Unlike the old CGWindowList path, titlelessness
+        // here is not a permission-denied signal — accept "" if the read
+        // misses, since the id is what `WindowControl` actually matches
+        // on (the title is only a fallback for apps with no id bridge).
+        var titleValue: CFTypeRef?
+        let titleErr = AXUIElementCopyAttributeValue(
+            window,
+            kAXTitleAttribute as CFString,
+            &titleValue
+        )
+        let title: String =
+            (titleErr == .success ? (titleValue as? String) : nil) ?? ""
+
+        // Geometry via AX. Same `as!` pattern as `WindowControl.readFrame`:
+        // a malformed AXValue degrades to nil via `AXValueGetValue`,
+        // never traps.
+        var posValue: CFTypeRef?
+        let posErr = AXUIElementCopyAttributeValue(
+            window,
+            kAXPositionAttribute as CFString,
+            &posValue
+        )
+        var sizeValue: CFTypeRef?
+        let sizeErr = AXUIElementCopyAttributeValue(
+            window,
+            kAXSizeAttribute as CFString,
+            &sizeValue
+        )
+        guard posErr == .success, sizeErr == .success,
+            let posValue, let sizeValue
+        else {
+            return nil
+        }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
+            AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        else {
+            return nil
+        }
+        let bounds = CGRect(origin: origin, size: size)
+
+        // Owner metadata — bundle id (for the GNOME-parity `EntryRef`
+        // shape) and bundle path (for icon resolution). Both can be nil
+        // for system processes; we still return the window.
+        let bundleId = app.bundleIdentifier
+        let bundlePath: String? =
+            app.bundleURL?.path
+            ?? bundleId.flatMap {
+                NSWorkspace.shared.urlForApplication(
+                    withBundleIdentifier: $0
+                )?.path
+            }
+
+        return DiscoveredWindow(
+            id: windowId,
+            title: title,
+            ownerName: app.localizedName ?? "",
+            ownerPid: pid,
+            ownerBundleId: bundleId,
+            ownerBundlePath: bundlePath,
+            workspace: 0,
+            bounds: bounds
+        )
     }
 }

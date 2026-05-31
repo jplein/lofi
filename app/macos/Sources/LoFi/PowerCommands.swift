@@ -32,7 +32,7 @@
 //     through loginwindow (rather than `tell application "System Events"
 //     to ...`) is intentional: the System Events path requires the user
 //     to grant **Automation** TCC permission to LoFi, which is an extra
-//     prompt on top of Screen Recording + Accessibility. Direct Apple
+//     prompt on top of Accessibility. Direct Apple
 //     events to loginwindow don't go through that gate, so all three
 //     commands work on first use with no additional prompts. macOS still
 //     shows its own native "Are you sure?" dialog with the 60-second

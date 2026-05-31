@@ -27,15 +27,24 @@
 // staleness caveat: macOS *reuses* CGWindowIDs after a window closes, so
 // in principle a saved frame could outlive its window and later restore a
 // *different* window (that happened to get the same id) to the wrong
-// size. Three things keep that window of risk tiny:
+// size. Two things keep that window of risk tiny:
 //   1. save->consume lifecycle — `take` removes the entry on un-maximize,
 //      so a saved frame normally exists only between one maximize and the
 //      next un-maximize.
-//   2. startup `prune(liveWindowIds:)` — drops entries for ids not
-//      currently on screen, bounding accumulation from windows closed
-//      while still maximized.
-//   3. the worst case is a single benign wrong-size restore — no crash,
+//   2. The worst case is a single benign wrong-size restore — no crash,
 //      no data loss. Acceptable.
+//
+// An earlier implementation also called `prune(liveWindowIds:)` on every
+// summon, deriving the live id set from `CGWindowListCopyWindowInfo`.
+// That belonged to the CGWindowList era when LoFi held a Screen Recording
+// TCC grant for window-title visibility. Once we moved to AX-only
+// discovery (single frontmost window only — see `WindowDiscovery`), there
+// was no cheap way to enumerate every live window id without walking AX
+// across every running process, which we didn't want to do per-summon.
+// The save->consume lifecycle alone keeps accumulation bounded for normal
+// usage; a user who repeatedly maximizes and then closes windows without
+// un-maximizing would slowly grow the dict (one ~32-byte entry per such
+// orphan), but the practical ceiling is tiny.
 //
 // macOS-only by design
 // --------------------
@@ -101,19 +110,6 @@ final class SavedFrameStore {
             width: components[2],
             height: components[3]
         )
-    }
-
-    /// Drop saved entries whose window id is not in `liveWindowIds`. Called
-    /// once at startup with the current on-screen id set so frames for
-    /// windows closed (while still maximized) don't accumulate forever and
-    /// the CGWindowID-reuse risk window stays small.
-    func prune(liveWindowIds: Set<UInt64>) {
-        let live = Set(liveWindowIds.map(String.init))
-        var dict = rawDict()
-        let before = dict.count
-        dict = dict.filter { live.contains($0.key) }
-        guard dict.count != before else { return }
-        defaults.set(dict, forKey: Self.defaultsKey)
     }
 
     /// Read the backing dictionary, coercing a missing / wrong-typed value
