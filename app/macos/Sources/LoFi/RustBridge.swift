@@ -213,7 +213,7 @@ final class EntryList {
     /// `"lock_session"`) for the `Entry::PowerCommand` at the filtered `idx`.
     /// Returns `nil` for non-PowerCommand entries, out-of-bounds indices, or
     /// any other case (Rust returns null). Callers should gate on
-    /// `category(at:) == "PowerCommand"` before reading.
+    /// `category(at:) == "Power"` before reading.
     ///
     /// Like `commandId(at:)`, the Rust pointer is a process-lifetime
     /// `&'static CStr` and is never invalidated by a later mutation, but we
@@ -313,7 +313,7 @@ final class EntryList {
 
     /// Read the stable English category label at `idx` (one of
     /// `"Application"`, `"Window"`, `"Workspace"`, `"Command"`,
-    /// `"PowerCommand"`). Returns `nil` when the index is out of bounds.
+    /// `"Power"`). Returns `nil` when the index is out of bounds.
     /// Same copy-into-`String` borrow rules as `name(at:)`.
     func category(at idx: Int) -> String? {
         guard let cstr = lofi_entries_get_category(handle, UInt(idx)) else {

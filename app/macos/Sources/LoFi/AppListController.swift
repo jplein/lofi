@@ -274,7 +274,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             switch category {
             case "Command":
                 return commandSymbolName(for: entries.commandId(at: row) ?? "")
-            case "PowerCommand":
+            case "Power":
                 return powerCommandSymbolName(for: entries.powerCommandId(at: row) ?? "")
             default:
                 return nil
@@ -486,7 +486,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             }
         } else if category == "Command" {
             runCommand(row)
-        } else if category == "PowerCommand" {
+        } else if category == "Power" {
             if let id = entries.powerCommandId(at: row) {
                 _ = PowerCommands.activate(id: id)
             }

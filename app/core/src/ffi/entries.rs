@@ -69,8 +69,11 @@ const CATEGORY_WINDOW: &str = "Window";
 const CATEGORY_WORKSPACE: &str = "Workspace";
 /// Stable English category label for `EntryKind::Command`.
 const CATEGORY_COMMAND: &str = "Command";
-/// Stable English category label for `EntryKind::PowerCommand`.
-const CATEGORY_POWER_COMMAND: &str = "PowerCommand";
+/// Stable English category label for `EntryKind::PowerCommand`. The string
+/// is `"Power"` rather than `"PowerCommand"` to match the GNOME UI's
+/// `kind_to_str` mapping in `app/gnome/src/ui.rs` — both platforms now
+/// render the same label, with the FFI as the single source of truth.
+const CATEGORY_POWER_COMMAND: &str = "Power";
 /// Stable English category label for `EntryKind::WorkspaceCommand`. Present for
 /// exhaustiveness only — `WorkspaceCommand` is a GNOME-only entry kind that the
 /// macOS frontend never pushes into an `EntryList`, so this string is never
@@ -554,7 +557,7 @@ pub unsafe extern "C" fn lofi_entries_get_bundle_id(
 
 /// Return a borrowed pointer to the entry-at-`idx`'s stable English category
 /// label — one of `"Application"`, `"Window"`, `"Workspace"`, `"Command"`,
-/// `"PowerCommand"`. The UI displays these as-is; localization is a UI-layer
+/// `"Power"`. The UI displays these as-is; localization is a UI-layer
 /// concern.
 ///
 /// `idx` is the *filtered* index. Borrow lifetime: same as `get_name`.
