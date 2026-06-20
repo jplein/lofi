@@ -72,6 +72,34 @@ pub(crate) fn score(entry: &Entry, tokens: &[&str], matcher: &SkimMatcherV2) -> 
     Some(total)
 }
 
+/// Return `true` when EVERY token in `tokens` is a case-insensitive *word
+/// prefix* of the entry's haystack.
+///
+/// A token is a word prefix when it is a prefix of at least one of the
+/// whitespace-separated words of the (lowercased) haystack — built from the
+/// SAME `haystack()` used by `score`, so the two functions always agree on
+/// what text an entry is matched against. `"c"` and `"goo"` are word prefixes
+/// of `"Google Chrome"` (prefixes of `"chrome"` / `"google"`); `"hrome"`
+/// (mid-word) and `"gc"` (scattered) are not.
+///
+/// Multi-token follows the same intersection (AND) rule as `score`: the entry
+/// is a prefix match only when *every* token is a word prefix of *some* word
+/// (the words a given token matches need not be distinct). Empty `tokens` is
+/// vacuously true — `.all()` on an empty slice returns `true` — which is what
+/// makes the empty-query passthrough in `ranking::rank` keep MRU entries in
+/// pure recency order (they all land in the same prefix sub-bucket).
+///
+/// Case-insensitivity uses `to_lowercase()` (NOT `eq_ignore_ascii_case`) so
+/// non-ASCII names fold correctly.
+pub(crate) fn is_prefix_match(entry: &Entry, tokens: &[&str]) -> bool {
+    let hay = haystack(entry).to_lowercase();
+    let words: Vec<&str> = hay.split_whitespace().collect();
+    tokens.iter().all(|t| {
+        let tl = t.to_lowercase();
+        words.iter().any(|w| w.starts_with(&tl))
+    })
+}
+
 /// Fuzzy-filter `entries` by `query`. An empty or whitespace-only query is
 /// a passthrough that returns every entry in input order. Otherwise the
 /// query is tokenized on whitespace, every token must match the entry's
@@ -613,6 +641,94 @@ mod tests {
         assert!(
             command_kinds_toggle.contains(&CommandKind::ToggleFullscreen),
             "query \"toggle\" should match Command::ToggleFullscreen; got {command_kinds_toggle:?}"
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_word_prefix_matches() {
+        // A single token that is a prefix of one of the haystack words is a
+        // word-prefix match. "c" is a prefix of "Chrome"; "goo" is a prefix
+        // of "Google". Both must be true against "Google Chrome".
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            super::is_prefix_match(&entry, &["c"]),
+            "[\"c\"] should be a word-prefix match against \"Google Chrome\" (prefix of \"Chrome\")"
+        );
+        assert!(
+            super::is_prefix_match(&entry, &["goo"]),
+            "[\"goo\"] should be a word-prefix match against \"Google Chrome\" (prefix of \"Google\")"
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_mid_word_does_not_match() {
+        // A token that appears mid-word but is not a prefix of any word is
+        // NOT a prefix match. "hrome" is an infix of "Chrome", not a prefix.
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            !super::is_prefix_match(&entry, &["hrome"]),
+            "[\"hrome\"] should NOT be a word-prefix match against \"Google Chrome\" — it is mid-word, not a word prefix"
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_scattered_does_not_match() {
+        // A scattered-subsequence token ("gc" = Google + Chrome initials) is
+        // not a prefix of any single word, so it must NOT be a prefix match.
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            !super::is_prefix_match(&entry, &["gc"]),
+            "[\"gc\"] should NOT be a word-prefix match against \"Google Chrome\" — it is a scattered subsequence, not a word prefix"
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_empty_tokens_is_vacuously_true() {
+        // No tokens => the "every token is a word-prefix" rule is vacuously
+        // satisfied. This is what makes an empty query a passthrough.
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            super::is_prefix_match(&entry, &[]),
+            "empty tokens should be a vacuous prefix match (no token can fail)"
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_is_case_insensitive() {
+        // Matching is case-insensitive in both directions: an uppercase token
+        // matches a mixed-case word and vice versa. "C" and "c" both prefix
+        // "Chrome".
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            super::is_prefix_match(&entry, &["C"]),
+            "[\"C\"] should be a case-insensitive word-prefix match against \"Google Chrome\""
+        );
+        assert!(
+            super::is_prefix_match(&entry, &["c"]),
+            "[\"c\"] should be a case-insensitive word-prefix match against \"Google Chrome\""
+        );
+    }
+
+    #[test]
+    fn is_prefix_match_multi_token_requires_all_word_prefixes() {
+        // Multi-token: a prefix match only if EVERY token is a word-prefix of
+        // some haystack word. ["go","ch"] both prefix words of "Google
+        // Chrome" => true. ["go","xy"] has "xy", which prefixes no word =>
+        // false.
+        let entry = app("Google Chrome", "com.google.Chrome.desktop");
+
+        assert!(
+            super::is_prefix_match(&entry, &["go", "ch"]),
+            "[\"go\",\"ch\"] should be a prefix match — both prefix words of \"Google Chrome\""
+        );
+        assert!(
+            !super::is_prefix_match(&entry, &["go", "xy"]),
+            "[\"go\",\"xy\"] should NOT be a prefix match — \"xy\" prefixes no word of \"Google Chrome\""
         );
     }
 

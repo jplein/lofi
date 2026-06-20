@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
-use lofi_core::{Entry, EntryKind, EntryRef, MruStore, search};
+use lofi_core::{Entry, EntryKind, EntryRef, MruStore};
 
 use crate::launch;
 
@@ -375,15 +375,13 @@ fn selected_entry(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>) -> Opti
     s.entries.get(entry_idx).cloned()
 }
 
-/// Rebuild the list rows from `query`. Empty/whitespace queries pass through
-/// the full set; otherwise we run the fuzzy matcher (score-sorted) and translate
-/// result refs back into indices via pointer equality against the owning vec.
-/// The resulting index list is then stably sorted by MRU rank, which yields the
-/// two-tier order: entries in the persisted recency index rise to the top in
-/// most-recent-first order (their score order is overwritten), while entries
-/// absent from the index keep the matcher's descending-score order at the
-/// bottom. Stable selection during typing is the point for the MRU-known rows:
-/// see the MRU plan for context.
+/// Rebuild the list rows from `query`. Ranking is delegated entirely to
+/// `lofi_core::rank`: filtering (intersection semantics), the two-tier
+/// MRU/score order, and the in-MRU prefix sub-ordering all live in core, so
+/// GNOME and macOS share one implementation. An empty/whitespace query is a
+/// passthrough in MRU order (recent first, then never-used in input order); a
+/// non-empty query that matches nothing yields an empty index list, which we
+/// render as the single non-selectable "No matches" row.
 fn populate_list(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>, query: &str) {
     while let Some(child) = list_box.first_child() {
         list_box.remove(&child);
@@ -391,35 +389,7 @@ fn populate_list(list_box: &gtk::ListBox, state: &Rc<RefCell<UiState>>, query: &
 
     let new_visible: Vec<usize> = {
         let s = state.borrow();
-        let mut indices: Vec<usize> = if query.trim().is_empty() {
-            (0..s.entries.len()).collect()
-        } else {
-            let matched = search(&s.entries, query);
-            let mut idxs = Vec::with_capacity(matched.len());
-            for m in matched {
-                for (i, e) in s.entries.iter().enumerate() {
-                    if std::ptr::eq(e, m) {
-                        idxs.push(i);
-                        break;
-                    }
-                }
-            }
-            idxs
-        };
-        // Stable sort: in-MRU entries rise in MRU order; non-MRU entries (rank
-        // usize::MAX) keep their relative input order at the bottom.
-        indices.sort_by_key(|i| {
-            s.entries
-                .get(*i)
-                .map(|e| {
-                    s.mru_position
-                        .get(&e.reference())
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                })
-                .unwrap_or(usize::MAX)
-        });
-        indices
+        lofi_core::rank(&s.entries, query, &s.mru_position)
     };
 
     if new_visible.is_empty() && !query.trim().is_empty() {

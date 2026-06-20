@@ -271,10 +271,10 @@ fn mru_bump_then_apply_promotes_entry() {
 
 #[test]
 fn apply_mru_with_empty_store_preserves_input_order() {
-    // Empty MRU file on first run: every entry has rank `usize::MAX`, so
-    // the stable-sort by (rank, original_position) leaves the input order
-    // untouched. Documents the "no special case needed" point from the
-    // plan's risks section.
+    // Empty MRU file on first run: the rank map built by `apply_mru` is
+    // empty, so every entry lands in `ranking::rank`'s never-used tier and,
+    // with an empty query, keeps its input order. Documents the "no special
+    // case needed" point from the plan's risks section.
     const EXPECTED: [&str; 3] = ["Alpha", "Beta", "Chrome"];
     let (_dir, store) = open_temp_store();
 
@@ -429,7 +429,7 @@ fn apply_mru_invalidates_caches() {
 #[test]
 fn apply_mru_with_query_active_keeps_filter() {
     // With a query that narrows to two entries, apply_mru must recompute
-    // the filter against the freshly reordered underlying vec so the
+    // the filter (now via `ranking::rank` against the new rank map) so the
     // visible count stays at 2. The two Firefox variants both contain the
     // "fire" subsequence; Chrome does not.
     let (_dir, store) = open_temp_store();
@@ -588,6 +588,82 @@ fn mru_bump_out_of_bounds_returns_false() {
                 "entry order at idx {i} must be unchanged after OOB bump"
             );
         }
+
+        lofi_entries_free(list);
+        lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn apply_mru_then_query_ranks_prefix_within_mru() {
+    // End-to-end check of the centralized ranking through the FFI: with all
+    // three entries in the MRU tier, a query reorders WITHIN that tier by the
+    // prefix sub-bucket. Push order is Lock, Chrome, Calc; we bump them so the
+    // recency is Lock most-recent (Lock > Chrome > Calc) by bumping in the
+    // reverse order Calc, Chrome, Lock. Under query "c", all three contain
+    // 'c' (so the filter keeps all three), but Chrome and Calc are word-prefix
+    // matches ("c" prefixes "Chrome"/"Calc") and sort ahead of Lock (a
+    // non-prefix match) even though Lock is the most-recently-used.
+    //
+    // Sleeps between bumps disambiguate the wall-clock-millisecond timestamps
+    // the MRU store records, mirroring the `BUMP_GAP` pattern in
+    // `src/mru.rs`'s tests.
+    const BUMP_GAP: std::time::Duration = std::time::Duration::from_millis(2);
+    let (_dir, store) = open_temp_store();
+
+    // SAFETY: standard FFI lifecycle: new -> push -> bump -> apply -> read
+    // -> free for both the list and the store.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_app(list, "Lock", "lock.desktop", None));
+        assert!(push_app(list, "Google Chrome", "com.google.Chrome", None));
+        assert!(push_app(list, "Calc", "calc.desktop", None));
+
+        // No query is set yet, so filtered indices map 1:1 to push order:
+        // 0 = Lock, 1 = Google Chrome, 2 = Calc. Bump Calc, then Chrome, then
+        // Lock so the resulting recency is Lock (0) > Chrome (1) > Calc (2).
+        assert!(
+            lofi_mru_bump_entry(store, list, 2),
+            "bumping idx 2 (Calc) first should succeed"
+        );
+        std::thread::sleep(BUMP_GAP);
+        assert!(
+            lofi_mru_bump_entry(store, list, 1),
+            "bumping idx 1 (Google Chrome) second should succeed"
+        );
+        std::thread::sleep(BUMP_GAP);
+        assert!(
+            lofi_mru_bump_entry(store, list, 0),
+            "bumping idx 0 (Lock) last should succeed"
+        );
+
+        assert!(
+            lofi_entries_apply_mru(list, store),
+            "apply_mru should succeed"
+        );
+
+        assert!(set_query(list, "c"), "set_query(\"c\") should succeed");
+
+        assert_eq!(
+            lofi_entries_len(list),
+            3,
+            "all three entries contain 'c' and should survive the \"c\" filter"
+        );
+        assert_eq!(
+            name_at(list, 0),
+            "Google Chrome",
+            "the most-recent prefix match (Google Chrome) should be at filtered idx 0"
+        );
+        assert_eq!(
+            name_at(list, 1),
+            "Calc",
+            "the next prefix match by recency (Calc) should be at filtered idx 1"
+        );
+        assert_eq!(
+            name_at(list, 2),
+            "Lock",
+            "the non-prefix MRU match (Lock) should fall to filtered idx 2 despite being most-recent"
+        );
 
         lofi_entries_free(list);
         lofi_mru_free(store);

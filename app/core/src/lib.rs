@@ -3,11 +3,13 @@ pub mod commands;
 pub mod ffi;
 pub mod matcher;
 pub mod mru;
+mod ranking;
 pub use commands::{build_workspace_commands, compute_geometry};
 #[cfg(feature = "ffi")]
 pub use ffi::*;
 pub use matcher::search;
 pub use mru::{MruError, MruStore};
+pub use ranking::{mru_rank_map, rank};
 
 use serde::{Deserialize, Serialize};
 

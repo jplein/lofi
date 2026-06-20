@@ -9,9 +9,9 @@
 //! - any `lofi_entries_push_*` call,
 //! - `lofi_entries_set_query` (it can shuffle the filter and invalidates the
 //!   meaning of every previously-handed-out pointer),
-//! - `lofi_entries_apply_mru` (reorders the underlying vector in place and
-//!   clears every cache so any previously-handed-out pointer is invalid),
-//!   and
+//! - `lofi_entries_apply_mru` (rebuilds the MRU rank map and recomputes the
+//!   filter; the underlying vector is NOT reordered, but it clears every cache
+//!   so any previously-handed-out pointer is invalid), and
 //! - `lofi_entries_free`.
 //!
 //! Callers (Swift, in particular) must copy the bytes into their own storage
@@ -37,12 +37,16 @@
 //!
 //! ## Filtering
 //!
-//! `query` is the active search string. `filter` is `None` when the query is
-//! empty (or whitespace-only) — that's the passthrough case. When non-empty,
-//! `filter` is `Some(indices)` where each index points into `entries`. The
-//! filter is recomputed on every mutation that could change membership: a
-//! `push_*` (the new entry may or may not match the active query) and a
-//! `set_query` (the predicate itself changed).
+//! `query` is the active search string. `filter` is `None` only on a fresh or
+//! cleared list (no recompute has run yet). After any mutation it is
+//! `Some(indices)` produced by `ranking::rank` — each index points into
+//! `entries`, in display order. The passthrough (empty / whitespace-only
+//! query) now yields `Some(all-indices-in-rank-order)` rather than `None`:
+//! `ranking::rank` lists MRU-known entries by recency, then never-used entries
+//! in input order. The filter is recomputed on every mutation that could
+//! change membership or order: a `push_*` (the new entry may or may not match
+//! the active query), a `set_query` (the predicate changed), and
+//! `apply_mru` (the recency ranking changed).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -50,10 +54,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use fuzzy_matcher::skim::SkimMatcherV2;
-
 use crate::compute_geometry;
-use crate::matcher;
 use crate::mru::MruStore;
 use crate::{
     Application, Command, CommandKind, Entry, EntryKind, EntryRef, PowerCommand, PowerCommandKind,
@@ -90,21 +91,19 @@ pub struct EntryList {
     /// Stored as an owned `String` so the FFI's borrowed `*const c_char` does
     /// not have to outlive the call.
     pub(super) query: String,
-    /// `None` when `query` is the passthrough case (empty / whitespace-only);
-    /// `Some(indices)` when a real filter is active. Each entry indexes into
-    /// `entries`. Built by `recompute_filter`.
+    /// `None` only on a fresh or cleared list (before any recompute). After
+    /// any mutation it is `Some(indices)` — produced by `ranking::rank`, each
+    /// index points into `entries` in display order, including the passthrough
+    /// case (empty / whitespace-only query yields all indices in rank order).
+    /// Built by `recompute_filter`.
     pub(super) filter: Option<Vec<usize>>,
-    /// Number of entries known to the MRU store, set by `apply_mru`.
-    /// `apply_mru` sorts `entries` so the first `mru_count` slots are
-    /// MRU-known (in recency order); the remaining slots are entries
-    /// the user has never launched, in push order. The filter uses
-    /// this boundary to enforce "MRU always wins": matching entries
-    /// at idx < mru_count stay in MRU order, and matching entries at
-    /// idx >= mru_count are sorted by descending fuzzy-match score
-    /// so the highest-quality match in the never-used tier comes
-    /// first. 0 before `apply_mru` ever runs (no MRU known →
-    /// everything sorts by score).
-    pub(super) mru_count: usize,
+    /// Recency-rank map keyed by `EntryRef`, set by `apply_mru` (rank 0 = most
+    /// recent). `apply_mru` no longer reorders the `entries` vec; instead it
+    /// rebuilds this map and lets `ranking::rank` apply the two-tier order
+    /// (MRU-known entries by recency, then never-used entries by score). An
+    /// empty map (the initial / cleared state, before `apply_mru` ever runs)
+    /// means no entry is MRU-known, so everything sorts by score.
+    pub(super) mru_ranks: HashMap<EntryRef, usize>,
     /// Lazily-built C strings backing the pointers returned by
     /// `lofi_entries_get_name`. Indexed parallel to `entries` (NOT to
     /// `filter`). Cleared on every mutation.
@@ -128,7 +127,7 @@ impl EntryList {
             entries: Vec::new(),
             query: String::new(),
             filter: None,
-            mru_count: 0,
+            mru_ranks: HashMap::new(),
             name_cache: RefCell::new(Vec::new()),
             bundle_id_cache: RefCell::new(Vec::new()),
             category_cache: RefCell::new(Vec::new()),
@@ -172,56 +171,22 @@ impl EntryList {
         self.resolved(idx).and_then(|i| self.entries.get(i))
     }
 
-    /// Rebuild `filter` from `entries` + `query`. Empty / whitespace-only
-    /// query becomes the passthrough case (`filter = None`). Non-empty query
-    /// is tokenized on whitespace; every entry whose haystack matches every
-    /// token (intersection semantics) ends up in the filter index vector.
+    /// Rebuild `filter` from `entries`, `query`, and `mru_ranks` by delegating
+    /// to `crate::ranking::rank` — the single ranking implementation shared
+    /// with the GNOME frontend. `rank` handles filtering (intersection
+    /// semantics), the two-tier MRU/score order, the in-MRU prefix
+    /// sub-ordering, and the empty-query passthrough.
     ///
-    /// Ordering rule — *MRU always wins, then score*:
-    ///   - Matching entries with underlying idx `< mru_count` keep their
-    ///     existing entries-vec order. That order was set by `apply_mru`
-    ///     and reflects recency (rank 0 first), so the user's most-used
-    ///     hits stay at the top of the result set regardless of how good
-    ///     the fuzzy match against their name was.
-    ///   - Matching entries with idx `>= mru_count` (apps the user has
-    ///     never launched) are sorted by descending fuzzy-match score
-    ///     from `matcher::score`. This is what keeps `"Visual Studio
-    ///     Code"` above `"Acrobat"` when the user types `"Code"`:
-    ///     `"Visual Studio Code"` is a near-perfect substring match
-    ///     while `"Acrobat"` only matches via scattered letters from
-    ///     `"com.adobe.Acrobat"`.
+    /// After any recompute `filter` is always `Some(indices)` (including the
+    /// passthrough case, which is now `Some(all-indices-in-rank-order)` rather
+    /// than `None`). `filter` is `None` only on a fresh or cleared list, before
+    /// any recompute has run.
     pub(super) fn recompute_filter(&mut self) {
-        if self.query.trim().is_empty() {
-            self.filter = None;
-            return;
-        }
-        let tokens: Vec<&str> = self.query.split_whitespace().collect();
-        let matcher = SkimMatcherV2::default().ignore_case();
-
-        let mut mru_part: Vec<usize> = Vec::new();
-        let mut scored_part: Vec<(i64, usize)> = Vec::new();
-        for (i, e) in self.entries.iter().enumerate() {
-            let Some(score) = matcher::score(e, &tokens, &matcher) else {
-                continue;
-            };
-            if i < self.mru_count {
-                // MRU-known: position in `entries` already encodes
-                // recency, so just append in iteration order.
-                mru_part.push(i);
-            } else {
-                scored_part.push((score, i));
-            }
-        }
-        // Stable sort descending by score; equal-score ties keep push
-        // order (which mirrors GNOME's `.desktop` enumeration or
-        // macOS's `AppDiscovery` order). `sort_by_key` is stable, so the
-        // tie behaviour is unchanged from the previous `sort_by`.
-        scored_part.sort_by_key(|pair| std::cmp::Reverse(pair.0));
-
-        let mut indices = Vec::with_capacity(mru_part.len() + scored_part.len());
-        indices.extend(mru_part);
-        indices.extend(scored_part.iter().map(|(_, i)| *i));
-        self.filter = Some(indices);
+        self.filter = Some(crate::ranking::rank(
+            &self.entries,
+            &self.query,
+            &self.mru_ranks,
+        ));
     }
 
     /// Clear every per-accessor cache. Called from every mutation so a stale
@@ -246,7 +211,9 @@ impl EntryList {
         self.entries.clear();
         self.query.clear();
         self.filter = None;
-        self.mru_count = 0;
+        // Drop all recency ranks: a cleared list has no MRU-known entries until
+        // `apply_mru` runs again.
+        self.mru_ranks.clear();
         self.clear_caches();
     }
 }
@@ -660,23 +627,23 @@ pub unsafe extern "C" fn lofi_entries_get_icon(
     }
 }
 
-/// Reorder the underlying entries in MRU order, most-recent-first. Reads
-/// every row from `store` (via `MruStore::read_all`), builds a rank map
-/// keyed by `EntryRef` (rank 0 = most recent), and stable-sorts the list
-/// in place by `(rank, original_position)`. Entries with no MRU row fall
-/// to the bottom in their original push order (the stable sort preserves
-/// relative order for equal keys; we use `usize::MAX` for the unknown
-/// rank).
+/// Apply the persisted MRU recency to ranking. Reads every row from `store`
+/// (via `MruStore::read_all`), builds a rank map keyed by `EntryRef` (rank 0 =
+/// most recent) via `ranking::mru_rank_map`, and stores it on the list. The
+/// underlying `entries` vector is NOT reordered — `ranking::rank` (invoked by
+/// `recompute_filter`) reads the rank map to produce the two-tier display
+/// order on demand, which keeps the per-accessor caches (keyed on the
+/// underlying index) stable across an `apply_mru`.
 ///
 /// Returns `true` on success. Returns `false` when:
 /// - `list` or `store` is null,
 /// - or `MruStore::read_all` fails. On read failure the list is left
-///   untouched (no partial reordering) and the launcher proceeds with
-///   degraded behavior.
+///   untouched (no rank map change) and the launcher proceeds with degraded
+///   behavior.
 ///
-/// Like every other mutating call, this invalidates every pointer
-/// previously returned by `lofi_entries_get_*`. The filter is recomputed
-/// against the freshly-reordered vec so an active query still works.
+/// Like every other mutating call, this invalidates every pointer previously
+/// returned by `lofi_entries_get_*`: it clears every cache and recomputes the
+/// filter against the new rank map so an active query still works.
 ///
 /// # Safety
 ///
@@ -701,35 +668,10 @@ pub unsafe extern "C" fn lofi_entries_apply_mru(
             return false;
         }
     };
-    let ranks: HashMap<EntryRef, usize> = recent
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| (r, i))
-        .collect();
 
     // SAFETY: non-null `list` per the precondition.
     let list_ref = unsafe { &mut *list };
-
-    // Stable-sort by (rank, original_position). `Vec::sort_by_key` is
-    // stable, so equal keys keep their relative order. For entries with
-    // no MRU row we use `usize::MAX`, which sinks them below all known
-    // entries while preserving their push order.
-    let mut paired: Vec<(usize, Entry)> = list_ref
-        .entries
-        .drain(..)
-        .map(|e| {
-            let rank = ranks.get(&e.reference()).copied().unwrap_or(usize::MAX);
-            (rank, e)
-        })
-        .collect();
-    paired.sort_by_key(|(rank, _)| *rank);
-    // Count how many entries actually got a finite MRU rank. After the
-    // sort those entries sit in the leading positions of `entries`; the
-    // boundary lets `recompute_filter` keep MRU-known matches above
-    // score-ranked ones. We count *before* dropping the rank tags.
-    list_ref.mru_count = paired.iter().filter(|(r, _)| *r != usize::MAX).count();
-    list_ref.entries = paired.into_iter().map(|(_, e)| e).collect();
-
+    list_ref.mru_ranks = crate::ranking::mru_rank_map(&recent);
     list_ref.clear_caches();
     list_ref.recompute_filter();
     true
