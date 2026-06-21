@@ -9,14 +9,14 @@
 //
 // Daemon lifecycle
 // ----------------
-// `applicationDidFinishLaunching` does the *expensive but
-// summon-stable* setup once: enumerate `.app` bundles, open the
-// MRU SQLite store, build the panel + list controller. It does
-// **not** show the panel — the user has to summon. The cheap
-// per-summon work (gather command target, push entries, apply MRU,
-// reset UI state) happens in `summonPanel` so the command target
-// always reflects the foreground window at summon time, not at
-// process-start time.
+// `applicationDidFinishLaunching` does the *summon-stable* setup
+// once: open the MRU SQLite store, build the panel + list
+// controller, register the hotkey. It does **not** show the panel —
+// the user has to summon. The per-summon work (enumerate `.app`
+// bundles, gather command target, push entries, apply MRU, reset UI
+// state) happens in `summonPanel` so both the app list and the
+// command target reflect the system state at summon time, not at
+// process-start time — newly installed apps appear without a relaunch.
 //
 // `applicationShouldHandleReopen` is the Launch Services hook
 // `:activate` (and a Dock click on a regular-app LoFi build) uses to
@@ -71,13 +71,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // long-running process; UserDefaults is the on-disk backing
     // store so it also survives a quit/relaunch.
     private let savedFrameStore = SavedFrameStore()
-    // Cached at launch and re-pushed on each summon. App enumeration
-    // (file-system walk + bundle reads) costs ~50ms on a typical Mac
-    // — fine for a one-time launch cost, too slow to redo on every
-    // Alt+Space press. Apps don't change frequently within a session;
-    // a user installing a new app mid-session will need to quit and
-    // relaunch LoFi to see it. Acceptable trade for snappy summons.
-    private var cachedApps: [DiscoveredApp] = []
     // Globally-frontmost non-LoFi window, captured fresh by every
     // `summonPanel`. `nil` between summons / when there's no target.
     // Pushed into the list controller before the panel is shown.
@@ -102,10 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
-
-        // Cache app discovery once. See `cachedApps` comment for the
-        // refresh tradeoff.
-        cachedApps = AppDiscovery.discover()
 
         // Open the persistent MRU store. Re-applied on every summon
         // (`applyMru` is cheap — just sorts the in-memory entries
@@ -237,12 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Re-push the cached app set. Apps don't change between
-        // summons in the same session, but the Rust list does (we
-        // just cleared it), so we push from the cache. `isRunning`
-        // is recomputed every summon from the freshly-gathered
-        // window list above.
-        for app in cachedApps {
+        // Re-discover the installed apps on every summon so apps
+        // installed (or removed) while LoFi is resident show up without
+        // a relaunch. The file-system walk + bundle reads cost ~50ms on
+        // a typical Mac — small enough to absorb on each Alt+Space press,
+        // and it keeps the list always-correct rather than frozen at
+        // launch. `isRunning` is recomputed every summon from the
+        // freshly-gathered window list above.
+        for app in AppDiscovery.discover() {
             _ = entries.pushApplication(
                 name: app.name,
                 bundleId: app.bundleId,
