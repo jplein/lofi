@@ -22,10 +22,12 @@
 //
 // Each row renders `[icon] name … [category]`:
 //   - `NSImageView` (24×24), icon resolved via
-//     `NSWorkspace.shared.icon(forFile: bundlePath)` where `bundlePath`
+//     `IconCache.shared.icon(forFile: bundlePath)` where `bundlePath`
 //     comes from `entries.icon(at:)`. macOS pushes the `.app` bundle
-//     path into the Rust core's icon field; `NSWorkspace` then handles
-//     the actual icon read.
+//     path into the Rust core's icon field; `IconCache` memoizes the
+//     `NSWorkspace.shared.icon(forFile:)` result for the process
+//     lifetime so repeated summons don't re-hit IconServices per row
+//     (see `IconCache.swift`).
 //   - Name `NSTextField`, label color, system font.
 //   - Flexible spacer (provided by the stack view's distribution +
 //     hugging-priority math).
@@ -618,7 +620,8 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
 /// visually aligned.
 private final class EntryRowView: NSView {
     /// `iconPath` (the app/window bundle path) takes precedence: if set,
-    /// the icon is read via `NSWorkspace.shared.icon(forFile:)`.
+    /// the icon is resolved via `IconCache.shared.icon(forFile:)` — a
+    /// process-lifetime memo over `NSWorkspace.shared.icon(forFile:)`.
     /// `symbolName` is the SF Symbol fallback for command rows, which have
     /// no bundle icon — rendered as a template glyph tinted like the dimmed
     /// category labels. Both nil ⇒ an empty (but still 24×24) icon box so
@@ -640,7 +643,7 @@ private final class EntryRowView: NSView {
         let imageView = NSImageView()
         imageView.imageScaling = .scaleProportionallyDown
         if let path = iconPath {
-            imageView.image = NSWorkspace.shared.icon(forFile: path)
+            imageView.image = IconCache.shared.icon(forFile: path)
         } else if let symbolName = symbolName {
             imageView.image = NSImage(
                 systemSymbolName: symbolName,
