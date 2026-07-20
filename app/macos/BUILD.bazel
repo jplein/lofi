@@ -15,6 +15,7 @@
 load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
 load("@build_bazel_rules_apple//apple:macos.bzl", "macos_application")
 load("@rules_xcodeproj//xcodeproj:defs.bzl", "xcodeproj")
+load(":bazel/opt.bzl", "optimized")
 
 swift_library(
     name = "LoFiLib",
@@ -59,14 +60,23 @@ sh_binary(
     srcs = ["bazel/activate.sh"],
 )
 
+# The `:LoFi` bundle rebuilt with `--compilation_mode=opt`. `:install`
+# writes the daemon that runs at login, so it must not ship Bazel's
+# default (unoptimized) fastbuild. See `bazel/opt.bzl` for why this is a
+# transition rather than a `--config=release` in `.bazelrc`.
+optimized(
+    name = "LoFi_opt",
+    srcs = [":LoFi"],
+)
+
 # Install LoFi.app into ~/Applications and register a per-user
 # LaunchAgent so the daemon starts at login. Idempotent — re-running
-# replaces a previous install. Needs the bundle in its runfiles
-# (same dep as `:launch`).
+# replaces a previous install. Needs the bundle in its runfiles; unlike
+# `:launch` it takes the opt-mode build.
 sh_binary(
     name = "install",
     srcs = ["bazel/install.sh"],
-    data = [":LoFi"],
+    data = [":LoFi_opt"],
 )
 
 # swift-format lint over the entire Sources/ tree, gated through

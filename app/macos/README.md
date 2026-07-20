@@ -40,6 +40,7 @@ bazel/
   close.sh              quit any running instance (`:close`)
   activate.sh           re-open event for a running instance (`:activate`)
   install.sh            ~/Applications + LaunchAgent setup (`:install`)
+  opt.bzl               `optimized` wrapper rule — rebuilds a target at `-c opt`
 Sources/LoFi/
   main.swift            NSApplication boot
   AppDelegate.swift     gather apps, push into Rust, show panel
@@ -68,12 +69,14 @@ bazelisk build //app/macos:LoFi       # produce bazel-bin/app/macos/LoFi.zip
 bazelisk run   //app/macos:launch     # quit any running instance, unzip + `open` the freshly-built bundle
 bazelisk run   //app/macos:close      # quit any running instance (idempotent)
 bazelisk run   //app/macos:activate   # send a re-open event to the running instance (summons the panel); no-op otherwise
-bazelisk run   //app/macos:install    # install to ~/Applications + register a LaunchAgent so LoFi starts at login
+bazelisk run   //app/macos:install    # build optimized, install to ~/Applications + register a LaunchAgent so LoFi starts at login
 bazelisk test  //app/...              # full macOS check matrix: Rust tests + clippy + rustfmt + Swift lint
 bazelisk run   //app/macos:xcodeproj  # regenerate app/macos/LoFi.xcodeproj
 ```
 
 `:launch` is the dev-cycle target — every invocation guarantees you are interacting with the binary Bazel just built, not a stale background process. `:close` is the idempotent shutdown. `:activate` is the production way to summon the panel — it sends Launch Services a re-open event that `AppDelegate.applicationShouldHandleReopen` translates into a `summonPanel` call. `:install` is the production setup path: it writes `LoFi.app` to `~/Applications` and a per-user LaunchAgent plist to `~/Library/LaunchAgents/dev.jplein.lofi.plist`, then `launchctl bootstrap`s the agent so the daemon starts immediately and resumes at next login. All four quit-paths use a graceful AppleScript quit first and SIGTERM as a fallback, so persistent stores (`mru.sqlite`, `SavedFrameStore`) get to flush.
+
+**`:install` builds at `-c opt`; every other target builds at Bazel's default `fastbuild`.** The bundle `:install` writes is the daemon that runs at login — potentially for weeks — so it must not be the unoptimized default build. `:install` therefore depends on `:LoFi_opt`, an `optimized(...)` wrapper (`bazel/opt.bzl`) whose outgoing transition flips `--compilation_mode` to `opt` for the whole subgraph, Rust staticlib included. The alternative, a `build:release -c opt` line in `.bazelrc`, was rejected because it stays opt-in: forgetting `--config=release` would silently install a debug build with no signal. A transition makes the guarantee a property of the target rather than of how it was invoked. `:launch` deliberately keeps the default config — it is the dev cycle, where compile time beats run time, and sharing the default config lets it reuse the action cache of a bare `bazelisk build //...`. The consequence is that `:launch` and `:install` do not share build artifacts, so the first `:install` after touching source pays a full optimized rebuild.
 
 The LaunchAgent uses `KeepAlive = { SuccessfulExit = false }` — launchd restarts LoFi if it crashes (non-zero exit), but Cmd-Q / `:close` quits cleanly and stays quit until next login. To re-launch a stopped-but-installed daemon mid-session: `launchctl kickstart gui/$UID/dev.jplein.lofi`. To uninstall: `launchctl bootout gui/$UID/dev.jplein.lofi && rm -rf ~/Applications/LoFi.app ~/Library/LaunchAgents/dev.jplein.lofi.plist` (no dedicated `:uninstall` target — that's a one-liner).
 
