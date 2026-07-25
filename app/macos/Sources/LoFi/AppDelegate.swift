@@ -96,6 +96,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
 
+        // Bound every AX cross-process message process-wide so no
+        // unresponsive foreground app can hang a summon for the ~6s AX
+        // default. The command-target discovery (`WindowDiscovery`) additionally
+        // retries transient `.cannotComplete` failures — see README gotcha 33.
+        WindowDiscovery.installMessagingTimeout()
+
         // Open the persistent MRU store. Re-applied on every summon
         // (`applyMru` is cheap — just sorts the in-memory entries
         // vec by the SQLite-backed rank).

@@ -124,6 +124,14 @@ enum AXWindowFinder {
     /// windows).
     static func windowsForApp(pid: pid_t) -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)
+        // Bound this element's messages (README gotcha 33). The wakeup write
+        // + `kAXWindowsAttribute` read below are the most likely AX stall
+        // point (a busy Gecko/Chromium app under load), and this helper is on
+        // the discovery hot path; without a timeout a wedged app could block
+        // a summon for the AX default (~6s). Redundant with the process-wide
+        // default (`WindowDiscovery.installMessagingTimeout`) but explicit and
+        // local. Benefits `WindowActivation.raise` / command dispatch too.
+        _ = AXUIElementSetMessagingTimeout(app, WindowDiscovery.messagingTimeoutSeconds)
         // Best-effort wakeup; undeclared attribute, hence the bare string.
         _ = AXUIElementSetAttributeValue(
             app,

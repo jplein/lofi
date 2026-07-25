@@ -29,6 +29,18 @@
 
 import AppKit
 import ApplicationServices
+import os
+
+// `os.Logger`, not `NSLog`: Tahoe redacts every NSLog message body to
+// `<private>` in the unified log, and an `LSUIElement` daemon launched via
+// `open` / launchd has no stdout to fall back to (README gotcha 25). The
+// failure call sites below log at `.error` on purpose — `.debug`/`.info`
+// aren't persisted at the default level, and the whole reason this logging
+// exists is post-hoc diagnosis of the intermittent "window-action command
+// rows missing under load" bug on a machine we can't attach a debugger to.
+// Read it back with:
+//   log show --predicate 'subsystem == "dev.jplein.lofi"' --info --last 15m
+private let log = Logger(subsystem: "dev.jplein.lofi", category: "window-discovery")
 
 /// One on-screen window's metadata, sufficient to populate a
 /// `WindowCommands.CommandTarget` and later drive AX from
@@ -72,30 +84,109 @@ enum WindowDiscovery {
     /// frontmost process (e.g. a second summon without a prior dismiss).
     private static let lofiBundleId = "dev.jplein.lofi"
 
+    // Retry policy for the AX discovery chain (README gotcha 33). Every
+    // cross-process AX read below has to be serviced by the *target* app's
+    // main run loop. On a slow / loaded machine — background security
+    // scanners stealing CPU, a busy foreground app not pumping its run loop
+    // promptly — any single read can return `.cannotComplete`, the AX "the
+    // other process didn't answer in time" error. A one-shot chain then
+    // collapses to nil, and because `AppDelegate.pushCommands` bails on a nil
+    // target, EVERY window-action command row (Toggle maximize included)
+    // silently vanishes for that summon. Retrying the whole chain turns a
+    // transient miss into a brief extra hop instead of a dropped command set.
+    // Only `.cannotComplete`-class failures retry; a settled "no focused
+    // window" answer returns immediately (a retry can't change it).
+    private static let maxAttempts = 3
+    // Backoff between attempts. Short because this runs synchronously on the
+    // main thread during a summon (the panel isn't shown until it returns);
+    // with the per-message timeout below, the rare all-fail path is bounded
+    // at roughly `maxAttempts × (messagingTimeout + backoff)` — sub-second.
+    private static let retryBackoffMicros: useconds_t = 60_000
+
+    /// Per-message AX timeout, applied process-wide by
+    /// `installMessagingTimeout()` and again on the discovery hot-path
+    /// elements. Without it a wedged foreground app could block a summon for
+    /// the AX *default* (~6s). 250ms is far above normal AX latency
+    /// (sub-millisecond) yet short enough to fail fast and hand off to the
+    /// retry loop. Referenced from `AXWindowFinder.windowsForApp` too.
+    static let messagingTimeoutSeconds: Float = 0.25
+
+    /// Install a process-global AX messaging timeout so no AX call can hang
+    /// the launcher for the AX default. Passing the system-wide element sets
+    /// the default for every element messaged from this process (Apple:
+    /// passing the system-wide object "sets the timeout globally for this
+    /// process"). Call once at launch, before the first summon.
+    static func installMessagingTimeout() {
+        let systemWide = AXUIElementCreateSystemWide()
+        _ = AXUIElementSetMessagingTimeout(systemWide, messagingTimeoutSeconds)
+    }
+
     /// Return the user's **frontmost non-LoFi window** via AX. Used by
     /// `WindowCommands.gatherTarget` as the target for every window-action
     /// command (center, halves, minimize, toggle*, move-to-display).
     ///
-    /// Returns nil when:
-    ///   - There is no foreground application (system mid-transition).
-    ///   - The foreground application IS LoFi.
-    ///   - The foreground app has no AX focused window. The AX runtime may
-    ///     be asleep on first contact (Firefox, some Chromium derivatives —
-    ///     gotcha 12); `AXWindowFinder.windowsForApp` does the wakeup
-    ///     before we read the focused window, so a nil here means AX is
-    ///     genuinely closed to us (sandboxed app, AX-hostile toolkit).
-    ///   - The focused window has no usable `CGWindowID` via the private
-    ///     `_AXUIElementGetWindow` bridge (gotcha 11). Without an id we
-    ///     can't key into `SavedFrameStore` for toggle-maximize, and the
-    ///     id-first AX match in `WindowControl` would fail too — refuse
-    ///     the target rather than ship a partially-functional row set.
+    /// Retries the AX chain up to `maxAttempts` times on transient
+    /// `.cannotComplete`-class failures (README gotcha 33) so a single
+    /// AX hiccup under load doesn't drop the whole command set. Returns nil
+    /// only when the target is *settled* absent — no foreground app, the
+    /// foreground app IS LoFi, or the app genuinely has no focused window /
+    /// no usable `CGWindowID` (gotchas 11, 12) — or when the transient
+    /// retries are exhausted (logged so it's diagnosable rather than silent).
     static func frontmostNonLoFi() -> DiscoveredWindow? {
+        var lastReason = "unknown"
+        for attempt in 1...maxAttempts {
+            switch attemptFrontmostNonLoFi() {
+            case .found(let window):
+                // A recovery means the first pass would have dropped the
+                // command rows on the old one-shot code path — worth a line.
+                if attempt > 1 {
+                    log.error(
+                        "AX discovery recovered on attempt \(attempt, privacy: .public)"
+                    )
+                }
+                return window
+            case .noTarget(let reason):
+                // Settled and usually benign (e.g. the frontmost app IS LoFi
+                // on a re-summon). Debug keeps the default log quiet.
+                log.debug("no command target: \(reason, privacy: .public)")
+                return nil
+            case .retryable(let reason):
+                lastReason = reason
+                log.error(
+                    "AX discovery attempt \(attempt, privacy: .public)/\(maxAttempts, privacy: .public) failed: \(reason, privacy: .public)"
+                )
+                if attempt < maxAttempts { usleep(retryBackoffMicros) }
+            }
+        }
+        log.error(
+            "AX discovery gave up after \(maxAttempts, privacy: .public) attempts — command rows dropped this summon (last: \(lastReason, privacy: .public))"
+        )
+        return nil
+    }
+
+    /// Outcome of a single discovery pass, so `frontmostNonLoFi` can tell a
+    /// transient AX hiccup (retry) apart from a settled "nothing to target"
+    /// answer (return nil now). The associated `String` is the reason, used
+    /// only for logging.
+    private enum Outcome {
+        case found(DiscoveredWindow)
+        case noTarget(String)  // settled: no window to act on — do not retry
+        case retryable(String)  // transient AX failure — worth another pass
+    }
+
+    /// One pass of the AX discovery chain. Classifies each failure as
+    /// `.retryable` (`.cannotComplete` — the loaded-machine timeout) or
+    /// `.noTarget` (a settled absence), so the caller retries only what a
+    /// retry could fix.
+    private static func attemptFrontmostNonLoFi() -> Outcome {
         guard let app = NSWorkspace.shared.frontmostApplication else {
-            return nil
+            // The foreground app can be momentarily nil mid app-switch —
+            // treat as transient and give it another pass.
+            return .retryable("no frontmost application")
         }
         let pid = app.processIdentifier
         if pid == getpid() || app.bundleIdentifier == lofiBundleId {
-            return nil
+            return .noTarget("frontmost app is LoFi")
         }
 
         // Side-effect-only call: wake the AX runtime if needed (Firefox /
@@ -105,19 +196,37 @@ enum WindowDiscovery {
         _ = AXWindowFinder.windowsForApp(pid: pid)
 
         let appElement = AXUIElementCreateApplication(pid)
+        // Belt-and-suspenders alongside the process-global timeout: bound
+        // this element's messages explicitly so the focused-window read
+        // fails fast rather than blocking the summon.
+        _ = AXUIElementSetMessagingTimeout(appElement, messagingTimeoutSeconds)
+
         var focused: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(
             appElement,
             kAXFocusedWindowAttribute as CFString,
             &focused
         )
-        guard err == .success, let focused else { return nil }
+        guard err == .success, let focused else {
+            if err == .cannotComplete {
+                return .retryable("focused-window read: cannotComplete")
+            }
+            // `.noValue` / `.attributeUnsupported` etc. mean the app genuinely
+            // has no focused window right now — settled. (`.apiDisabled`
+            // shouldn't reach here since `AppDelegate` gates on Accessibility,
+            // but if it did it's also settled — a retry can't help.)
+            return .noTarget("no focused window (AXError \(err.rawValue))")
+        }
         // CFTypeRef → AXUIElement is a CoreFoundation downcast (no
         // runtime check); the `as!` mirrors `WindowControl.readFrame`.
         let window = focused as! AXUIElement
+        _ = AXUIElementSetMessagingTimeout(window, messagingTimeoutSeconds)
 
         guard let windowId = AXWindowFinder.cgWindowId(of: window) else {
-            return nil
+            // The id bridge itself doesn't message the app, but the window
+            // handle can be transiently stale under churn; a fresh pass
+            // often resolves it, so retry rather than drop the target.
+            return .retryable("no CGWindowID for focused window")
         }
 
         // Title via AX. Unlike the old CGWindowList path, titlelessness
@@ -151,14 +260,21 @@ enum WindowDiscovery {
         guard posErr == .success, sizeErr == .success,
             let posValue, let sizeValue
         else {
-            return nil
+            if posErr == .cannotComplete || sizeErr == .cannotComplete {
+                return .retryable(
+                    "geometry read: cannotComplete (pos \(posErr.rawValue), size \(sizeErr.rawValue))"
+                )
+            }
+            return .noTarget(
+                "no geometry (pos \(posErr.rawValue), size \(sizeErr.rawValue))"
+            )
         }
         var origin = CGPoint.zero
         var size = CGSize.zero
         guard AXValueGetValue(posValue as! AXValue, .cgPoint, &origin),
             AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
         else {
-            return nil
+            return .noTarget("malformed AXValue geometry")
         }
         let bounds = CGRect(origin: origin, size: size)
 
@@ -174,15 +290,17 @@ enum WindowDiscovery {
                 )?.path
             }
 
-        return DiscoveredWindow(
-            id: windowId,
-            title: title,
-            ownerName: app.localizedName ?? "",
-            ownerPid: pid,
-            ownerBundleId: bundleId,
-            ownerBundlePath: bundlePath,
-            workspace: 0,
-            bounds: bounds
+        return .found(
+            DiscoveredWindow(
+                id: windowId,
+                title: title,
+                ownerName: app.localizedName ?? "",
+                ownerPid: pid,
+                ownerBundleId: bundleId,
+                ownerBundlePath: bundlePath,
+                workspace: 0,
+                bounds: bounds
+            )
         )
     }
 }
