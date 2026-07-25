@@ -227,7 +227,7 @@
             # Swift itself is not in the shell — Nix on Darwin does not
             # ship a usable Swift toolchain, so that comes from the
             # user's Xcode / Command Line Tools.
-            nativeBuildInputs = [ rustToolchain pkgs.bazelisk ];
+            nativeBuildInputs = [ rustToolchain pkgs.bazelisk pkgs.starpls ];
           };
         });
     in
