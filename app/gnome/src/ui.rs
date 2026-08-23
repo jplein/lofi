@@ -39,6 +39,9 @@ const ICON_COLUMN_SPACING: i32 = 2;
 /// 2. The top SearchEntry, stripped of its default rounded border, focus
 ///    ring, and tinted fill so it blends into the window background instead
 ///    of looking like a separate input control inset into the chrome.
+/// 3. The launcher's surface colour: the popover (menu) tone rather than the
+///    window or view one, with the list chain forced transparent so the one
+///    surface shows through it.
 const LAUNCHER_CSS: &str = "\
 .running-indicator {
     background-color: alpha(@theme_fg_color, 0.8);
@@ -83,12 +86,25 @@ searchentry > text,
 entry.search > text {
     padding-left: 4px;
 }
-/* Adwaita gives the window chrome `@window_bg_color` and the ListBox
-   `@view_bg_color` (the canonical content-surface tone), which differ by a
-   small amount. Pulling the window background up to `@view_bg_color`
-   eliminates that seam so the whole launcher reads as one surface. */
+/* The launcher is conceptually a menu, not a document window, so it takes
+   the popover surface rather than the window or view one. `@popover_bg_color`
+   / `@popover_fg_color` are libadwaita named colours, so this follows the
+   light/dark scheme without naming a literal. */
 window {
-    background-color: @view_bg_color;
+    background-color: @popover_bg_color;
+    color: @popover_fg_color;
+}
+/* GTK gives a bare `list` — and the viewport/scroller wrapping it — the VIEW
+   background, which would punch a panel of a different tone through the
+   popover surface the window paints. Forcing the whole chain transparent is
+   what keeps the launcher reading as one surface. The viewport is named
+   because it is a node of that same chain: it paints nothing under Adwaita
+   today, so naming it costs no pixel, and it is what stops a theme that does
+   give it a background from reintroducing the panel one level down. */
+scrolledwindow,
+scrolledwindow > viewport,
+list {
+    background-color: transparent;
 }
 ";
 
