@@ -102,6 +102,12 @@ private let kSearchRowVerticalInset: CGFloat = 6
 private let kSelectionHorizontalInset: CGFloat = 8
 private let kSelectionVerticalInset: CGFloat = 2
 private let kSelectionCornerRadius: CGFloat = 8
+// Opacity applied to `selectedMenuItemTextColor` for the *secondary*
+// elements of a selected row (category label, command glyph, running
+// dot). AppKit has no "selected secondary label" system color, so this
+// stands in for the tone difference `secondaryLabelColor` gives an
+// unselected row.
+private let kSelectedSecondaryAlpha: CGFloat = 0.75
 
 final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     NSTextFieldDelegate
@@ -619,6 +625,31 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
 /// macOS version pins the text to the icon center to keep them
 /// visually aligned.
 private final class EntryRowView: NSView {
+    private let imageView: NSImageView
+    private let nameField: NSTextField
+    private let categoryField: NSTextField
+    private let runningDot: RunningDotView
+    /// True for command rows, whose icon is a template SF Symbol. Those
+    /// are tinted like the dimmed category labels and the search
+    /// magnifier so command rows read as actions rather than launchable
+    /// apps. A real app icon is never tinted — it has to keep its own
+    /// colors, selected or not.
+    private let tintsIcon: Bool
+
+    /// Pushed down by `RoundedSelectionRowView` whenever the row's
+    /// selection changes. The selection pill is filled with the
+    /// emphasized accent color (see `drawSelection(in:)`), and
+    /// `labelColor` is near-black in light mode — unreadable on that
+    /// fill — so the row's foreground colors have to flip with it, the
+    /// way `NSTableCellView` would do automatically for a standard cell
+    /// view.
+    var isRowSelected: Bool = false {
+        didSet {
+            guard isRowSelected != oldValue else { return }
+            applyForegroundColors()
+        }
+    }
+
     /// `iconPath` (the app/window bundle path) takes precedence: if set,
     /// the icon is resolved via `IconCache.shared.icon(forFile:)` — a
     /// process-lifetime memo over `NSWorkspace.shared.icon(forFile:)`.
@@ -638,9 +669,13 @@ private final class EntryRowView: NSView {
         symbolName: String?,
         isRunning: Bool
     ) {
+        imageView = NSImageView()
+        nameField = NSTextField(labelWithString: name)
+        categoryField = NSTextField(labelWithString: category)
+        runningDot = RunningDotView()
+        tintsIcon = iconPath == nil && symbolName != nil
         super.init(frame: .zero)
 
-        let imageView = NSImageView()
         imageView.imageScaling = .scaleProportionallyDown
         if let path = iconPath {
             imageView.image = IconCache.shared.icon(forFile: path)
@@ -653,10 +688,6 @@ private final class EntryRowView: NSView {
                 pointSize: kCommandGlyphSize,
                 weight: .regular
             )
-            // Template SF Symbol; tint it like the dimmed category labels
-            // and the search magnifier so command rows read as actions
-            // rather than launchable apps.
-            imageView.contentTintColor = .secondaryLabelColor
         }
         imageView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -664,12 +695,10 @@ private final class EntryRowView: NSView {
             imageView.heightAnchor.constraint(equalToConstant: kIconSize),
         ])
 
-        let nameField = NSTextField(labelWithString: name)
         nameField.isBezeled = false
         nameField.drawsBackground = false
         nameField.isEditable = false
         nameField.isSelectable = false
-        nameField.textColor = .labelColor
         nameField.lineBreakMode = .byTruncatingTail
         nameField.translatesAutoresizingMaskIntoConstraints = false
         // Let the name field absorb any extra horizontal space so the
@@ -680,12 +709,10 @@ private final class EntryRowView: NSView {
             for: .horizontal
         )
 
-        let categoryField = NSTextField(labelWithString: category)
         categoryField.isBezeled = false
         categoryField.drawsBackground = false
         categoryField.isEditable = false
         categoryField.isSelectable = false
-        categoryField.textColor = .secondaryLabelColor
         categoryField.font = NSFont.systemFont(ofSize: kCategoryFontSize)
         categoryField.alignment = .right
         categoryField.translatesAutoresizingMaskIntoConstraints = false
@@ -697,7 +724,6 @@ private final class EntryRowView: NSView {
 
         // Running-indicator dot — fixed 3x3, always part of the icon column
         // so command and non-running rows have the same icon position.
-        let runningDot = RunningDotView()
         runningDot.isOn = isRunning
         runningDot.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -755,19 +781,64 @@ private final class EntryRowView: NSView {
             ),
             textStack.centerYAnchor.constraint(equalTo: imageView.centerYAnchor),
         ])
+
+        applyForegroundColors()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("EntryRowView is not loadable from a NIB / coder")
     }
+
+    /// Single place that decides the row's foreground colors, so the
+    /// selected and unselected looks can't drift apart. Selected rows use
+    /// `selectedMenuItemTextColor` — the text color macOS pairs with the
+    /// menu-item accent fill the selection pill is drawn in — because the
+    /// normal `labelColor` is near-black in light mode and disappears on
+    /// that fill. The command glyph, category label, and running dot are
+    /// dimmed by `kSelectedSecondaryAlpha` to keep the hierarchy
+    /// `secondaryLabelColor` gives them when the row isn't selected.
+    private func applyForegroundColors() {
+        let primary: NSColor = isRowSelected ? .selectedMenuItemTextColor : .labelColor
+        let secondary: NSColor =
+            isRowSelected
+            ? resolvedColor(.selectedMenuItemTextColor, alpha: kSelectedSecondaryAlpha)
+            : .secondaryLabelColor
+
+        nameField.textColor = primary
+        categoryField.textColor = secondary
+        runningDot.tint = secondary
+        if tintsIcon {
+            imageView.contentTintColor = secondary
+        }
+    }
+}
+
+/// Resolves a (possibly appearance-dynamic) system color to a concrete
+/// sRGB value with an explicit alpha. `NSColor.withAlphaComponent` is
+/// documented to return the receiver unchanged for colors whose color
+/// space has no alpha component — which includes the catalog-backed
+/// system colors — so alpha has to be applied to a resolved value to be
+/// dependable. Call it while the target view's appearance is current
+/// (inside a draw, or for a color like `selectedMenuItemTextColor` that
+/// is the same tone in light and dark) so the resolution is correct.
+private func resolvedColor(_ color: NSColor, alpha: CGFloat) -> NSColor {
+    guard let srgb = color.usingColorSpace(.sRGB) else { return color }
+    return NSColor(
+        srgbRed: srgb.redComponent,
+        green: srgb.greenComponent,
+        blue: srgb.blueComponent,
+        alpha: alpha
+    )
 }
 
 /// Small layer-backed circle drawn below the row icon to indicate the
 /// application is currently running. Always part of the layout at its
 /// full 6×6 size so row heights don't shift between running and
 /// not-running entries; only the layer's `backgroundColor` toggles
-/// between `secondaryLabelColor` (on) and clear (off).
+/// between `tint` (on) and clear (off). `tint` is set by the owning
+/// `EntryRowView` so the dot dims with the category label and follows
+/// the row in and out of selection.
 ///
 /// `updateLayer()` is the right hook for the color toggle: it runs in
 /// a context where the view's `effectiveAppearance` has been resolved,
@@ -781,6 +852,15 @@ private final class RunningDotView: NSView {
             if isOn != oldValue {
                 needsDisplay = true
             }
+        }
+    }
+
+    /// On-state color. Owned by `EntryRowView.applyForegroundColors()`
+    /// (`secondaryLabelColor` normally, a dimmed
+    /// `selectedMenuItemTextColor` while the row is selected).
+    var tint: NSColor = .secondaryLabelColor {
+        didSet {
+            needsDisplay = true
         }
     }
 
@@ -802,13 +882,13 @@ private final class RunningDotView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        // `secondaryLabelColor.cgColor` resolves against the current
-        // effective appearance. AppKit calls `updateLayer` after appearance
+        // `tint.cgColor` resolves against the current effective
+        // appearance. AppKit calls `updateLayer` after appearance
         // changes (we re-trigger it from
         // `viewDidChangeEffectiveAppearance`), so the on-state color
         // tracks light/dark mode automatically.
         if isOn {
-            layer?.backgroundColor = NSColor.secondaryLabelColor.cgColor
+            layer?.backgroundColor = tint.cgColor
         } else {
             layer?.backgroundColor = nil
         }
@@ -909,6 +989,31 @@ private final class SearchHeaderView: NSView {
 /// hidden horizontal content inset, which had pushed the row icons/text
 /// to the right of the search header and broke their alignment.
 private final class RoundedSelectionRowView: NSTableRowView {
+    override var isSelected: Bool {
+        didSet {
+            guard isSelected != oldValue else { return }
+            propagateSelection()
+        }
+    }
+
+    /// The cell views are plain `NSView`s (`EntryRowView`), not
+    /// `NSTableCellView`s, so AppKit's automatic `backgroundStyle`
+    /// hand-off never reaches them — the row view has to push the state
+    /// down itself. This hook covers the ordering where the table sets
+    /// `isSelected` *before* it installs the cell view for the row (row 0
+    /// is selected on every reload, see `selectFirstRowIfAny`), which the
+    /// `isSelected` observer alone would miss.
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        (subview as? EntryRowView)?.isRowSelected = isSelected
+    }
+
+    private func propagateSelection() {
+        for case let cell as EntryRowView in subviews {
+            cell.isRowSelected = isSelected
+        }
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {
         guard isSelected else { return }
         let rect = bounds.insetBy(
@@ -920,9 +1025,22 @@ private final class RoundedSelectionRowView: NSTableRowView {
             xRadius: kSelectionCornerRadius,
             yRadius: kSelectionCornerRadius
         )
-        // The table is never first responder (the search field keeps
-        // focus), so selection is always the dimmed/unemphasized variant.
-        NSColor.unemphasizedSelectedContentBackgroundColor.setFill()
+        // Use the emphasized "selected content" color — the accent fill
+        // macOS paints behind a selected menu item (and the one Spotlight
+        // uses for its highlighted result), not the dimmed
+        // `unemphasizedSelectedContentBackgroundColor` AppKit would pick
+        // on its own. The table is never first responder (the search
+        // field keeps focus), so the automatic choice would always be the
+        // dim gray variant, which disappears against a busy wallpaper
+        // showing through the panel's glass.
+        //
+        // Force alpha to 1: the pill sits on a translucent glass/vibrant
+        // backdrop, so any transparency in the fill lets the desktop bleed
+        // through and undoes the contrast we just bought. Resolving here,
+        // inside `drawSelection`, means `NSAppearance.current` is the
+        // row's effective appearance, so the accent stays correct in both
+        // light and dark mode.
+        resolvedColor(.selectedContentBackgroundColor, alpha: 1).setFill()
         path.fill()
     }
 }
