@@ -169,6 +169,17 @@ specific locker or specific arguments, set it explicitly:
 programs.lofi.lockCommand = "swaylock -f -c 000000";
 ```
 
+This exports `LOFI_LOCK_COMMAND` twice — into `hm-session-vars.sh` for a Niri
+started from a TTY, and into `~/.config/environment.d/` for one started by a
+display manager, where the session is `user@.service` -> `niri.service` and no
+login shell runs. Either way the setting takes effect at your next login, not
+on rebuild: LoFi is spawned by Niri and inherits the environment Niri started
+with. To confirm it landed, check the compositor's own environment:
+
+```sh
+tr '\0' '\n' < /proc/$(pgrep -x niri)/environ | grep LOFI
+```
+
 ## System requirements: macOS
 
 - macOS Tahoe (15+)

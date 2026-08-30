@@ -236,7 +236,7 @@ Niri is a compositor, not a desktop environment: no session manager, no screensa
   2. The first of `swaylock`, `hyprlock`, `waylock`, `gtklock` found on `$PATH`. Candidate order dominates directory order — we want the user's preferred locker, not whichever sits earliest on `$PATH`.
   3. logind's `Session.Lock`.
 
-  Step 3 is **last** deliberately. logind's `Lock` only emits a signal; it locks nothing unless a daemon (`swayidle`, `hypridle`, `xss-lock`) is listening for it. On a session with no such daemon it would succeed and do nothing, which is the worst possible outcome for a Lock command — the user walks away believing the screen is locked. When LoFi falls through to it, it says so on stderr and names `$LOFI_LOCK_COMMAND` as the fix. The home-manager module exposes the same setting as `programs.lofi.lockCommand`.
+  Step 3 is **last** deliberately. logind's `Lock` only emits a signal; it locks nothing unless a daemon (`swayidle`, `hypridle`, `xss-lock`) is listening for it. On a session with no such daemon it would succeed and do nothing, which is the worst possible outcome for a Lock command — the user walks away believing the screen is locked. When LoFi falls through to it, it says so on stderr and names `$LOFI_LOCK_COMMAND` as the fix. The home-manager module exposes the same setting as `programs.lofi.lockCommand`, and exports it into both the shell and systemd user environments — a Niri started by a display manager never sources a login shell, so the shell export alone would not reach it.
 
   The spawned locker is not waited on: LoFi exits moments later and the locker is reparented to init, which is what we want — blocking would keep a launcher process alive for the whole locked period.
 

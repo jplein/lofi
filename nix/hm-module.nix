@@ -77,7 +77,9 @@ in
       example = "swaylock -f -c 000000";
       description = ''
         Shell command the "Lock" entry runs under Niri, exported as
-        `LOFI_LOCK_COMMAND`.
+        `LOFI_LOCK_COMMAND` in both the shell session environment and the
+        systemd user environment, so it reaches Niri whether it was started
+        from a TTY or by a display manager.
 
         Niri-only, and only needed if you want a specific locker or specific
         arguments. Left unset, LoFi runs the first of `swaylock`, `hyprlock`,
@@ -104,8 +106,28 @@ in
     # Exported into the session environment rather than baked into a wrapper
     # so the launcher stays a plain binary: LoFi reads the variable at
     # activation time, and a user can override it for one invocation.
+    #
+    # Set in *both* places on purpose, because they reach different sessions:
+    #
+    # - `home.sessionVariables` lands in `hm-session-vars.sh`, which only a
+    #   login shell sources. That covers a Niri started from a TTY.
+    # - `systemd.user.sessionVariables` lands in
+    #   `~/.config/environment.d/10-home-manager.conf`, which the systemd user
+    #   manager reads. That covers a Niri started by a display manager, where
+    #   the chain is greeter -> `user@.service` -> `niri.service` and no login
+    #   shell is ever involved.
+    #
+    # The display-manager case is the common one and the shell variable alone
+    # does not reach it: LoFi is spawned by Niri, inherits Niri's environment,
+    # and would silently fall through to the `$PATH` search. Since this option
+    # exists precisely to override that search, setting only one of the two
+    # would leave the option doing nothing on a typical desktop.
+    #
+    # Note that `environment.d(5)` expands `$VAR` in values. A lock command
+    # containing a literal `$` needs it escaped as `$$`.
     (lib.mkIf (cfg.lockCommand != null) {
       home.sessionVariables.LOFI_LOCK_COMMAND = cfg.lockCommand;
+      systemd.user.sessionVariables.LOFI_LOCK_COMMAND = cfg.lockCommand;
     })
 
     (lib.mkIf cfg.enableShellExtension {
