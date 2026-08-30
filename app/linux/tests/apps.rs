@@ -1,4 +1,4 @@
-use lofi_gnome::{Application, gather_applications};
+use lofi_linux::{Application, gather_applications};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};

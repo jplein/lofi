@@ -24,11 +24,11 @@ bazel_dep(name = "rules_xcodeproj", version = "4.1.0")
 # stays the source of truth for Rust dependency versions; the Bazel
 # build reads the same `Cargo.lock` the Crane-driven Linux build does.
 #
-# Note: only `core` is listed as a manifest. The `gnome` crate compiles
-# only on Linux against gtk4/libadwaita, which Bazel on Darwin cannot
-# satisfy. Linux continues to build it via the existing Crane path in
-# `flake.nix`. If a future slice needs gnome under Bazel, add its
-# manifest here and gate the relevant targets with a Linux constraint.
+# Note: only `core` is listed as a manifest. The `linux` crate compiles
+# only on Linux against gtk4/libadwaita/gtk4-layer-shell, which Bazel on
+# Darwin cannot satisfy. Linux continues to build it via the existing
+# Crane path in `flake.nix`. If a future slice needs it under Bazel, add
+# its manifest here and gate the relevant targets with a Linux constraint.
 crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
 crate.from_cargo(
     name = "crates",

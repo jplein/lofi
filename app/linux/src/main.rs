@@ -6,8 +6,13 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use lofi_core::{Entry, EntryRef, MruStore};
-use lofi_gnome::{apps, commands, power, ui, windows, workspaces};
+use lofi_linux::{apps, backend, ui};
 
+/// GApplication id, which is also what makes the second `lofi` invocation a
+/// remote that toggles the first (see `on_activate`). Must stay in lockstep
+/// with `backend::LOFI_DESKTOP_ID` — the backends filter LoFi's own window out
+/// of the command-target pick by that id — and with the installed `.desktop`
+/// file's name.
 const APP_ID: &str = "dev.jplein.LoFi";
 
 fn main() -> glib::ExitCode {
@@ -30,18 +35,24 @@ fn on_activate(app: &adw::Application) {
         return;
     }
 
+    // Pick the desktop backend once, up front: everything below that isn't
+    // plain XDG application enumeration goes through it, and the UI keeps a
+    // handle so `launch::activate` can dispatch on Enter. See
+    // `backend::detect` for how the choice is made.
+    let backend = backend::create();
+
     let dirs = apps::application_directories();
     let mut applications = apps::gather_applications(&dirs);
-    let windows = windows::gather_windows();
-    let workspaces_vec = workspaces::gather_workspaces();
-    let commands_vec = commands::gather_commands();
-    let workspace_commands = commands::gather_workspace_commands(&windows, &workspaces_vec);
-    let power_commands = power::gather_power_commands();
+    let windows = backend.gather_windows();
+    let workspaces_vec = backend.gather_workspaces();
+    let commands_vec = backend.gather_commands(&windows);
+    let workspace_commands = backend.gather_workspace_commands(&windows, &workspaces_vec);
+    let power_commands = backend.gather_power_commands();
 
-    // Build a desktop_id -> most-recent-window-id map. `gather_windows` returns
-    // windows in MRU order, so the FIRST occurrence per app id is the right
-    // one — `insert` on an existing key would clobber MRU with a less-recent
-    // entry, hence the let-chain guard with `contains_key`.
+    // Build a desktop_id -> most-recent-window-id map. Every backend
+    // guarantees `gather_windows` is in MRU order, so the FIRST occurrence per
+    // app id is the right one — `insert` on an existing key would clobber MRU
+    // with a less-recent entry, hence the let-chain guard with `contains_key`.
     let mut mru: HashMap<String, u64> = HashMap::new();
     for w in &windows {
         if let Some(id) = w.app_desktop_id.as_ref()
@@ -98,7 +109,7 @@ fn on_activate(app: &adw::Application) {
     // clone without moving the original.
     let mru_store = mru_store.map(Rc::new);
 
-    ui::build(app, entries, mru_store, mru_index);
+    ui::build(app, entries, mru_store, mru_index, backend);
 }
 
 /// Resolve the on-disk path for the MRU SQLite file. Mirrors the manual XDG

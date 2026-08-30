@@ -4,15 +4,12 @@
 //! LoFi itself, which is the focused window while the launcher is open —
 //! see decision 8 in the plan).
 
-use crate::windows;
+use super::windows;
 use lofi_core::{
     Command, CommandKind, Window, Workspace, WorkspaceCommand, build_workspace_commands,
 };
 
-/// Canonical desktop id for the launcher itself. We compare against this to
-/// skip LoFi when picking the target window — otherwise every command would
-/// resize/minimize the launcher window itself.
-const LOFI_DESKTOP_ID: &str = "dev.jplein.LoFi.desktop";
+use crate::backend::LOFI_DESKTOP_ID;
 
 /// Every command kind, in the order they appear in the launcher list.
 const ALL_KINDS: &[CommandKind] = &[
@@ -39,10 +36,14 @@ const ALL_KINDS: &[CommandKind] = &[
 /// false` guard. The empty result drops the command rows from the launcher
 /// list entirely; users who launch LoFi with no other windows open just
 /// don't see them.
-pub fn gather_commands() -> Vec<Command> {
-    let windows_vec = windows::gather_windows();
-    let target = windows_vec
-        .into_iter()
+///
+/// `windows` is the MRU-ordered list `main` already gathered, passed in
+/// rather than re-listed here: the extension's `ListWindowsMRU` is not free,
+/// and both this function and `gather_workspace_commands` need the exact same
+/// target pick, which only holds if they read the same snapshot.
+pub fn gather_commands(windows: &[Window]) -> Vec<Command> {
+    let target = windows
+        .iter()
         .find(|w| w.app_desktop_id.as_deref() != Some(LOFI_DESKTOP_ID));
     let Some(target) = target else {
         return Vec::new();

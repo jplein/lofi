@@ -25,7 +25,7 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
         crateInfo = craneLib.crateNameFromCargoToml {
-          cargoToml = ./app/gnome/Cargo.toml;
+          cargoToml = ./app/linux/Cargo.toml;
         };
 
         nativeBuildInputs = with pkgs; [
@@ -37,6 +37,11 @@
           gtk4
           libadwaita
           glib
+          # wlr-layer-shell wrapper for GTK4. Needed by the Niri backend so
+          # the launcher presents as an overlay surface instead of being
+          # tiled into the scrolling layout; linked unconditionally because
+          # the desktop is chosen at run time, not build time.
+          gtk4-layer-shell
         ];
 
         commonArgs = {
@@ -51,10 +56,10 @@
         lofi = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "lofi";
-          cargoExtraArgs = "--package lofi-gnome";
+          cargoExtraArgs = "--package lofi-linux";
 
           meta = with pkgs.lib; {
-            description = "A small launcher for GNOME and macOS";
+            description = "A small launcher for GNOME, Niri, and macOS";
             mainProgram = "lofi";
             platforms = platforms.linux;
           };

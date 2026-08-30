@@ -7,8 +7,10 @@ use std::sync::OnceLock;
 use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
+use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use lofi_core::{Entry, EntryKind, EntryRef, MruStore};
 
+use crate::backend::Backend;
 use crate::launch;
 
 const WINDOW_WIDTH: i32 = 480;
@@ -157,11 +159,17 @@ struct UiState {
 /// window's lifetime. `mru_store` is `None` when the store could not be
 /// opened (e.g. no XDG_STATE_HOME and no HOME) — sorting still happens
 /// against `mru_index`, only the on-activation bump is skipped.
+///
+/// `backend` is threaded through to the two activation closures (Enter and
+/// click) so `launch::activate` can dispatch against the running desktop, and
+/// is consulted once for how to present the window (see
+/// `configure_layer_shell`). Everything else here is desktop-agnostic.
 pub fn build(
     app: &adw::Application,
     entries: Vec<Entry>,
     mru_store: Option<Rc<MruStore>>,
     mru_index: Vec<EntryRef>,
+    backend: Rc<dyn Backend>,
 ) {
     install_styles();
 
@@ -254,10 +262,11 @@ pub fn build(
         let list_box = list_box.clone();
         let window = window.clone();
         let mru_store = mru_store.clone();
+        let backend = backend.clone();
         search_entry.connect_activate(move |_| {
             if let Some(entry) = selected_entry(&list_box, &state) {
                 bump_mru(mru_store.as_deref(), &entry);
-                launch::activate(&entry);
+                launch::activate(backend.as_ref(), &entry);
                 window.close();
             }
         });
@@ -270,6 +279,7 @@ pub fn build(
         let state = state.clone();
         let window = window.clone();
         let mru_store = mru_store.clone();
+        let backend = backend.clone();
         list_box.connect_row_activated(move |_lb, row| {
             let Ok(row_idx) = usize::try_from(row.index()) else {
                 return;
@@ -285,7 +295,7 @@ pub fn build(
                 entry.clone()
             };
             bump_mru(mru_store.as_deref(), &entry);
-            launch::activate(&entry);
+            launch::activate(backend.as_ref(), &entry);
             window.close();
         });
     }
@@ -319,6 +329,10 @@ pub fn build(
 
     populate_list(&list_box, &state, "");
 
+    if backend.uses_layer_shell() {
+        configure_layer_shell(&window);
+    }
+
     // Close when the window loses keyboard focus. This is the simplest
     // available substitute for "don't show in Alt-Tab" on GNOME/Wayland —
     // the window only exists while focused, so Alt-Tabbing away closes it
@@ -337,6 +351,52 @@ pub fn build(
     // Call after `present()` so the widget is realised — `grab_focus` on an
     // unrealised widget is silently a no-op.
     search_entry.grab_focus();
+}
+
+/// Turn the launcher window into a `wlr-layer-shell` overlay surface.
+///
+/// Called only when the backend asks for it — i.e. under Niri, where an
+/// ordinary toplevel would be tiled into the scrolling layout and shove the
+/// user's windows aside every time the launcher opens. A layer surface is not
+/// a toplevel: it floats above everything, never enters the layout, and never
+/// appears in the compositor's own window list (which is a bonus — it means
+/// the launcher can't turn up as a row in its own window list, and can't be
+/// picked as the target of its own window commands).
+///
+/// Must run before `present()`: `init_layer_shell` reconfigures how the
+/// surface is created, so it has no effect once the window is realised.
+///
+/// Configuration:
+///
+/// - **Overlay layer** — above ordinary windows *and* above fullscreen ones.
+///   Niri renders a focused fullscreen window over the `Top` layer, so `Top`
+///   would leave the launcher invisible exactly when a video or a game is
+///   full-screen, which is a moment you very much want a launcher.
+/// - **Exclusive keyboard** — the surface takes keyboard focus outright.
+///   `OnDemand` would require a click first, which defeats "type immediately".
+/// - **No anchors** — a layer surface anchored to no edge is centred by the
+///   compositor at the window's own requested size, which is exactly the
+///   placement we want and saves computing a margin against an output whose
+///   geometry we'd have to fetch.
+///
+/// Silently does nothing when the compositor doesn't advertise layer-shell.
+/// That should be unreachable (only the Niri backend asks, and Niri
+/// implements the protocol) but the check is free, and the failure mode
+/// without it is a GTK-level abort rather than a launcher that comes up as an
+/// ordinary window.
+fn configure_layer_shell(window: &adw::ApplicationWindow) {
+    if !gtk4_layer_shell::is_supported() {
+        eprintln!("lofi: compositor does not support wlr-layer-shell; using a plain window");
+        return;
+    }
+
+    window.init_layer_shell();
+    // The namespace is what the compositor sees this surface as — it's the
+    // handle a user needs to write a `layer-rule` for the launcher, and it's
+    // what shows up in `niri msg layers`.
+    window.set_namespace(Some("lofi"));
+    window.set_layer(Layer::Overlay);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
 }
 
 /// Move the list selection by `delta` (typically +/-1). No-op when no row is

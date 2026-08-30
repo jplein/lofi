@@ -178,8 +178,9 @@ rust_test(
 # rustfmt + the unit/integration tests in a single command.
 #
 # Coverage note: these only see the Rust that Bazel builds, which is `core`.
-# The `gnome` crate is Linux-only (gtk4/libadwaita) and still lints/formats via
-# Cargo on the Crane path in flake.nix — it has no Bazel target to attach to.
+# The `linux` crate is Linux-only (gtk4/libadwaita/gtk4-layer-shell) and still
+# lints/formats via Cargo on the Crane path in flake.nix — it has no Bazel
+# target to attach to.
 
 # Clippy over the library, the inline-unit-test rebuild, and both integration
 # test crates. `rust_clippy` runs clippy with warnings promoted to errors by

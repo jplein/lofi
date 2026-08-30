@@ -1,0 +1,31 @@
+[package]
+name = "lofi-linux"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "lofi_linux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lofi"
+path = "src/main.rs"
+
+[dependencies]
+gtk = { version = "0.11", package = "gtk4" }
+adw = { version = "0.9", package = "libadwaita" }
+# Wayland layer-shell surface for the launcher window under wlroots-style
+# compositors (Niri). Version-locked to the same gtk4 0.11 / glib 0.22
+# generation the rest of this crate uses.
+gtk4-layer-shell = "0.8"
+gio-unix = "0.22"
+lofi-core = { path = "../core" }
+zbus = "5"
+serde = { version = "1", features = ["derive"] }
+# Niri's IPC is newline-delimited JSON over a unix socket, so the Niri
+# backend needs a JSON codec. The GNOME backend's D-Bus wire format is
+# handled by zvariant inside zbus and does not use this.
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

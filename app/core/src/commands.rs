@@ -1,5 +1,5 @@
 //! Pure-Rust geometry math for the window-action commands. No D-Bus, no GTK —
-//! every input is captured by the platform layer (`lofi-gnome::commands`) at
+//! every input is captured by the platform layer (`lofi-linux`'s backends) at
 //! gather time so this module stays trivially testable.
 
 use crate::{CommandKind, WorkArea, Workspace, WorkspaceCommand, WorkspaceCommandKind};
@@ -12,9 +12,11 @@ use crate::{CommandKind, WorkArea, Workspace, WorkspaceCommand, WorkspaceCommand
 /// only `CommandKind::Center` reads it (it keeps the window's current size
 /// and recenters), the other geometry commands ignore it.
 ///
-/// Returns `None` for the state-toggle commands (`Minimize`,
-/// `ToggleMaximize`, `ToggleFullscreen`) which don't produce a rectangle;
-/// the activation path dispatches those to dedicated D-Bus methods instead.
+/// Returns `None` for every kind that isn't a rectangle: the state-toggle
+/// commands (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`), the
+/// move-to-display commands, and the scrolling-tiler commands. The platform
+/// layer dispatches all of those directly instead — see the match arms below
+/// for why each one has no rectangle to compute.
 pub fn compute_geometry(
     kind: CommandKind,
     work_area: &WorkArea,
@@ -117,6 +119,21 @@ pub fn compute_geometry(
         // through the platform's state-toggle dispatch path, which
         // computes the destination rect at activation time.
         CommandKind::NextDisplay | CommandKind::PreviousDisplay => None,
+        // Scrolling-tiler commands. These don't produce a rectangle at all:
+        // the width presets are a *proportion* the compositor resolves
+        // against its own working area (Niri's `SetWindowWidth` takes a
+        // percentage), and the rest are state changes. Computing a rectangle
+        // here and sending it would also be wrong in a subtler way — under a
+        // scrolling tiler a window's x/y is a consequence of its place in the
+        // scroll order, so any position this function invented would be
+        // immediately overruled by the layout.
+        CommandKind::WidthThird
+        | CommandKind::WidthHalf
+        | CommandKind::WidthTwoThirds
+        | CommandKind::MaximizeColumn
+        | CommandKind::ExpandColumn
+        | CommandKind::ToggleFloating
+        | CommandKind::Close => None,
     }
 }
 
@@ -400,6 +417,33 @@ mod tests {
             actual, None,
             "PreviousDisplay is platform-dispatched and must return None; got {actual:?}"
         );
+    }
+
+    #[test]
+    fn scrolling_tiler_kinds_return_none() {
+        // The Niri command kinds are proportions and state changes, not
+        // rectangles. Returning a rectangle for any of them would be actively
+        // harmful: under a scrolling tiler the position component would be
+        // overruled by the layout, so the platform layer would be sending
+        // geometry that silently doesn't apply.
+        for kind in [
+            CommandKind::WidthThird,
+            CommandKind::WidthHalf,
+            CommandKind::WidthTwoThirds,
+            CommandKind::MaximizeColumn,
+            CommandKind::ExpandColumn,
+            CommandKind::ToggleFloating,
+            CommandKind::Close,
+        ] {
+            // Pass a non-zero frame too, so a kind that accidentally fell
+            // into the Center arm would surface as Some(...) rather than
+            // coincidentally matching a zeroed expectation.
+            assert_eq!(
+                compute_geometry(kind, &WA, FRAME),
+                None,
+                "{kind:?} is platform-dispatched under a scrolling tiler and must return None"
+            );
+        }
     }
 
     /// Window id every `build_workspace_commands` test threads through; non-zero

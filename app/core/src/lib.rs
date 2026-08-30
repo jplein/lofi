@@ -20,7 +20,7 @@ pub struct Application {
     pub icon: Option<String>,
     /// Runtime-only state: when `Some(id)`, the application has at least one
     /// open window and `id` is the most recently focused. Set by the platform
-    /// layer (`lofi-gnome::main`) after gathering windows from the extension;
+    /// layer (`lofi-linux::main`) after gathering windows from the desktop backend;
     /// not persisted, not part of `EntryRef`.
     pub recent_window_id: Option<u64>,
     /// Runtime-only state: `true` when the application has at least one open
@@ -37,7 +37,7 @@ pub struct Application {
 /// An open window surfaced by the GNOME Shell extension over D-Bus. `app_name`
 /// and `icon` come from `Shell.WindowTracker`, which can return null for system
 /// windows; both are `Option<String>` and the extension coerces empty strings
-/// to `None` on the Rust side (see `app/gnome/src/windows.rs`).
+/// to `None` on the Rust side (see `app/linux/src/backend/gnome/windows.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     pub id: u64,
@@ -49,7 +49,7 @@ pub struct Window {
     /// window, as resolved by `Shell.WindowTracker.get_window_app(...).get_id()`
     /// in the extension. `None` when the extension reported an empty string
     /// (no Shell.App for this window — system surfaces, override-redirect
-    /// children). Used by the combine step in `lofi-gnome::main` to build the
+    /// children). Used by the combine step in `lofi-linux::main` to build the
     /// MRU map keyed on the matching `Application.desktop_id`.
     pub app_desktop_id: Option<String>,
 }
@@ -85,13 +85,42 @@ pub enum CommandKind {
     Minimize,
     ToggleMaximize,
     ToggleFullscreen,
+    /// Set the target window's column to a third of the working area's width.
+    ///
+    /// One of five width presets that exist for scrolling tilers (Niri),
+    /// where a window's position is a consequence of its place in the scroll
+    /// order rather than something a client sets. Only the width is a free
+    /// parameter, so `LeftThird` / `CenterThird` / `RightThird` collapse into
+    /// this single kind. Like the state-style commands, the platform layer
+    /// dispatches it directly (Niri's `SetWindowWidth` takes a proportion, not
+    /// a rectangle), so `compute_geometry` returns `None`. GNOME and macOS do
+    /// not surface it — it is omitted from their `ALL_KINDS`.
+    WidthThird,
+    /// Half-width counterpart of `WidthThird`. See that variant's doc.
+    WidthHalf,
+    /// Two-thirds-width counterpart of `WidthThird`. See that variant's doc.
+    WidthTwoThirds,
+    /// Full-width counterpart of `WidthThird` — Niri's "maximized column",
+    /// which its own documentation defines as equivalent to a column width of
+    /// 100%. Distinct from `ToggleMaximize`, which is the
+    /// maximize-to-the-screen-edges state a window itself can request.
+    MaximizeColumn,
+    /// Widen the target window's column to fill space no other fully-visible
+    /// column is using. Niri-only, like the width presets; unlike them it has
+    /// no fixed proportion, so it can't be expressed as one.
+    ExpandColumn,
+    /// Move the target window between the tiling and floating layouts.
+    /// Niri-only: GNOME and macOS have no tiling layout to leave.
+    ToggleFloating,
+    /// Close the target window.
+    Close,
     /// Move the target window to the next display (with wrap-around), preserving
     /// the window's offset from the work-area origin and its size. Like the
     /// state-style commands, the platform layer computes the target geometry
     /// at activation time (it depends on the current display set, which is
     /// platform-side state), so `compute_geometry` returns `None`. macOS
     /// dispatches via `WindowControl.moveToDisplay`; GNOME does not currently
-    /// implement this — it is omitted from `app/gnome/src/commands.rs`'s
+    /// implement this — it is omitted from the Linux backends'
     /// `ALL_KINDS` so the rows don't appear in the Linux launcher.
     NextDisplay,
     /// Symmetric counterpart of `NextDisplay`. See that variant's doc.
@@ -119,6 +148,13 @@ impl CommandKind {
             CommandKind::Minimize => "minimize",
             CommandKind::ToggleMaximize => "toggle_maximize",
             CommandKind::ToggleFullscreen => "toggle_fullscreen",
+            CommandKind::WidthThird => "width_third",
+            CommandKind::WidthHalf => "width_half",
+            CommandKind::WidthTwoThirds => "width_two_thirds",
+            CommandKind::MaximizeColumn => "maximize_column",
+            CommandKind::ExpandColumn => "expand_column",
+            CommandKind::ToggleFloating => "toggle_floating",
+            CommandKind::Close => "close_window",
             CommandKind::NextDisplay => "next_display",
             CommandKind::PreviousDisplay => "previous_display",
         }
@@ -143,6 +179,13 @@ impl CommandKind {
             CommandKind::Minimize => "Minimize",
             CommandKind::ToggleMaximize => "Toggle maximize",
             CommandKind::ToggleFullscreen => "Toggle fullscreen",
+            CommandKind::WidthThird => "Width third",
+            CommandKind::WidthHalf => "Width half",
+            CommandKind::WidthTwoThirds => "Width two-thirds",
+            CommandKind::MaximizeColumn => "Maximize column",
+            CommandKind::ExpandColumn => "Expand column",
+            CommandKind::ToggleFloating => "Toggle floating",
+            CommandKind::Close => "Close window",
             CommandKind::NextDisplay => "Next display",
             CommandKind::PreviousDisplay => "Previous display",
         }
@@ -167,8 +210,21 @@ impl CommandKind {
             CommandKind::Minimize => "window-minimize-symbolic",
             CommandKind::ToggleMaximize => "window-maximize-symbolic",
             CommandKind::ToggleFullscreen => "view-fullscreen-symbolic",
+            // Width presets reuse the same glyphs as their GNOME
+            // geometry counterparts, so a user moving between the two
+            // desktops sees the same shape for the same fraction.
+            CommandKind::WidthThird => "view-dual-symbolic",
+            CommandKind::WidthHalf => "view-dual-symbolic",
+            CommandKind::WidthTwoThirds => "sidebar-show-symbolic",
+            CommandKind::MaximizeColumn => "window-maximize-symbolic",
+            CommandKind::ExpandColumn => "zoom-fit-best-symbolic",
+            // "Restore" is the un-maximize glyph, which reads as the
+            // closest thing to "take this window back out of the tiling
+            // layout".
+            CommandKind::ToggleFloating => "window-restore-symbolic",
+            CommandKind::Close => "window-close-symbolic",
             // GNOME doesn't surface these commands today (they're omitted
-            // from `app/gnome/src/commands.rs::ALL_KINDS`), but icon_name
+            // from the Linux backends' `ALL_KINDS`), but icon_name
             // is exhaustive over CommandKind by the type system, so we
             // still need a value. Reuse `go-next-symbolic` /
             // `go-previous-symbolic` — Adwaita's directional arrows.
@@ -197,6 +253,13 @@ impl CommandKind {
             "minimize" => Some(CommandKind::Minimize),
             "toggle_maximize" => Some(CommandKind::ToggleMaximize),
             "toggle_fullscreen" => Some(CommandKind::ToggleFullscreen),
+            "width_third" => Some(CommandKind::WidthThird),
+            "width_half" => Some(CommandKind::WidthHalf),
+            "width_two_thirds" => Some(CommandKind::WidthTwoThirds),
+            "maximize_column" => Some(CommandKind::MaximizeColumn),
+            "expand_column" => Some(CommandKind::ExpandColumn),
+            "toggle_floating" => Some(CommandKind::ToggleFloating),
+            "close_window" => Some(CommandKind::Close),
             "next_display" => Some(CommandKind::NextDisplay),
             "previous_display" => Some(CommandKind::PreviousDisplay),
             _ => None,
@@ -305,7 +368,7 @@ pub struct WorkArea {
 
 /// A launcher entry representing a window-action command (e.g. "Center half",
 /// "Minimize"). Every command targets the previously-focused user window
-/// captured at gather time — see `app/gnome/src/commands.rs::gather_commands`
+/// captured at gather time — see `app/linux/src/backend/gnome/commands.rs`
 /// for the LoFi-filter rationale. `work_area` and `current_frame` are also
 /// captured at gather time so activation is a single D-Bus round-trip with no
 /// further reads.
@@ -1044,6 +1107,15 @@ mod tests {
         CommandKind::Minimize,
         CommandKind::ToggleMaximize,
         CommandKind::ToggleFullscreen,
+        CommandKind::WidthThird,
+        CommandKind::WidthHalf,
+        CommandKind::WidthTwoThirds,
+        CommandKind::MaximizeColumn,
+        CommandKind::ExpandColumn,
+        CommandKind::ToggleFloating,
+        CommandKind::Close,
+        CommandKind::NextDisplay,
+        CommandKind::PreviousDisplay,
     ];
 
     #[test]
@@ -1222,6 +1294,24 @@ mod tests {
         assert_eq!(
             unknown, None,
             "CommandKind::from_id(\"not-a-command\") should be None; got {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn command_kind_ids_are_unique() {
+        // `as_id` is the persistent MRU key, so two variants sharing one id
+        // would silently merge their histories — and `from_id` could only
+        // ever return one of them, so the other would stop round-tripping.
+        // A copy-paste slip when adding a variant is exactly how that
+        // happens, which is why this is asserted rather than assumed.
+        let mut seen: Vec<&str> = ALL_COMMAND_KINDS.iter().map(|k| k.as_id()).collect();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            total,
+            "every CommandKind must have a distinct as_id; got {seen:?}"
         );
     }
 

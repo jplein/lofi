@@ -1,6 +1,6 @@
 # LoFi
 
-LoFi is a small launcher for GNOME and macOS.
+LoFi is a small launcher for GNOME, Niri, and macOS.
 
 <img src="screenshot.png" width="530" alt="LoFi launcher showing a search field over a list of applications, workspaces, and commands">
 
@@ -19,26 +19,48 @@ What it can do:
 
 - Launch applications
 - Window management and navigation:
-    - Switch focus to an open window (GNOME only)
-    - Switch to another workspace (GNOME only)
-    - Operations on the active window:
-        - Resize
+    - Switch focus to an open window (Linux only)
+    - Switch to another workspace (Linux only)
+    - Move a window to another workspace (Linux only)
+    - Operations on the most recently focused window:
+        - Resize / retile
         - Toggle maximize
         - Toggle full-screen
 - Power management
 - Logout
 - Locking the screen
 
+The window-action rows differ by desktop, because a window action means
+different things on a floating desktop and on a scrolling tiler. GNOME and
+macOS get position-and-size commands (`Left half`, `Center third`, `Minimize`,
+…); Niri gets column-width presets and layout toggles (`Width half`,
+`Maximize column`, `Expand column`, `Toggle floating`, `Close window`, …).
+`Toggle maximize` and `Toggle fullscreen` exist everywhere. See
+[app/linux/README.md](app/linux/README.md#window-commands-under-niri).
+
 ## System requirements: Linux
 
 - NixOS
-- GNOME
+- GNOME or [Niri](https://github.com/YaLTeR/niri)
+
+One `lofi` binary serves both. It picks its backend at run time from
+`$NIRI_SOCKET` / `$XDG_CURRENT_DESKTOP`, so there is nothing to configure and
+nothing to rebuild when you switch sessions.
+
+The two differ in what they need *installed*, and only GNOME needs anything:
+
+- **GNOME** requires the LoFi Shell extension. Wayland clients can't enumerate
+  or manipulate other apps' windows, and Mutter exposes no adequate substitute,
+  so the extension is how the launcher sees windows and workspaces at all.
+- **Niri** requires nothing. The compositor's own IPC socket is the whole
+  interface, and the launcher presents itself as a layer-shell overlay, so
+  there isn't even a window rule to write.
 
 ## Install: Linux
 
 LoFi ships a Nix flake with a home-manager module that installs the launcher
-binary, symlinks the GNOME Shell extension into your profile, and enables the
-extension via dconf.
+binary and — on GNOME — symlinks the Shell extension into your profile and
+enables it via dconf.
 
 1. **Add the LoFi input to your flake** (`flake.nix`):
 
@@ -89,13 +111,30 @@ extension via dconf.
    Alternatively, set `programs.lofi.enableShellExtension = false` and add the
    UUID to your own `enabled-extensions` list.
 
-3. **Log out and log back in.** The GNOME Shell extension only loads on session
-   start (a Wayland constraint), so it stays inactive until you start a fresh
-   session.
+   **On Niri**, set `programs.lofi.enableShellExtension = false` — the GNOME
+   extension does nothing there, and skipping it avoids writing the
+   `org/gnome/shell` dconf key on a machine with no GNOME.
+
+3. **On GNOME, log out and log back in.** The Shell extension only loads on
+   session start (a Wayland constraint), so it stays inactive until you start a
+   fresh session. Niri needs no restart.
+
+### Binding a key
 
 Bind a shortcut to the `lofi` command to summon the launcher — there is no
-default. With home-manager you can add a GNOME custom keybinding via dconf, for
-example mapping `<Alt>space` to `lofi`:
+default. Running `lofi` a second time while it is open closes it, so a single
+binding toggles it.
+
+On **Niri**, add a bind to your `config.kdl`:
+
+```kdl
+binds {
+    Mod+Space { spawn "lofi"; }
+}
+```
+
+On **GNOME**, home-manager can add a custom keybinding via dconf — for example
+mapping `<Alt>space` to `lofi`:
 
 ```nix
 dconf.settings = {
@@ -113,6 +152,21 @@ dconf.settings = {
     name = "LoFi";
   };
 };
+```
+
+### Locking the screen on Niri
+
+Niri implements the session-lock protocol but ships no locker, so the "Lock"
+entry runs one. LoFi uses `$LOFI_LOCK_COMMAND` if set, otherwise the first of
+`swaylock`, `hyprlock`, `waylock`, `gtklock` it finds on `$PATH`.
+
+If you have none of those installed, LoFi falls back to asking logind to lock
+the session — which only emits a signal, and so locks **nothing** unless you
+also run an idle daemon (`swayidle`, `hypridle`) listening for it. If you want a
+specific locker or specific arguments, set it explicitly:
+
+```nix
+programs.lofi.lockCommand = "swaylock -f -c 000000";
 ```
 
 ## System requirements: macOS

@@ -4,7 +4,8 @@
 //! or systemd-logind service. Lock/Logout/Restart/Shutdown route through
 //! the session bus (GNOME's `ScreenSaver` and `SessionManager`); Suspend
 //! goes to the SYSTEM bus's `org.freedesktop.login1.Manager` because
-//! there's no GNOME-level Suspend wrapper.
+//! there's no GNOME-level Suspend wrapper. That one call is shared with the
+//! Niri backend and lives in `backend::logind`.
 //!
 //! Logout, Restart and Shutdown go through `org.gnome.SessionManager`'s
 //! `Logout(mode=0)`, `Reboot()` and `Shutdown()` (rather than logind's
@@ -12,9 +13,9 @@
 //! 60-second confirmation dialog, matching the system-menu behaviour and
 //! protecting against accidental triggers. `Logout(0)` is the
 //! with-confirmation mode (1 = no confirmation, 2 = force); we want the
-//! dialog. Lock uses `org.gnome.ScreenSaver.Lock`. Suspend uses logind's
-//! `Suspend(false)` (the bool is `interactive`; `false` skips the polkit
-//! prompt — suspend is almost always allowed for active users).
+//! dialog. Lock uses `org.gnome.ScreenSaver.Lock` — GNOME's own screensaver
+//! service, which is why this backend needs no configurable lock command the
+//! way the Niri one does.
 //!
 //! We use the lower-level `zbus::blocking::Proxy::call_method` rather than
 //! generating per-service `#[zbus::proxy]` traits — each call is one line
@@ -22,6 +23,8 @@
 
 use lofi_core::{PowerCommand, PowerCommandKind};
 use zbus::blocking::{Connection, Proxy};
+
+use crate::backend::logind;
 
 /// Full set of power-command kinds. Mirrors the `ALL_POWER_COMMAND_KINDS`
 /// constant in `lofi-core`'s tests; kept here because `gather_power_commands`
@@ -52,7 +55,10 @@ pub fn activate(kind: PowerCommandKind) {
     let result = match kind {
         PowerCommandKind::LockSession => lock_session(),
         PowerCommandKind::Logout => logout(),
-        PowerCommandKind::Suspend => suspend(),
+        // The one command that doesn't go through a GNOME service: there is
+        // no GNOME-level Suspend wrapper, so it lands on logind directly
+        // (see `backend::logind`).
+        PowerCommandKind::Suspend => logind::suspend(),
         PowerCommandKind::Restart => restart(),
         PowerCommandKind::Shutdown => shutdown(),
     };
@@ -70,20 +76,6 @@ fn lock_session() -> zbus::Result<()> {
         "org.gnome.ScreenSaver",
     )?;
     proxy.call_method("Lock", &())?;
-    Ok(())
-}
-
-fn suspend() -> zbus::Result<()> {
-    // Suspend lives on the SYSTEM bus, not session. `interactive=false` skips
-    // the polkit prompt — suspend is almost always allowed for active users.
-    let conn = Connection::system()?;
-    let proxy = Proxy::new(
-        &conn,
-        "org.freedesktop.login1",
-        "/org/freedesktop/login1",
-        "org.freedesktop.login1.Manager",
-    )?;
-    proxy.call_method("Suspend", &(false,))?;
     Ok(())
 }
 

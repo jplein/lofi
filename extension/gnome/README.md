@@ -125,7 +125,7 @@ fields can be added without breaking the wire format.
 Reads:
 
 - `ListWindows() -> aa{sv}` — filters out `is_override_redirect()` windows. Order is `global.get_window_actors()` order (Mutter's stacking order).
-- `ListWindowsMRU() -> aa{sv}` — same dict shape and override-redirect filter as `ListWindows`, but sorted most-recently-focused first (the order Alt+Tab cycles through). Backed by `global.display.get_tab_list(Meta.TabList.NORMAL_ALL, null)`, which is Mutter's canonical MRU source. The Rust launcher consumes this method exclusively today (see `app/gnome/src/windows.rs`); `ListWindows` is kept alongside it because the stacking-order list is a useful read for ad-hoc `gdbus` probing and any future caller that wants z-order rather than focus order.
+- `ListWindowsMRU() -> aa{sv}` — same dict shape and override-redirect filter as `ListWindows`, but sorted most-recently-focused first (the order Alt+Tab cycles through). Backed by `global.display.get_tab_list(Meta.TabList.NORMAL_ALL, null)`, which is Mutter's canonical MRU source. The Rust launcher consumes this method exclusively today (see `app/linux/src/backend/gnome/windows.rs`); `ListWindows` is kept alongside it because the stacking-order list is a useful read for ad-hoc `gdbus` probing and any future caller that wants z-order rather than focus order.
 - `GetActiveWindow() -> a{sv}` — empty dict if no focused window.
 - `GetWindowWorkArea(t id) -> a{sv}` — work area of the monitor that owns the window with `id`, as `{x, y, width, height}` of `i` (int32) variants. The work area is the monitor rectangle minus panel/dock struts — the bounding box every geometry command computes against. Throws `WindowNotFound` if the id doesn't resolve.
 - `GetWindowFrame(t id) -> a{sv}` — current frame rectangle of the window with `id`, same `{x, y, width, height}` int32 dict shape as `GetWindowWorkArea`. Only the `Center` window-action command reads this (it keeps the window's current size and recenters); the other geometry commands compute purely from the work area. Throws `WindowNotFound` if the id doesn't resolve.
@@ -143,7 +143,7 @@ By-id actions (throw `WindowNotFound` if the id doesn't resolve):
 - `ToggleFullscreenWindow(t id)` — flip the fullscreen state. Same rationale as `ToggleMaximizeWindow` for resolving on the extension side.
 - `CloseWindow(t id)`
 
-Every window action is by-id rather than active-window. LoFi itself takes focus when its window opens, so any `*ActiveWindow` action invoked from inside the launcher would operate on LoFi's own window. The Rust caller (`app/gnome/src/commands.rs::gather_commands`) captures the previously-focused user window's id at gather time — by walking the MRU list and skipping `dev.jplein.LoFi.desktop` — and every by-id method addresses that captured id explicitly. This is also why the earlier `MoveActiveWindowToNextWorkspace`, `MoveActiveWindowToPreviousWorkspace`, `MoveResizeActiveWindow`, `MaximizeActiveWindow`, and `UnmaximizeActiveWindow` methods were removed: no Rust caller could use them safely.
+Every window action is by-id rather than active-window. LoFi itself takes focus when its window opens, so any `*ActiveWindow` action invoked from inside the launcher would operate on LoFi's own window. The Rust caller (`app/linux/src/backend/gnome/commands.rs::gather_commands`) captures the previously-focused user window's id at gather time — by walking the MRU list and skipping `dev.jplein.LoFi.desktop` — and every by-id method addresses that captured id explicitly. This is also why the earlier `MoveActiveWindowToNextWorkspace`, `MoveActiveWindowToPreviousWorkspace`, `MoveResizeActiveWindow`, `MaximizeActiveWindow`, and `UnmaximizeActiveWindow` methods were removed: no Rust caller could use them safely.
 
 Workspace action:
 
@@ -166,7 +166,7 @@ perceptible latency to a flow that's supposed to feel instantaneous. All
 other windows keep their normal animations.
 
 The window is identified primarily by its **GApplication id**
-(`dev.jplein.LoFi`, set in `app/gnome/src/main.rs`) via
+(`dev.jplein.LoFi`, set in `app/linux/src/main.rs`) via
 `Meta.Window.get_gtk_application_id()`. Identifying by the GApplication id
 rather than by a `Shell.App` id means the match works even when no
 `dev.jplein.LoFi.desktop` file is installed — which is the common case for

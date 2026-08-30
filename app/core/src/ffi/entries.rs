@@ -72,11 +72,11 @@ const CATEGORY_WORKSPACE: &str = "Workspace";
 const CATEGORY_COMMAND: &str = "Command";
 /// Stable English category label for `EntryKind::PowerCommand`. The string
 /// is `"Power"` rather than `"PowerCommand"` to match the GNOME UI's
-/// `kind_to_str` mapping in `app/gnome/src/ui.rs` — both platforms now
+/// `kind_to_str` mapping in `app/linux/src/ui.rs` — both platforms now
 /// render the same label, with the FFI as the single source of truth.
 const CATEGORY_POWER_COMMAND: &str = "Power";
 /// Stable English category label for `EntryKind::WorkspaceCommand`. Present for
-/// exhaustiveness only — `WorkspaceCommand` is a GNOME-only entry kind that the
+/// exhaustiveness only — `WorkspaceCommand` is a Linux-only entry kind that the
 /// macOS frontend never pushes into an `EntryList`, so this string is never
 /// actually returned across the FFI in practice.
 const CATEGORY_WORKSPACE_COMMAND: &str = "WorkspaceCommand";
@@ -870,6 +870,13 @@ fn command_id_cstr(kind: CommandKind) -> &'static CStr {
         CommandKind::Minimize => c"minimize",
         CommandKind::ToggleMaximize => c"toggle_maximize",
         CommandKind::ToggleFullscreen => c"toggle_fullscreen",
+        CommandKind::WidthThird => c"width_third",
+        CommandKind::WidthHalf => c"width_half",
+        CommandKind::WidthTwoThirds => c"width_two_thirds",
+        CommandKind::MaximizeColumn => c"maximize_column",
+        CommandKind::ExpandColumn => c"expand_column",
+        CommandKind::ToggleFloating => c"toggle_floating",
+        CommandKind::Close => c"close_window",
         CommandKind::NextDisplay => c"next_display",
         CommandKind::PreviousDisplay => c"previous_display",
     }
