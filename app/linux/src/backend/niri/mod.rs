@@ -110,16 +110,25 @@ struct WorkspaceRow {
 ///   mid-gather shift every index.
 /// - `apps` — the `app_id` → desktop-entry resolver's lazy `StartupWMClass`
 ///   index (see `appid`).
+///
+/// It also carries `lock_command`, the user's configured locker (see
+/// `config`). That is not a cache but a setting, copied out of the `Config` at
+/// construction because the backend outlives the gather step that owns it.
 pub struct NiriBackend {
     workspaces: RefCell<Option<Vec<WorkspaceRow>>>,
     apps: AppIdResolver,
+    lock_command: Option<String>,
 }
 
 impl NiriBackend {
-    pub fn new() -> Self {
+    /// `lock_command` is `config::Config::lock_command` — `None` when the user
+    /// has not configured one, which leaves [`power::lock`] on its `$PATH`
+    /// search.
+    pub fn new(lock_command: Option<String>) -> Self {
         NiriBackend {
             workspaces: RefCell::new(None),
             apps: AppIdResolver::new(),
+            lock_command,
         }
     }
 
@@ -221,12 +230,6 @@ impl NiriBackend {
         if let Err(e) = ipc::action(action) {
             eprintln!("lofi: niri {what} failed: {e}");
         }
-    }
-}
-
-impl Default for NiriBackend {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -481,7 +484,7 @@ impl Backend for NiriBackend {
     }
 
     fn run_power_command(&self, kind: PowerCommandKind) {
-        power::activate(kind);
+        power::activate(kind, self.lock_command.as_deref());
     }
 
     /// True: an ordinary toplevel would be tiled into the scrolling layout,

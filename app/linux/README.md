@@ -11,6 +11,7 @@ The Linux implementation of LoFi. One `lofi` binary, two desktops: **GNOME** and
 - [`gio-unix`](https://docs.rs/gio-unix) for `DesktopAppInfo` (Unix-only, not re-exported from the cross-platform `gtk::gio`)
 - [`zbus`](https://docs.rs/zbus) for talking to the LoFi GNOME extension, and to logind, over D-Bus. The blocking proxy (`gen_blocking = true`, `gen_async = false`) is used deliberately: the GTK main thread is synchronous and the gather happens once at startup, so the cost of an async runtime would buy nothing here.
 - [`serde_json`](https://docs.rs/serde_json) for Niri's newline-delimited-JSON IPC
+- [`toml`](https://docs.rs/toml) for the user's configuration file. Deserialize only — LoFi never writes the file back. Pinned to the same major the gtk4-sys build scripts already pull in through `system-deps`, so it adds no new crate version to the lock file.
 
 This crate is built as both a library (`lofi_linux`) and a binary (`lofi`) so integration tests can link against the library.
 
@@ -26,6 +27,7 @@ So the crate stayed one crate, the directory was renamed to match what it holds,
   - `application_directories()` returns the XDG-driven search list: `$XDG_DATA_HOME` (falling back to `$HOME/.local/share`), then each entry of `$XDG_DATA_DIRS` (falling back to `/usr/local/share:/usr/share`), each with `applications` appended.
   - `gather_applications(dirs)` reads the supplied directories, skips missing ones silently, and returns a `Vec<lofi_core::Application>`. Entries that fail `should_show()` (per the freedesktop spec) are filtered out. Non-recursive. Each returned `Application` includes `icon: Option<String>` populated from `DesktopAppInfo::icon()` via `gio::IconExt::to_string` — the freedesktop serializer (`g_icon_to_string`) for the icon GObject. The value is an icon **identifier**, not bytes: rendering is deferred to the GTK image widget at draw time, where the icon theme, scale, and target size are known. `gather_applications` guarantees that every `Application::desktop_id` is canonical — always ends in `.desktop`. The integration test pins this invariant. Canonicalization matters because `desktop_id` is the payload of `EntryRef::Application` (see `lofi-core`) and therefore the stable history/MRU key; a bare stem would break round-tripping with previously persisted references. Results are deduped by canonical `desktop_id` with first-directory-wins semantics — this is the XDG shadowing convention, and the dir order from `application_directories()` already produces the right precedence (`$XDG_DATA_HOME` shadows `$XDG_DATA_DIRS`), so the dedup belongs here rather than at a caller; a user installing Ghostty via both the Nix system profile and `~/.local/share/applications` would not expect it to appear twice in the launcher.
 - `backend` — the desktop seam. See [Backends](#backends) below.
+- `config` — the user's configuration file. See [Configuration](#configuration) below.
 - `launch` — `launch::activate(&dyn Backend, &Entry)` is the single dispatch point for "the user pressed Enter on this row". An exhaustive `match` routes entries:
   - `Entry::Application(app)` branches on `app.recent_window_id`. When `Some(id)`, the app is currently running and `activate` calls `backend.focus_window(id)` — raising the most-recently-used window of the app, mirroring the GNOME dock's "click a running app's icon = raise its window" behaviour. When `None`, it falls back to a `gio_unix::DesktopAppInfo::new` lookup + `info.launch(&[], context.as_ref())` (the `gdk::Display::default().app_launch_context()` carries the launching display so the new app starts on the right monitor). This is the one branch that doesn't go through the backend: `.desktop` activation is XDG, identical on both desktops. We deliberately do **not** fall back from focus to launch when `focus_window` fails: the gather-vs-click race is real but rare, and a phantom second instance would be more surprising than a silent no-op.
   - `Entry::Window(w)` → `backend.focus_window(w.id)`.
@@ -35,7 +37,7 @@ So the crate stayed one crate, the directory was renamed to match what it holds,
   - `Entry::PowerCommand(c)` → `backend.run_power_command(c.kind)`.
 
   Errors at any branch are logged to stderr and swallowed: there's no useful recovery from "the desktop file vanished between gather and click", "the window id no longer resolves", or "the workspace was removed between gather and click" at the UI layer.
-- `ui` — the launcher window. Public entry point `ui::build(app, entries, mru_store, mru_index, backend)` constructs an `adw::ApplicationWindow` containing a `SearchEntry` over a scrolled `ListBox` and presents it. Internally holds the full gathered set in an `Rc<RefCell<UiState>>` alongside a `visible: Vec<usize>` of indices into that set and a `mru_position: HashMap<EntryRef, usize>` (rank 0 = most recent) built from `mru_index` at construction time. On every `changed` (keystroke) the list is fully torn down (`while let Some(child) = list_box.first_child()`) and rebuilt — simpler than diffing and fast enough at the scale of an application gather. The handler deliberately uses `changed` rather than GtkSearchEntry's debounced `search-changed`, which would otherwise delay the rebuild ~150ms after the last keypress. `populate_list` does **not** do its own filtering or sorting — it delegates the whole thing to `lofi_core::rank(&entries, query, &mru_position)`, the single shared ranking implementation in `app/core` (see `app/core/README.md`'s `ranking::rank` section). `rank` handles filtering (intersection semantics), the two-tier MRU/score order, the in-MRU prefix sub-ordering, and the empty-query passthrough, and returns indices into the gathered set in display order. The Linux layer's only ranking responsibility is to gather the entries and supply the MRU recency map; the macOS FFI path (`recompute_filter`) calls the same function, so the two platforms produce identical order. If the result is empty the list shows a single non-selectable "No matches" row.
+- `ui` — the launcher window. Public entry point `ui::build(app, entries, mru_store, mru_index, backend, appearance)` constructs an `adw::ApplicationWindow` containing a `SearchEntry` over a scrolled `ListBox` and presents it. Internally holds the full gathered set in an `Rc<RefCell<UiState>>` alongside a `visible: Vec<usize>` of indices into that set and a `mru_position: HashMap<EntryRef, usize>` (rank 0 = most recent) built from `mru_index` at construction time. On every `changed` (keystroke) the list is fully torn down (`while let Some(child) = list_box.first_child()`) and rebuilt — simpler than diffing and fast enough at the scale of an application gather. The handler deliberately uses `changed` rather than GtkSearchEntry's debounced `search-changed`, which would otherwise delay the rebuild ~150ms after the last keypress. `populate_list` does **not** do its own filtering or sorting — it delegates the whole thing to `lofi_core::rank(&entries, query, &mru_position)`, the single shared ranking implementation in `app/core` (see `app/core/README.md`'s `ranking::rank` section). `rank` handles filtering (intersection semantics), the two-tier MRU/score order, the in-MRU prefix sub-ordering, and the empty-query passthrough, and returns indices into the gathered set in display order. The Linux layer's only ranking responsibility is to gather the entries and supply the MRU recency map; the macOS FFI path (`recompute_filter`) calls the same function, so the two platforms produce identical order. If the result is empty the list shows a single non-selectable "No matches" row.
 
   The backend reaches `ui` for exactly two reasons: it is captured by the Enter and click closures so `launch::activate` can dispatch, and it is consulted once — `backend.uses_layer_shell()` — for how to present the window (see [Window presentation](#window-presentation)). Everything else in this module is desktop-agnostic.
 
@@ -58,6 +60,33 @@ On Niri an ordinary toplevel would be **tiled into the scrolling layout** — th
 
 A useful side effect: a layer surface is not a toplevel, so LoFi does not appear in Niri's own `Windows` list at all. It cannot turn up as a row in its own window list, and it cannot be picked as the target of its own window commands. The `LOFI_DESKTOP_ID` filter in the Niri backend's `target_window` is therefore belt-and-braces, kept for the layer-shell-unavailable fallback path.
 
+### Decorations, and who draws them
+
+The two presentation paths differ in one more way, and it is the reason the `config` module exists.
+
+On the **toplevel** path the window keeps its client-side decorations — `ui::build` deliberately does not call `decorated(false)` — so GTK draws the window shadow and clips the rounded corners, and `AdwApplicationWindow` gives us no titlebar to suppress. Nothing in the config file touches this path.
+
+On the **layer-shell** path there are no decorations at all, and neither GTK nor Niri can supply them:
+
+| | who can draw it on a layer surface |
+|---|---|
+| Drop shadow | GTK (with a margin) **or** Niri, via `layer-rule { shadow { … } }` |
+| Corner rounding of the surface | LoFi only |
+| Border | LoFi only |
+
+- `libgtk4-layer-shell` calls `gtk_window_set_decorated(FALSE)` on the window it converts, so there is no CSD decoration node. Left alone, the launcher renders as a bare rectangle: measured against a screenshot, the surface is exactly `WINDOW_WIDTH` × `WINDOW_HEIGHT` with no shadow margin, and a hard 90° step from wallpaper to surface at every corner.
+- Niri's layer rules accept `shadow` and `geometry-corner-radius`, but `geometry-corner-radius` on a layer rule only shapes **the shadow** — `clip-to-geometry` is window-rule-only, so it cannot round the surface. `border` and `focus-ring` are window-rule-only too, and Niri's parser rejects them outright inside a `layer-rule`.
+
+So LoFi always draws its own radius and border, and the shadow is either side's to draw. `ui::launcher_css(appearance)` generates the stylesheet for whichever arrangement the config asks for, and `ui::build` wraps `content` in a frame `gtk::Box` carrying `.lofi-frame`:
+
+- The surface colour moves off the `window` node and onto `.lofi-frame`; `window` goes transparent, because a window still painting its own corners would show an opaque square underneath the frame's rounded one.
+- The frame gets `Overflow::Hidden`, which in GTK4 pushes a **rounded** clip derived from the node's CSS padding box — that is what stops a selected row's highlight from squaring off a corner it reaches.
+- A `border` declaration is emitted only when `border-width` is non-zero, rather than as `0px solid`, so the default config adds no declaration at all.
+
+**When the config names a shadow**, LoFi draws it as a CSS `box-shadow` on the frame, and the frame takes a transparent margin of `softness + spread + max(|offset.x|, |offset.y|)` on all four sides with the window's default size grown by twice that. The margin is symmetric on purpose: the launcher's layer surface is anchored to no edge, so it is the **surface** the compositor centres, and per-edge margins would shift the visible window off-centre by half the difference. The margin is also capped (`config::MAX_SHADOW_MARGIN`) because it grows the surface itself — every other setting is clamped by GTK on its own, but a fat-fingered `softness` here would ask the compositor for a surface bigger than the screen.
+
+**When it doesn't** — the default — no margin is added and the surface stays exactly the visible rectangle. That is precisely the shape Niri's own `layer-rule { shadow { on } }` needs: Niri draws a layer surface's shadow around the whole buffer, invisible margins included, because a layer surface has no `xdg_surface.set_window_geometry` to declare its visual bounds with. Niri's own docs warn about this ("you'll need to configure layer-shell clients to remove their own margins or shadows"). So the two are mutually exclusive by construction, and leaving the shadow block out is how a user opts into the compositor drawing it.
+
 ### Keyboard
 
 - **Up / Down** — move the selection in the list. Focus stays on the search entry, so typing continues to filter without an extra Tab.
@@ -69,9 +98,53 @@ The list is rebuilt from scratch on every keystroke. There is no incremental dif
 
 Integration tests live in `tests/` and build their own `.desktop` fixtures inside a `tempfile::tempdir()`. The gatherer takes directories as a parameter, so tests never mutate process environment variables. `ui` and `launch` are exercised manually — they need a Wayland session and a running compositor to be meaningful.
 
+## Configuration
+
+`~/.config/lofi/config.toml` (`$XDG_CONFIG_HOME/lofi/config.toml` when that is set). Every key is optional and the whole file is optional; an absent file is the common case and yields the defaults silently.
+
+```toml
+lock-command = "swaylock -f -c 000000"
+
+[appearance]
+corner-radius = 12          # default 12
+border-width  = 3           # default 0 — no border
+border-color  = "#e0e0e0"   # default @borders
+
+[appearance.shadow]         # omit for no LoFi-drawn shadow
+softness = 30               # default 30
+spread   = 8                # default 5
+offset   = { x = 5, y = 5 } # default x=0 y=5
+color    = "#00000080"      # default #0007
+```
+
+### Why a file, and why not read Niri's
+
+The launcher has to be *told* what the user's Niri looks like, because on the layer-shell path it has to draw decorations nobody else can (see [Decorations, and who draws them](#decorations-and-who-draws-them)). It is told rather than deduced: LoFi deliberately does **not** parse `config.kdl`. That file is the compositor's, its schema is Niri's to change, and the values LoFi would want (`layout.border`, a window rule's `geometry-corner-radius`) are per-window-rule anyway — there is no single correct answer to read out of it. A handful of numbers written down once is simpler and predictable, which is the launcher's stated goal.
+
+TOML because `serde` was already a dependency and `toml` was already in the lock file via `system-deps`, so the format costs one line. KDL would let the `[appearance.shadow]` block be a literal copy-paste out of `config.kdl`, but would add a parser this crate otherwise has no use for.
+
+The shadow **key names and defaults are Niri's**, though, and that is not cosmetic: Niri defines its shadow parameters by reference to CSS ("`softness` … same as CSS box-shadow blur radius", "`spread` … same as CSS box-shadow spread", "`offset` … same as CSS box-shadow offset"), and LoFi renders the shadow as a CSS `box-shadow`. The translation is therefore exact, the numbers copy straight across, and a bare `[appearance.shadow]` with no keys reproduces Niri's stock shadow.
+
+### Scope and error policy
+
+`[appearance]` is honoured **only** on the layer-shell path. On an ordinary toplevel GTK's client-side decorations already supply the shadow and the rounding, and drawing a second rounded, bordered frame inside one would double up — so on GNOME the generated stylesheet is byte-identical to what it was before the config file existed, default radius included.
+
+Errors follow the crate's usual policy: log to stderr and degrade. A missing file is silent; an unreadable or malformed one logs and leaves the launcher on defaults. A launcher that refused to open over a typo in a cosmetic setting would be a much worse outcome than one that opens looking plain.
+
+Two deliberate strictnesses inside that:
+
+- **`deny_unknown_fields`.** A misspelled `border-colour` is an error naming the key, not a silently ignored line — the alternative is a user staring at an unchanged window with nothing to go on. The cost is that one typo drops the whole file back to defaults, which is at least visible.
+- **Colours are validated, not passed through.** `config::Color` accepts a hex colour (`#0007`, `#e0e0e0`, `#00000080`), a GTK named colour (`@borders`, `@accent_color`), or a bare CSS keyword (`black`), and nothing else. This is a security property rather than a style preference: the value is interpolated into a GTK stylesheet, so a raw pass-through would let a config file close the declaration and open its own (`#fff; } * { background-image: url(…)`). What the three accepted shapes have in common is no whitespace and no `;`, `}`, `(`, or `/`. An unknown but well-shaped keyword is left for GTK to reject on its own terms.
+
+### Testing
+
+`config::parse(text)` is pure and separate from `config::load_from(path)`, for the same reason `apps::gather_applications` takes its directories as a parameter and `backend::detect` takes its environment values: the interesting half is unit-testable without touching the filesystem. `ui::launcher_css(appearance)` is split out of `ui::install_styles` on the same principle — the generated declarations are asserted on without needing a `gdk::Display`.
+
+One test (`the_home_manager_modules_output_shape_parses`) pins the shape the home-manager module actually emits. `pkgs.formats.toml` renders a nested table as its own `[appearance.shadow.offset]` header rather than as an inline table, so the generated file does not look like the hand-written one above; both are the same TOML data model, and nothing else would catch the module and the parser drifting apart.
+
 ## Backends
 
-`backend::Backend` is the trait; `backend::create()` picks an implementation and returns it as an `Rc<dyn Backend>` that lives for the whole launcher invocation.
+`backend::Backend` is the trait; `backend::create(&config)` picks an implementation and returns it as an `Rc<dyn Backend>` that lives for the whole launcher invocation. `config` is consulted for exactly one thing today — the Niri backend's `lock-command`, which `NiriBackend` copies out because it outlives the gather step that owns the `Config`. The GNOME backend ignores it: its Lock goes through `org.gnome.ScreenSaver`, which needs no locker to be named.
 
 ### Detection
 
@@ -233,10 +306,15 @@ Niri is a compositor, not a desktop environment: no session manager, no screensa
 - **Log Out** → Niri's `Quit { skip_confirmation: false }`, leaving Niri's own "press Enter to confirm" prompt in place. Same reasoning as GNOME's `Logout(0)`.
 - **Lock** → spawns a locker, because Niri implements `ext-session-lock-v1` but ships none. The chain is:
   1. `$LOFI_LOCK_COMMAND`, run through `sh -c` so it can carry arguments without LoFi inventing a quoting convention.
-  2. The first of `swaylock`, `hyprlock`, `waylock`, `gtklock` found on `$PATH`. Candidate order dominates directory order — we want the user's preferred locker, not whichever sits earliest on `$PATH`.
-  3. logind's `Session.Lock`.
+  2. `lock-command` from [the config file](#configuration), run the same way.
+  3. The first of `swaylock`, `hyprlock`, `waylock`, `gtklock` found on `$PATH`. Candidate order dominates directory order — we want the user's preferred locker, not whichever sits earliest on `$PATH`.
+  4. logind's `Session.Lock`.
 
-  Step 3 is **last** deliberately. logind's `Lock` only emits a signal; it locks nothing unless a daemon (`swayidle`, `hypridle`, `xss-lock`) is listening for it. On a session with no such daemon it would succeed and do nothing, which is the worst possible outcome for a Lock command — the user walks away believing the screen is locked. When LoFi falls through to it, it says so on stderr and names `$LOFI_LOCK_COMMAND` as the fix. The home-manager module exposes the same setting as `programs.lofi.lockCommand`, and exports it into both the shell and systemd user environments — a Niri started by a display manager never sources a login shell, so the shell export alone would not reach it.
+  An all-whitespace value counts as unset on both of the first two steps. For the variable that is the shell's way of saying "not set"; for the file it is the least surprising reading of `lock-command = ""`, and the alternative is running `sh -c ""`, which exits 0 and locks nothing while hiding the `$PATH` search that would have worked.
+
+  The variable outranks the file so a one-off `LOFI_LOCK_COMMAND=… lofi` still overrides a configured locker. That cuts one way worth knowing on a first switch from the variable to the file: a `LOFI_LOCK_COMMAND` already exported into the running session shadows the new file value until the next login, because LoFi is spawned by the compositor and inherits its environment. The file does not have that problem — LoFi reads it itself, at activation, so every later change lands on the next invocation. That is exactly why `programs.lofi.lockCommand` in the home-manager module now writes the file instead of exporting the variable into both the shell and systemd user environments, as it used to: the old route only reached LoFi through the compositor's environment, so a change took effect at the next *login* rather than the next rebuild.
+
+  Step 4 is **last** deliberately. logind's `Lock` only emits a signal; it locks nothing unless a daemon (`swayidle`, `hypridle`, `xss-lock`) is listening for it. On a session with no such daemon it would succeed and do nothing, which is the worst possible outcome for a Lock command — the user walks away believing the screen is locked. When LoFi falls through to it, it says so on stderr and names `lock-command` as the fix.
 
   The spawned locker is not waited on: LoFi exits moments later and the locker is reparented to init, which is what we want — blocking would keep a launcher process alive for the whole locked period.
 

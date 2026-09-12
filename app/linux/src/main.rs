@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use lofi_core::{Entry, EntryRef, MruStore};
-use lofi_linux::{apps, backend, ui};
+use lofi_linux::{apps, backend, config, ui};
 
 /// GApplication id, which is also what makes the second `lofi` invocation a
 /// remote that toggles the first (see `on_activate`). Must stay in lockstep
@@ -35,11 +35,18 @@ fn on_activate(app: &adw::Application) {
         return;
     }
 
+    // Read the user's configuration file once, up front. It is best-effort by
+    // design — a missing file is the common case and a malformed one costs the
+    // user their styling, not their launcher — so this never fails. See
+    // `config`.
+    let config = config::load();
+
     // Pick the desktop backend once, up front: everything below that isn't
     // plain XDG application enumeration goes through it, and the UI keeps a
     // handle so `launch::activate` can dispatch on Enter. See
-    // `backend::detect` for how the choice is made.
-    let backend = backend::create();
+    // `backend::detect` for how the choice is made. The config goes in because
+    // the Niri backend's Lock command consults `lock-command` from it.
+    let backend = backend::create(&config);
 
     let dirs = apps::application_directories();
     let mut applications = apps::gather_applications(&dirs);
@@ -109,7 +116,14 @@ fn on_activate(app: &adw::Application) {
     // clone without moving the original.
     let mru_store = mru_store.map(Rc::new);
 
-    ui::build(app, entries, mru_store, mru_index, backend);
+    ui::build(
+        app,
+        entries,
+        mru_store,
+        mru_index,
+        backend,
+        &config.appearance,
+    );
 }
 
 /// Resolve the on-disk path for the MRU SQLite file. Mirrors the manual XDG

@@ -33,6 +33,8 @@ use std::rc::Rc;
 
 use lofi_core::{Command, PowerCommand, PowerCommandKind, Window, Workspace, WorkspaceCommand};
 
+use crate::config::Config;
+
 /// Canonical `.desktop` id of the launcher itself. Both backends compare
 /// against it to skip LoFi's own window when picking the target for the
 /// window-action and workspace-move commands — otherwise every one of those
@@ -92,11 +94,18 @@ pub fn detect(niri_socket: Option<&str>, xdg_current_desktop: Option<&str>) -> D
 /// closures hold it so `launch::activate` can dispatch on Enter or click,
 /// and the Niri backend caches its workspace table across the two (see
 /// `niri::NiriBackend`).
-pub fn create() -> Rc<dyn Backend> {
+///
+/// `config` is consulted for exactly one thing today — the Niri backend's
+/// `lock-command`, which it copies out rather than borrowing because the
+/// backend outlives the gather step that owns the `Config`. The GNOME backend
+/// ignores it: its Lock goes through `org.gnome.ScreenSaver`, which needs no
+/// locker to be named. The whole `Config` is passed rather than that one field
+/// so a second setting does not change this signature again.
+pub fn create(config: &Config) -> Rc<dyn Backend> {
     let niri_socket = env::var("NIRI_SOCKET").ok();
     let xdg = env::var("XDG_CURRENT_DESKTOP").ok();
     match detect(niri_socket.as_deref(), xdg.as_deref()) {
-        Desktop::Niri => Rc::new(niri::NiriBackend::new()),
+        Desktop::Niri => Rc::new(niri::NiriBackend::new(config.lock_command.clone())),
         Desktop::Gnome => Rc::new(gnome::GnomeBackend::new()),
     }
 }

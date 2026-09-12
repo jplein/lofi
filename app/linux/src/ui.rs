@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -11,6 +12,7 @@ use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use lofi_core::{Entry, EntryKind, EntryRef, MruStore};
 
 use crate::backend::Backend;
+use crate::config::{Appearance, Shadow};
 use crate::launch;
 
 const WINDOW_WIDTH: i32 = 480;
@@ -31,8 +33,12 @@ const ROW_MARGIN_TOP: i32 = 6;
 const ROW_MARGIN_BOTTOM: i32 = 2;
 const RUNNING_DOT_SIZE: i32 = 6;
 const ICON_COLUMN_SPACING: i32 = 2;
+/// CSS class on the frame widget that carries the launcher's surface colour,
+/// corner radius, border, and (when configured) drop shadow on the
+/// layer-shell path. See `build` and `launcher_css`.
+const FRAME_CSS_CLASS: &str = "lofi-frame";
 
-/// App-wide CSS for the launcher. Covers:
+/// The config-independent half of the launcher's CSS. Covers:
 ///
 /// 1. The running-indicator dot under an Application's icon when
 ///    `recent_window_id.is_some()`. `alpha(@theme_fg_color, ...)` adapts to
@@ -41,10 +47,11 @@ const ICON_COLUMN_SPACING: i32 = 2;
 /// 2. The top SearchEntry, stripped of its default rounded border, focus
 ///    ring, and tinted fill so it blends into the window background instead
 ///    of looking like a separate input control inset into the chrome.
-/// 3. The launcher's surface colour: the popover (menu) tone rather than the
-///    window or view one, with the list chain forced transparent so the one
-///    surface shows through it.
-const LAUNCHER_CSS: &str = "\
+/// 3. The list chain, forced transparent so the one surface shows through it.
+///
+/// Which node actually *paints* that surface is the config-dependent half,
+/// and lives in [`launcher_css`].
+const BASE_CSS: &str = "\
 .running-indicator {
     background-color: alpha(@theme_fg_color, 0.8);
     border-radius: 9999px;
@@ -88,17 +95,10 @@ searchentry > text,
 entry.search > text {
     padding-left: 4px;
 }
-/* The launcher is conceptually a menu, not a document window, so it takes
-   the popover surface rather than the window or view one. `@popover_bg_color`
-   / `@popover_fg_color` are libadwaita named colours, so this follows the
-   light/dark scheme without naming a literal. */
-window {
-    background-color: @popover_bg_color;
-    color: @popover_fg_color;
-}
 /* GTK gives a bare `list` — and the viewport/scroller wrapping it — the VIEW
    background, which would punch a panel of a different tone through the
-   popover surface the window paints. Forcing the whole chain transparent is
+   popover surface underneath (painted by `window` on the toplevel path, by
+   `.lofi-frame` on the layer-shell one). Forcing the whole chain transparent is
    what keeps the launcher reading as one surface. The viewport is named
    because it is a node of that same chain: it paints nothing under Adwaita
    today, so naming it costs no pixel, and it is what stops a theme that does
@@ -110,20 +110,108 @@ list {
 }
 ";
 
+/// Surface paint for the ordinary-toplevel path (GNOME).
+///
+/// The launcher is conceptually a menu, not a document window, so it takes the
+/// popover surface rather than the window or view one. `@popover_bg_color` /
+/// `@popover_fg_color` are libadwaita named colours, so this follows the
+/// light/dark scheme without naming a literal.
+///
+/// Nothing here rounds a corner or draws a shadow, because on this path GTK's
+/// client-side decorations already do both.
+const PLAIN_SURFACE_CSS: &str = "\
+window {
+    background-color: @popover_bg_color;
+    color: @popover_fg_color;
+}
+";
+
+/// The launcher's full stylesheet: [`BASE_CSS`] plus whichever surface paint
+/// the presentation path calls for.
+///
+/// `appearance` is `Some` only on the layer-shell path, where the window has
+/// no decorations of its own to inherit (`libgtk4-layer-shell` calls
+/// `gtk_window_set_decorated(FALSE)` on the window it converts) and the
+/// compositor cannot supply a border or round the surface either. There, the
+/// surface colour moves off the `window` node and onto a frame widget
+/// (`.lofi-frame`, see `build`) that can carry a radius, a border, and a
+/// shadow; the window itself goes transparent so the corners it no longer
+/// paints show the desktop through. `None` leaves the toplevel path exactly as
+/// it was.
+///
+/// Pure and separate from [`install_styles`] so the generated declarations are
+/// unit-testable without a `gdk::Display` — the same split as
+/// `config::parse` / `config::load`.
+fn launcher_css(appearance: Option<&Appearance>) -> String {
+    let Some(appearance) = appearance else {
+        return format!("{BASE_CSS}{PLAIN_SURFACE_CSS}");
+    };
+
+    let mut css = String::from(BASE_CSS);
+    css.push_str(
+        "\
+window {
+    background-color: transparent;
+    color: @popover_fg_color;
+}
+",
+    );
+
+    // `write!` into a String is infallible, so the Results are discarded
+    // rather than unwrapped — this module has no error path to report into.
+    let _ = writeln!(
+        css,
+        ".{FRAME_CSS_CLASS} {{\n    background-color: @popover_bg_color;\n    \
+         border-radius: {}px;",
+        appearance.corner_radius
+    );
+
+    // Omitted entirely rather than emitted as `0px solid`, so the default
+    // config adds no declaration at all.
+    if appearance.border_width > 0 {
+        let _ = writeln!(
+            css,
+            "    border: {}px solid {};",
+            appearance.border_width,
+            appearance.border_color.as_css()
+        );
+    }
+
+    // Niri defines its shadow parameters by reference to CSS box-shadow —
+    // `softness` is the blur radius, `spread` the spread, `offset` the offset
+    // — so this is a transcription, not an approximation. See `config`.
+    if let Some(shadow) = appearance.shadow.as_ref() {
+        let _ = writeln!(
+            css,
+            "    box-shadow: {}px {}px {}px {}px {};",
+            shadow.offset.x,
+            shadow.offset.y,
+            shadow.softness,
+            shadow.spread,
+            shadow.color.as_css()
+        );
+    }
+
+    css.push_str("}\n");
+    css
+}
+
 /// Latch ensuring `install_styles` only registers our provider with the
 /// default display once per process. `build()` runs on every
 /// `connect_activate`, but re-registering the same provider is wasted work
-/// (and would stack identical priority entries).
+/// (and would stack identical priority entries). Safe despite `install_styles`
+/// now taking an argument: both the backend and the config file are read once
+/// in `main`, so the stylesheet cannot differ between calls within a process.
 static STYLES_INSTALLED: OnceLock<()> = OnceLock::new();
 
-/// Register the running-indicator CSS once per process. Called from `build()`
+/// Register the launcher's CSS once per process. Called from `build()`
 /// because we need a live default `gdk::Display`, which only exists after
 /// `adw::Application::activate` fires. Guarded by `STYLES_INSTALLED` so
 /// repeat invocations are no-ops. Returns silently if there's no default
 /// display (headless tests, broken environment) — the dot just won't be
 /// styled and falls back to whatever the GTK default theme renders for an
 /// empty `gtk::Box`.
-fn install_styles() {
+fn install_styles(appearance: Option<&Appearance>) {
     if STYLES_INSTALLED.get().is_some() {
         return;
     }
@@ -134,7 +222,7 @@ fn install_styles() {
     // `load_from_string` is gated behind gtk4's `v4_12` feature; we target
     // the unfeatured baseline so use `load_from_data`, which is the same
     // call with a different signature.
-    provider.load_from_data(LAUNCHER_CSS);
+    provider.load_from_data(&launcher_css(appearance));
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
@@ -164,14 +252,22 @@ struct UiState {
 /// click) so `launch::activate` can dispatch against the running desktop, and
 /// is consulted once for how to present the window (see
 /// `configure_layer_shell`). Everything else here is desktop-agnostic.
+///
+/// `appearance` is the user's configured border, corner radius, and shadow. It
+/// is honoured **only** on the layer-shell path: those three are decorations
+/// GTK's client-side decorations already supply on an ordinary toplevel, and
+/// drawing a second rounded, bordered frame inside one would double up. See
+/// `config` for why the layer-shell path has none of its own.
 pub fn build(
     app: &adw::Application,
     entries: Vec<Entry>,
     mru_store: Option<Rc<MruStore>>,
     mru_index: Vec<EntryRef>,
     backend: Rc<dyn Backend>,
+    appearance: &Appearance,
 ) {
-    install_styles();
+    let appearance = backend.uses_layer_shell().then_some(appearance);
+    install_styles(appearance);
 
     let search_entry = gtk::SearchEntry::builder()
         .hexpand(true)
@@ -207,18 +303,52 @@ pub fn build(
     content.append(&search_entry);
     content.append(&scroller);
 
-    // No `decorated(false)`: keep client-side decorations so we get the GTK
-    // drop shadow and rounded-corner clipping. AdwApplicationWindow has no
-    // titlebar by default, so we don't get one even with decorations on.
+    // Transparent room on every side for a LoFi-drawn shadow to blur into;
+    // zero whenever nothing is drawing one, which is both the GNOME path and
+    // the (default) layer-shell path where Niri draws the shadow itself.
+    let shadow_margin = appearance
+        .and_then(|a| a.shadow.as_ref())
+        .map_or(0, Shadow::margin);
+
+    // No `decorated(false)`: on an ordinary toplevel, client-side decorations
+    // are what give us the GTK drop shadow and rounded-corner clipping.
+    // AdwApplicationWindow has no titlebar by default, so we don't get one
+    // even with decorations on.
+    //
+    // That only holds on the toplevel path. `libgtk4-layer-shell` calls
+    // `gtk_window_set_decorated(FALSE)` on the window it converts, so under
+    // Niri there is no decoration node, no shadow, and no rounding — which is
+    // exactly what the `.lofi-frame` wrapper below replaces.
+    //
+    // The default size is the *surface*, so it has to include the shadow
+    // margin; the frame inside it stays WINDOW_WIDTH x WINDOW_HEIGHT.
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("LoFi")
-        .default_width(WINDOW_WIDTH)
-        .default_height(WINDOW_HEIGHT)
+        .default_width(WINDOW_WIDTH + 2 * shadow_margin)
+        .default_height(WINDOW_HEIGHT + 2 * shadow_margin)
         .resizable(false)
         .modal(true)
         .build();
-    window.set_content(Some(&content));
+
+    if appearance.is_some() {
+        // `Overflow::Hidden` pushes a *rounded* clip (GTK derives it from the
+        // node's CSS padding box), which is what keeps a selected row's
+        // highlight from squaring off a corner it happens to reach.
+        let frame = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .margin_top(shadow_margin)
+            .margin_bottom(shadow_margin)
+            .margin_start(shadow_margin)
+            .margin_end(shadow_margin)
+            .build();
+        frame.add_css_class(FRAME_CSS_CLASS);
+        frame.set_overflow(gtk::Overflow::Hidden);
+        frame.append(&content);
+        window.set_content(Some(&frame));
+    } else {
+        window.set_content(Some(&content));
+    }
 
     // Build the MRU-rank lookup once. The persisted index is already in
     // most-recent-first order, so its enumerated position is the rank.
@@ -593,5 +723,141 @@ fn bump_mru(store: Option<&MruStore>, entry: &Entry) {
         && let Err(e) = store.bump(&entry.reference())
     {
         eprintln!("mru: bump failed for {}: {e}", entry.name());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Color, Offset};
+
+    /// The declarations inside `.lofi-frame`, so a test can assert on the
+    /// generated rule without depending on the surrounding whitespace.
+    fn frame_rule(css: &str) -> String {
+        let start = css
+            .find(".lofi-frame {")
+            .expect("the layer-shell stylesheet should define a frame rule");
+        let rest = &css[start..];
+        let end = rest.find('}').expect("the frame rule should be closed");
+        rest[..=end].to_owned()
+    }
+
+    #[test]
+    fn the_toplevel_path_is_unchanged_by_the_config() {
+        // GNOME's window keeps its CSD shadow and rounding, so none of the
+        // appearance settings may reach it — not even the default radius.
+        let css = launcher_css(None);
+        assert!(
+            css.contains("window {\n    background-color: @popover_bg_color;"),
+            "the toplevel path must still paint the popover surface on `window`"
+        );
+        // The rule, not the bare class name — `BASE_CSS` mentions the class in
+        // a comment explaining which node paints the surface on each path.
+        assert!(
+            !css.contains(&format!(".{FRAME_CSS_CLASS} {{")),
+            "the toplevel path must not emit a frame rule at all"
+        );
+        assert!(
+            !css.contains("background-color: transparent;\n    color:"),
+            "the toplevel path's window must keep painting its own background"
+        );
+        assert!(
+            !css.contains("border-radius: 12px"),
+            "the toplevel path must not round anything itself"
+        );
+    }
+
+    #[test]
+    fn the_layer_shell_path_moves_the_surface_onto_the_frame() {
+        // The window has to stop painting its corners, or the rounding on the
+        // frame would sit on top of an opaque square.
+        let css = launcher_css(Some(&Appearance::default()));
+        assert!(
+            css.contains("window {\n    background-color: transparent;"),
+            "the window must go transparent so the frame's corners show through"
+        );
+        assert!(
+            css.contains("color: @popover_fg_color;"),
+            "the foreground colour still belongs on `window`, to be inherited"
+        );
+        assert!(
+            frame_rule(&css).contains("background-color: @popover_bg_color;"),
+            "the frame is what paints the surface on this path"
+        );
+    }
+
+    #[test]
+    fn the_default_appearance_rounds_but_adds_nothing_else() {
+        let rule = frame_rule(&launcher_css(Some(&Appearance::default())));
+        assert!(
+            rule.contains("border-radius: 12px;"),
+            "an unconfigured Niri session should still get libadwaita's radius, got: {rule}"
+        );
+        assert!(
+            !rule.contains("border:"),
+            "a zero border width must emit no declaration at all, got: {rule}"
+        );
+        assert!(
+            !rule.contains("box-shadow:"),
+            "no shadow unless configured — that is what leaves the surface the \
+             right shape for Niri's own layer-rule shadow, got: {rule}"
+        );
+    }
+
+    #[test]
+    fn a_configured_border_and_shadow_are_transcribed() {
+        let appearance = Appearance {
+            corner_radius: 16,
+            border_width: 3,
+            border_color: Color::parse("#e0e0e0").expect("fixture colour should parse"),
+            shadow: Some(Shadow {
+                softness: 30,
+                spread: 8,
+                offset: Offset { x: 5, y: 2 },
+                color: Color::parse("#00000080").expect("fixture colour should parse"),
+            }),
+        };
+        let rule = frame_rule(&launcher_css(Some(&appearance)));
+
+        assert!(rule.contains("border-radius: 16px;"), "got: {rule}");
+        assert!(rule.contains("border: 3px solid #e0e0e0;"), "got: {rule}");
+        // Niri's softness is CSS's blur radius and its spread is CSS's spread,
+        // so the order here is offset-x, offset-y, softness, spread, colour.
+        assert!(
+            rule.contains("box-shadow: 5px 2px 30px 8px #00000080;"),
+            "the shadow should transcribe 1:1 into CSS box-shadow, got: {rule}"
+        );
+    }
+
+    #[test]
+    fn a_negative_shadow_offset_survives_the_transcription() {
+        // CSS takes signed offsets, so a shadow cast up and to the left needs
+        // no special handling — but it is worth pinning that we don't drop the
+        // sign on the way through.
+        let appearance = Appearance {
+            shadow: Some(Shadow {
+                offset: Offset { x: -4, y: -2 },
+                ..Shadow::default()
+            }),
+            ..Appearance::default()
+        };
+        assert!(
+            frame_rule(&launcher_css(Some(&appearance))).contains("box-shadow: -4px -2px "),
+            "a negative offset must reach the stylesheet as written"
+        );
+    }
+
+    #[test]
+    fn the_generated_stylesheet_keeps_the_shared_rules() {
+        // `BASE_CSS` carries the running-indicator dot and the SearchEntry
+        // flattening; both paths need them.
+        for css in [
+            launcher_css(None),
+            launcher_css(Some(&Appearance::default())),
+        ] {
+            assert!(css.contains(".running-indicator {"), "got: {css}");
+            assert!(css.contains("searchentry,"), "got: {css}");
+            assert!(css.contains("scrolledwindow > viewport,"), "got: {css}");
+        }
     }
 }

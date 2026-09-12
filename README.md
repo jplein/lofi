@@ -52,9 +52,13 @@ The two differ in what they need *installed*, and only GNOME needs anything:
 - **GNOME** requires the LoFi Shell extension. Wayland clients can't enumerate
   or manipulate other apps' windows, and Mutter exposes no adequate substitute,
   so the extension is how the launcher sees windows and workspaces at all.
-- **Niri** requires nothing. The compositor's own IPC socket is the whole
-  interface, and the launcher presents itself as a layer-shell overlay, so
-  there isn't even a window rule to write.
+- **Niri** requires nothing installed. The compositor's own IPC socket is the
+  whole interface, and the launcher presents itself as a layer-shell overlay.
+
+Niri users may want [a config file](#configuration) all the same. A layer
+surface gets no decorations from either side, so the launcher comes up as a
+plain rounded rectangle until you tell it what your border and shadow look
+like.
 
 ## Install: Linux
 
@@ -154,31 +158,142 @@ dconf.settings = {
 };
 ```
 
+## Configuration
+
+LoFi reads `~/.config/lofi/config.toml` (or `$XDG_CONFIG_HOME/lofi/config.toml`).
+The file is optional and so is every key in it.
+
+```toml
+lock-command = "swaylock -f -c 000000"
+
+[appearance]
+corner-radius = 12          # default 12
+border-width  = 3           # default 0 — no border
+border-color  = "#e0e0e0"   # default @borders
+
+[appearance.shadow]         # omit for no LoFi-drawn shadow
+softness = 30               # default 30
+spread   = 8                # default 5
+offset   = { x = 5, y = 5 } # default x=0 y=5
+color    = "#00000080"      # default #0007
+```
+
+`[appearance]` is **Niri-only**. On GNOME the launcher is an ordinary window
+and GTK already gives it the system's shadow and rounded corners; on Niri it is
+a layer-shell overlay, which gets neither, and which the compositor can only
+partly decorate. Colours take a hex value (`#0007`, `#e0e0e0`, `#00000080`), a
+GTK named colour (`@borders`, `@accent_color`), or a CSS keyword (`black`).
+
+### Matching your Niri theme
+
+Niri can draw the launcher's shadow itself, and it cannot draw the other two
+things at all — `border` and `clip-to-geometry` are window-rule properties that
+a `layer-rule` rejects. So there are two arrangements, and you pick one by
+whether you write an `[appearance.shadow]` block.
+
+**LoFi draws everything.** One file, and the shadow keys are Niri's own names
+with Niri's own meanings, so copy the numbers straight out of `config.kdl`:
+
+```toml
+[appearance]
+corner-radius = 12
+border-width  = 3
+border-color  = "#e0e0e0"
+
+[appearance.shadow]
+softness = 30
+spread   = 5
+offset   = { x = 0, y = 5 }
+color    = "#0007"
+```
+
+**Niri draws the shadow.** Leave the shadow block out and add a layer rule:
+
+```toml
+[appearance]
+corner-radius = 12
+border-width  = 3
+border-color  = "#e0e0e0"
+```
+
+```kdl
+layer-rule {
+    match namespace="^lofi$"
+    geometry-corner-radius 12
+    shadow { on; }
+}
+```
+
+Don't do both. To draw its own shadow LoFi pads its surface with transparent
+room for the blur, and Niri draws a layer surface's shadow around the *whole*
+buffer — it has no way to learn the visual bounds — so you would get Niri's
+shadow floating a blur-width out from the window. With no shadow block LoFi
+adds no padding, and the surface is exactly the visible rectangle that Niri's
+shadow wants. Either way LoFi rounds its own corners, so `corner-radius` and
+the layer rule's `geometry-corner-radius` should agree.
+
+### Setting it from home-manager
+
+`programs.lofi` can generate the file instead:
+
+```nix
+programs.lofi = {
+  enable = true;
+  lockCommand = "swaylock -f -c 000000";
+  appearance = {
+    cornerRadius = 12;
+    borderWidth  = 3;
+    borderColor  = "#e0e0e0";
+    shadow = {
+      enable = true;
+      softness = 30;
+      spread = 5;
+      offsetY = 5;
+      color = "#0007";
+    };
+  };
+};
+```
+
+The file is written **only if you set at least one of those**. Set none and
+nothing is generated, leaving `~/.config/lofi/config.toml` yours to hand-write
+— it has to be one or the other, since a generated file is a read-only symlink
+into the Nix store.
+
 ### Locking the screen on Niri
 
 Niri implements the session-lock protocol but ships no locker, so the "Lock"
-entry runs one. LoFi uses `$LOFI_LOCK_COMMAND` if set, otherwise the first of
-`swaylock`, `hyprlock`, `waylock`, `gtklock` it finds on `$PATH`.
+entry runs one. LoFi tries, in order: `$LOFI_LOCK_COMMAND`, then
+`lock-command` from the config file, then the first of `swaylock`, `hyprlock`,
+`waylock`, `gtklock` it finds on `$PATH`.
 
 If you have none of those installed, LoFi falls back to asking logind to lock
 the session — which only emits a signal, and so locks **nothing** unless you
 also run an idle daemon (`swayidle`, `hypridle`) listening for it. If you want a
 specific locker or specific arguments, set it explicitly:
 
+```toml
+lock-command = "swaylock -f -c 000000"
+```
+
+or, from home-manager:
+
 ```nix
 programs.lofi.lockCommand = "swaylock -f -c 000000";
 ```
 
-This exports `LOFI_LOCK_COMMAND` twice — into `hm-session-vars.sh` for a Niri
-started from a TTY, and into `~/.config/environment.d/` for one started by a
-display manager, where the session is `user@.service` -> `niri.service` and no
-login shell runs. Either way the setting takes effect at your next login, not
-on rebuild: LoFi is spawned by Niri and inherits the environment Niri started
-with. To confirm it landed, check the compositor's own environment:
+Either way the setting takes effect on the next `lofi` invocation — LoFi reads
+the file itself, at activation.
 
-```sh
-tr '\0' '\n' < /proc/$(pgrep -x niri)/environ | grep LOFI
-```
+> **If you set `programs.lofi.lockCommand` before:** it used to export
+> `LOFI_LOCK_COMMAND` into your session environment, and it now writes the
+> config file instead. The variable still wins when set, so the copy already
+> exported into your **running** session keeps shadowing the new value until
+> your next login. To check whether that is what you are seeing:
+>
+> ```sh
+> tr '\0' '\n' < /proc/$(pgrep -x niri)/environ | grep LOFI
+> ```
 
 ## System requirements: macOS
 

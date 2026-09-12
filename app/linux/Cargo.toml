@@ -26,6 +26,12 @@ serde = { version = "1", features = ["derive"] }
 # backend needs a JSON codec. The GNOME backend's D-Bus wire format is
 # handled by zvariant inside zbus and does not use this.
 serde_json = "1"
+# The user's configuration file (`~/.config/lofi/config.toml`). Deserialize
+# only — LoFi never writes the file back, so the `parse` half of the crate is
+# all that is used. Pinned to the same major the gtk4-sys build scripts
+# already pull in through `system-deps`, so this adds no new crate version to
+# the lock file.
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -38,10 +38,12 @@ const ALL_KINDS: &[PowerCommandKind] = &[
 /// Environment variable that overrides the lock command. Read as a shell
 /// command line rather than an argv so a user can write
 /// `LOFI_LOCK_COMMAND='swaylock -f -c 000000'` without LoFi having to invent a
-/// quoting convention.
+/// quoting convention. The config file's `lock-command` is the same string in
+/// a more durable place; see [`lock`] for why the variable still outranks it.
 pub const LOCK_COMMAND_ENV: &str = "LOFI_LOCK_COMMAND";
 
-/// Lockers tried, in order, when `$LOFI_LOCK_COMMAND` is unset.
+/// Lockers tried, in order, when neither `$LOFI_LOCK_COMMAND` nor the config
+/// file names one.
 ///
 /// Order is by how commonly they appear alongside Niri rather than by any
 /// judgement about the programs themselves. All are `ext-session-lock-v1`
@@ -61,9 +63,13 @@ pub fn gather_power_commands() -> Vec<PowerCommand> {
 /// same `eprintln!`-and-degrade policy as everywhere else, and for the same
 /// reason: the launcher window has already closed, so there is no UI surface
 /// to report through.
-pub fn activate(kind: PowerCommandKind) {
+///
+/// `configured` is the config file's `lock-command`, threaded down from
+/// `NiriBackend`. It is only consulted by [`lock`]; every other kind ignores
+/// it.
+pub fn activate(kind: PowerCommandKind, configured: Option<&str>) {
     let result = match kind {
-        PowerCommandKind::LockSession => lock(),
+        PowerCommandKind::LockSession => lock(configured),
         PowerCommandKind::Logout => logout(),
         PowerCommandKind::Suspend => logind::suspend().map_err(|e| e.to_string()),
         PowerCommandKind::Restart => logind::reboot().map_err(|e| e.to_string()),
@@ -91,23 +97,32 @@ pub fn activate(kind: PowerCommandKind) {
 /// The chain, in order:
 ///
 /// 1. `$LOFI_LOCK_COMMAND`, run through `sh -c` so it can carry arguments.
-/// 2. The first of [`LOCKER_CANDIDATES`] found on `$PATH`.
-/// 3. logind's `Session.Lock` signal.
+/// 2. `lock-command` from the config file, run the same way.
+/// 3. The first of [`LOCKER_CANDIDATES`] found on `$PATH`.
+/// 4. logind's `Session.Lock` signal.
+///
+/// The environment variable outranks the file deliberately, so a one-off
+/// `LOFI_LOCK_COMMAND=… lofi` still overrides a configured locker for that
+/// invocation. It is worth knowing which way that cuts on a first switch from
+/// the variable to the file: a `LOFI_LOCK_COMMAND` still exported into the
+/// running session shadows the new file value until the next login, because
+/// LoFi is spawned by the compositor and inherits its environment. The file
+/// does not have that problem — LoFi reads it itself, at activation, so every
+/// later change lands on the next invocation.
 ///
 /// The spawned locker is deliberately not waited on. LoFi exits moments after
 /// this returns and the locker is reparented to init, which is what we want —
 /// blocking on it would keep a launcher process alive for the whole locked
 /// period.
-fn lock() -> Result<(), String> {
-    if let Ok(command) = env::var(LOCK_COMMAND_ENV)
-        && !command.trim().is_empty()
-    {
+fn lock(configured: Option<&str>) -> Result<(), String> {
+    let from_env = env::var(LOCK_COMMAND_ENV).ok();
+    if let Some(command) = resolve_lock_command(from_env.as_deref(), configured) {
         return Command::new("sh")
             .arg("-c")
-            .arg(&command)
+            .arg(command)
             .spawn()
             .map(|_| ())
-            .map_err(|e| format!("{LOCK_COMMAND_ENV}={command:?} failed to start: {e}"));
+            .map_err(|e| format!("lock command {command:?} failed to start: {e}"));
     }
 
     if let Some(locker) = find_locker_on_path(LOCKER_CANDIDATES) {
@@ -120,10 +135,32 @@ fn lock() -> Result<(), String> {
     eprintln!(
         "power: no locker found on PATH (tried {}); falling back to logind Session.Lock, \
          which only locks if an idle daemon is listening for it. \
-         Set {LOCK_COMMAND_ENV} to the locker you want.",
+         Set lock-command in ~/.config/lofi/config.toml (or {LOCK_COMMAND_ENV}) \
+         to the locker you want.",
         LOCKER_CANDIDATES.join(", ")
     );
     logind::lock_session().map_err(|e| e.to_string())
+}
+
+/// Pick the lock command from the environment and the config file, or `None`
+/// when neither names one.
+///
+/// An all-whitespace value counts as unset on both sides: for the variable
+/// that is the shell's way of saying "not set", and for the file it is the
+/// least surprising reading of `lock-command = ""` — otherwise LoFi would run
+/// `sh -c ""`, which exits 0 and locks nothing, hiding the `$PATH` search that
+/// would have worked.
+///
+/// Split out of [`lock`] so the precedence itself is unit-testable without
+/// spawning a process.
+fn resolve_lock_command<'a>(
+    from_env: Option<&'a str>,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    [from_env, configured]
+        .into_iter()
+        .flatten()
+        .find(|command| !command.trim().is_empty())
 }
 
 /// Ask Niri to exit. `skip_confirmation: false` leaves Niri's own confirmation
@@ -187,6 +224,51 @@ mod tests {
         fs::write(&path, b"#!/bin/sh\n").expect("fixture should be writable");
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))
             .expect("fixture permissions should be settable");
+    }
+
+    #[test]
+    fn the_environment_outranks_the_config_file() {
+        assert_eq!(
+            resolve_lock_command(Some("swaylock -f"), Some("hyprlock")),
+            Some("swaylock -f"),
+            "a one-off LOFI_LOCK_COMMAND must override a configured locker"
+        );
+        assert_eq!(
+            resolve_lock_command(None, Some("hyprlock")),
+            Some("hyprlock"),
+            "the config file is consulted when the variable is unset"
+        );
+        assert_eq!(
+            resolve_lock_command(Some("swaylock"), None),
+            Some("swaylock"),
+            "the variable alone still works, as it did before the config file"
+        );
+        assert_eq!(
+            resolve_lock_command(None, None),
+            None,
+            "with neither set, the caller falls through to the PATH search"
+        );
+    }
+
+    #[test]
+    fn a_blank_lock_command_counts_as_unset() {
+        // `sh -c ""` exits 0 and locks nothing, which would silently defeat
+        // the PATH search that was about to work.
+        assert_eq!(
+            resolve_lock_command(Some(""), Some("hyprlock")),
+            Some("hyprlock"),
+            "an exported-but-empty variable is the shell's way of saying unset"
+        );
+        assert_eq!(
+            resolve_lock_command(Some("   "), None),
+            None,
+            "an all-whitespace variable must not be spawned"
+        );
+        assert_eq!(
+            resolve_lock_command(None, Some("  ")),
+            None,
+            "an all-whitespace config value must not be spawned either"
+        );
     }
 
     #[test]
