@@ -55,6 +55,7 @@ fn on_activate(app: &adw::Application) {
     let commands_vec = backend.gather_commands(&windows);
     let workspace_commands = backend.gather_workspace_commands(&windows, &workspaces_vec);
     let power_commands = backend.gather_power_commands();
+    let summon_commands = backend.gather_summon_commands(&windows);
 
     // Build a desktop_id -> most-recent-window-id map. Every backend
     // guarantees `gather_windows` is in MRU order, so the FIRST occurrence per
@@ -85,7 +86,8 @@ fn on_activate(app: &adw::Application) {
             + workspaces_vec.len()
             + commands_vec.len()
             + workspace_commands.len()
-            + power_commands.len(),
+            + power_commands.len()
+            + summon_commands.len(),
     );
     entries.extend(applications.into_iter().map(Entry::Application));
     entries.extend(windows.into_iter().map(Entry::Window));
@@ -93,6 +95,7 @@ fn on_activate(app: &adw::Application) {
     entries.extend(commands_vec.into_iter().map(Entry::Command));
     entries.extend(workspace_commands.into_iter().map(Entry::WorkspaceCommand));
     entries.extend(power_commands.into_iter().map(Entry::PowerCommand));
+    entries.extend(summon_commands.into_iter().map(Entry::SummonWindow));
 
     // Open the persistent MRU store and snapshot the recency index. Both are
     // best-effort: any failure (no XDG_STATE_HOME + no HOME, permission

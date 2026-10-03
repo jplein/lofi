@@ -22,8 +22,8 @@ pub mod windows;
 pub mod workspaces;
 
 use lofi_core::{
-    Command, CommandKind, PowerCommand, PowerCommandKind, Window, Workspace, WorkspaceCommand,
-    compute_geometry,
+    Command, CommandKind, PowerCommand, PowerCommandKind, SummonWindow, Window, Workspace,
+    WorkspaceCommand, compute_geometry,
 };
 
 use super::Backend;
@@ -72,6 +72,12 @@ impl Backend for GnomeBackend {
 
     fn gather_power_commands(&self) -> Vec<PowerCommand> {
         power::gather_power_commands()
+    }
+
+    /// Always empty: "Summon window" puts a window in the column right of
+    /// another, and GNOME floats every window, so there are no columns.
+    fn gather_summon_commands(&self, _windows: &[Window]) -> Vec<SummonWindow> {
+        Vec::new()
     }
 
     fn focus_window(&self, id: u64) {
@@ -146,6 +152,15 @@ impl Backend for GnomeBackend {
 
     fn run_power_command(&self, kind: PowerCommandKind) {
         power::activate(kind);
+    }
+
+    /// Unreachable in practice — `gather_summon_commands` emits nothing — but
+    /// logged rather than silent, like the Niri backend's unhandled kinds.
+    fn run_summon_command(&self, summon: &SummonWindow) {
+        eprintln!(
+            "gnome: summon window {} is not supported; ignoring",
+            summon.window.id
+        );
     }
 
     /// False: Mutter does not implement `wlr-layer-shell`, so the launcher is

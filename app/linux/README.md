@@ -164,12 +164,14 @@ fn gather_workspaces(&self) -> Vec<Workspace>;
 fn gather_commands(&self, windows: &[Window]) -> Vec<Command>;
 fn gather_workspace_commands(&self, windows: &[Window], workspaces: &[Workspace]) -> Vec<WorkspaceCommand>;
 fn gather_power_commands(&self) -> Vec<PowerCommand>;
+fn gather_summon_commands(&self, windows: &[Window]) -> Vec<SummonWindow>;
 
 fn focus_window(&self, id: u64);
 fn activate_workspace(&self, index: i32);
 fn run_command(&self, command: &Command);
 fn run_workspace_command(&self, command: &WorkspaceCommand);
 fn run_power_command(&self, kind: PowerCommandKind);
+fn run_summon_command(&self, summon: &SummonWindow);
 
 fn uses_layer_shell(&self) -> bool;
 ```
@@ -292,11 +294,36 @@ What the backend emits instead, in list order:
 
 "Maximize column" is `SetWindowWidth` at 100%, not Niri's `MaximizeColumn` action, because Niri's own documentation defines maximize-column as equivalent to a column width of 100% — and `SetWindowWidth` takes a window id where `MaximizeColumn` would act on whatever is focused. That by-id preference is the same principle as the GNOME backend's: the launcher decides its target at gather time and names it explicitly.
 
-`ExpandColumn` is the one exception, because Niri exposes no by-id form of it. It acts on Niri's **layout** active window, which is not the same thing as the window that reports `is_focused`: while LoFi's layer-shell overlay holds exclusive keyboard focus *no* window reports `is_focused`, yet the action still lands on the column the user was last working in. That is also the window LoFi picks as its target, because switching to a non-empty workspace focuses a window there and so bumps its `focus_timestamp`. The two can only diverge when the active workspace is empty — in which case there is no column and the action is a harmless no-op.
+`ExpandColumn` is an exception, because Niri exposes no by-id form of it (the other is `MoveColumnToIndex`; see [Summon window under Niri](#summon-window-under-niri)). It acts on Niri's **layout** active window, which is not the same thing as the window that reports `is_focused`: while LoFi's layer-shell overlay holds exclusive keyboard focus *no* window reports `is_focused`, yet the action still lands on the column the user was last working in. That is also the window LoFi picks as its target, because switching to a non-empty workspace focuses a window there and so bumps its `focus_timestamp`. The two can only diverge when the active workspace is empty — in which case there is no column and the action is a harmless no-op.
 
 `gather_commands` returns an empty `Vec` when no non-LoFi window is open, matching GNOME, so the rows simply don't appear rather than appearing and doing nothing. Unlike GNOME it does **not** drop the set when geometry can't be read: `work_area` is informational here and `current_frame` is zeroed, because no emitted command reads either. See `app/core/README.md`'s `Command` section for what each field carries on this path and why.
 
 `run_workspace_command` is one call, not GNOME's two: Niri's `MoveWindowToWorkspace` takes a `focus` flag, so "move it and take me with it" is atomic. The workspace-move rows reuse `lofi_core::build_workspace_commands` for the boundary logic, the id scheme, and the relative rows; only the absolute rows' **labels** are rewritten afterwards, so they name the same workspace the switch rows do (core builds them from the positional index, which on a multi-output session is not the number Niri shows the user).
+
+### Summon window under Niri
+
+Niri gets one `Summon window: <title>` row per other open window (MRU order, icon from the summoned window's app). Activating it brings that window into the column directly right of the target window and focuses it; the columns that were right of the target shift one further right. `A* B` on workspace 1 and `C` on workspace 2 become `A C* B`. GNOME's `gather_summon_commands` returns nothing: GNOME floats every window, so there are no columns.
+
+Right of the target, rather than in its place, so the window you were working in stays put and the summoned one arrives beside it — the same place Niri itself opens a new window.
+
+The decision is a pure function, `summon_plan(target, summoned)`, over each window's workspace id and 1-based column. Those come from the `layout.pos_in_scrolling_layout` field of Niri's `Windows` response and are cached on the backend by `gather_windows`, keyed by window id, rather than added to `lofi_core::Window` — that type is shared with GNOME and macOS, which have no columns.
+
+| Summoned window is… | Actions |
+| --- | --- |
+| on another workspace | `MoveWindowToWorkspace { focus: false }` to the target's workspace, `FocusWindow`, `MoveColumnToIndex(target column + 1)` |
+| on the target's workspace, right of it | `FocusWindow`, `MoveColumnToIndex(target column + 1)` |
+| on the target's workspace, left of it | `FocusWindow`, `MoveColumnToIndex(target column)` |
+
+Why these exact steps:
+
+- **The column index is taken from the gather-time snapshot.** Niri inserts a window moved in from another workspace as a new column right after the active one, and the target is the active column, so it usually lands in place already and the `MoveColumnToIndex` is a no-op — but naming the index means the result does not hinge on where Niri chose to insert.
+- **From the left, the index is the target's own.** Taking the window out of its column first shifts every column right of it one to the left, the target included, so the target's old index is now the slot right of it. Using target + 1 would land the window one column too far.
+- **`MoveColumnToIndex` is focused-only**, the second exception to the by-id rule. That is safe because `FocusWindow` on the summoned window is dispatched first, so "focused" is the window LoFi just named. It also leaves the user on the summoned window, which is the point of summoning it.
+- **`focus: false` on the move, with a separate focus step.** Niri only lets focus follow a move when the moved window was already focused, which — with LoFi's overlay up — it is not.
+
+No row is offered where summoning would at most focus the window, which its own Window row already does: for the target itself; and on the target's workspace, when either window is floating (no column order to rearrange), when the two share a column, or when the window is already directly right of the target. Nor is one offered when the target has no workspace. A floating window from another workspace is still offered — it is moved over and focused, and stays floating, so there is no column to place.
+
+One accepted limitation: `MoveColumnToIndex` moves a whole column, so summoning a window that shares its column on the *same* workspace brings its column-mates with it. Niri has no by-id way to move a single tile. (From another workspace this does not arise — `MoveWindowToWorkspace` moves just the one window, which arrives as its own column.)
 
 ### Power under Niri
 

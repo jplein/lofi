@@ -710,6 +710,8 @@ fn kind_to_str(kind: EntryKind) -> &'static str {
         // with center/minimize/etc. rather than "Workspace" (which is reserved
         // for the switch-to-workspace entries).
         EntryKind::WorkspaceCommand => "Command",
+        // Same reasoning: it places a window relative to the captured target.
+        EntryKind::SummonWindow => "Command",
     }
 }
 

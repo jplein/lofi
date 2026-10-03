@@ -80,6 +80,10 @@ const CATEGORY_POWER_COMMAND: &str = "Power";
 /// macOS frontend never pushes into an `EntryList`, so this string is never
 /// actually returned across the FFI in practice.
 const CATEGORY_WORKSPACE_COMMAND: &str = "WorkspaceCommand";
+/// Stable English category label for `EntryKind::SummonWindow`. Present for
+/// exhaustiveness only — `SummonWindow` is a Niri-only entry kind that the
+/// macOS frontend never pushes into an `EntryList`.
+const CATEGORY_SUMMON_WINDOW: &str = "SummonWindow";
 
 /// Opaque handle owning a vector of `Entry` values plus a current query and
 /// per-accessor caches. Construction is via `lofi_entries_new`; teardown is
@@ -503,7 +507,8 @@ pub unsafe extern "C" fn lofi_entries_get_bundle_id(
         | Entry::Workspace(_)
         | Entry::Command(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => None,
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => None,
     };
     let Some(bundle_str) = bundle else {
         return ptr::null();
@@ -555,6 +560,7 @@ pub unsafe extern "C" fn lofi_entries_get_category(
         EntryKind::Command => CATEGORY_COMMAND,
         EntryKind::PowerCommand => CATEGORY_POWER_COMMAND,
         EntryKind::WorkspaceCommand => CATEGORY_WORKSPACE_COMMAND,
+        EntryKind::SummonWindow => CATEGORY_SUMMON_WINDOW,
     };
 
     let mut cache = list_ref.category_cache.borrow_mut();
@@ -604,7 +610,8 @@ pub unsafe extern "C" fn lofi_entries_get_icon(
         Entry::Workspace(_)
         | Entry::Command(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => None,
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => None,
     };
 
     let mut cache = list_ref.icon_cache.borrow_mut();
@@ -794,7 +801,8 @@ pub unsafe extern "C" fn lofi_entries_get_window_id(list: *const EntryList, idx:
         | Entry::Workspace(_)
         | Entry::Command(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => 0,
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => 0,
     }
 }
 
@@ -836,7 +844,8 @@ pub unsafe extern "C" fn lofi_entries_get_is_running(list: *const EntryList, idx
         | Entry::Workspace(_)
         | Entry::Command(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => false,
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => false,
     }
 }
 
@@ -990,7 +999,8 @@ pub unsafe extern "C" fn lofi_entries_get_command_id(
         | Entry::Window(_)
         | Entry::Workspace(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => ptr::null(),
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => ptr::null(),
     }
 }
 
@@ -1046,7 +1056,8 @@ pub unsafe extern "C" fn lofi_entries_get_command_geometry(
         | Entry::Window(_)
         | Entry::Workspace(_)
         | Entry::PowerCommand(_)
-        | Entry::WorkspaceCommand(_) => None,
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => None,
     };
     let Some((x, y, w, h)) = geometry else {
         // State-toggle kind / non-Command: leave the out-params untouched.
@@ -1166,6 +1177,7 @@ pub unsafe extern "C" fn lofi_entries_get_power_command_id(
         | Entry::Window(_)
         | Entry::Workspace(_)
         | Entry::Command(_)
-        | Entry::WorkspaceCommand(_) => ptr::null(),
+        | Entry::WorkspaceCommand(_)
+        | Entry::SummonWindow(_) => ptr::null(),
     }
 }

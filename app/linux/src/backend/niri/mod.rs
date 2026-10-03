@@ -30,6 +30,10 @@
 //! emitted; the kinds this backend emits are proportional column widths and
 //! state toggles. `Minimize` is absent for the same reason — Niri has no
 //! minimized state at all. See [`ALL_KINDS`].
+//!
+//! **Niri has a column order, so it gets "Summon window".** Bringing a window
+//! into the column directly right of the target window only means something
+//! when windows have a column order. See [`summon_plan`].
 
 pub mod appid;
 pub mod ipc;
@@ -39,8 +43,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use lofi_core::{
-    Command, CommandKind, PowerCommand, PowerCommandKind, Window, WorkArea, Workspace,
-    WorkspaceCommand, WorkspaceCommandKind, build_workspace_commands,
+    Command, CommandKind, PowerCommand, PowerCommandKind, SummonWindow, Window, WorkArea,
+    Workspace, WorkspaceCommand, WorkspaceCommandKind, build_workspace_commands,
 };
 
 use super::{Backend, LOFI_DESKTOP_ID};
@@ -96,6 +100,79 @@ struct WorkspaceRow {
     output: Option<String>,
 }
 
+/// Where a window sits, in Niri's own terms. Captured from the `Windows`
+/// response at gather time; see [`NiriBackend::placements`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    /// Niri's workspace id — not LoFi's positional index, because the only
+    /// consumer is an action that wants the id.
+    workspace_id: Option<u64>,
+    /// 1-based column in the scrolling layout; `None` for a floating window.
+    column: Option<usize>,
+}
+
+/// The actions a "Summon window" needs, worked out by [`summon_plan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SummonPlan {
+    /// Move the summoned window to this workspace first. `None` when it is
+    /// already on the target's workspace.
+    workspace_id: Option<u64>,
+    /// Then focus it and move its column to this 1-based index — the slot
+    /// directly right of the target. `None` when there is no column to place:
+    /// the target or the summoned window is floating.
+    column_index: Option<usize>,
+}
+
+/// How to bring `summoned` into the column directly right of `target`, or
+/// `None` when there is no meaningful way to — in which case no row is
+/// offered.
+///
+/// From another workspace, the window is moved over first. Niri inserts a
+/// window moved that way as a new column directly right of the active one,
+/// and the target *is* the active column, so it usually lands in place
+/// already. The column index is still named explicitly, from the gather-time
+/// snapshot, so the result does not hinge on Niri's choice of where to insert.
+///
+/// On the same workspace the index depends on which side the window starts
+/// on: from the right, it goes to the target's index + 1; from the left,
+/// removing it first shifts the target one to the left, so the target's old
+/// index is already the slot right of it. `MoveColumnToIndex` moves the whole
+/// column, so a window that shares its column brings its column-mates along —
+/// accepted, since Niri offers no by-id way to move one tile.
+///
+/// No row on the same workspace when either window is floating (there is no
+/// column order to rearrange), when the two share a column, or when the window
+/// is already directly right of the target — in each case summoning would at
+/// most focus it, which its own Window row already does. A target with no
+/// workspace has nowhere to summon to at all.
+fn summon_plan(target: Placement, summoned: Placement) -> Option<SummonPlan> {
+    let target_workspace = target.workspace_id?;
+
+    if summoned.workspace_id != Some(target_workspace) {
+        return Some(SummonPlan {
+            workspace_id: Some(target_workspace),
+            // A floating window stays floating when it changes workspace, so
+            // it has no column to place.
+            column_index: target
+                .column
+                .filter(|_| summoned.column.is_some())
+                .map(|column| column + 1),
+        });
+    }
+
+    let (target_column, summoned_column) = (target.column?, summoned.column?);
+    let column_index = match summoned_column.cmp(&target_column) {
+        std::cmp::Ordering::Equal => return None,
+        std::cmp::Ordering::Greater if summoned_column == target_column + 1 => return None,
+        std::cmp::Ordering::Greater => target_column + 1,
+        std::cmp::Ordering::Less => target_column,
+    };
+    Some(SummonPlan {
+        workspace_id: None,
+        column_index: Some(column_index),
+    })
+}
+
 /// Niri implementation of [`Backend`].
 ///
 /// Holds two caches, both scoped to the single launcher invocation that owns
@@ -110,6 +187,10 @@ struct WorkspaceRow {
 ///   mid-gather shift every index.
 /// - `apps` — the `app_id` → desktop-entry resolver's lazy `StartupWMClass`
 ///   index (see `appid`).
+/// - `placements` — each window's workspace id and column, filled in by
+///   `gather_windows`. `Window` is shared with GNOME and macOS, neither of
+///   which has columns, so the Niri-only layout facts live here instead, and
+///   `gather_summon_commands` / `run_summon_command` read them by window id.
 ///
 /// It also carries `lock_command`, the user's configured locker (see
 /// `config`). That is not a cache but a setting, copied out of the `Config` at
@@ -117,6 +198,7 @@ struct WorkspaceRow {
 pub struct NiriBackend {
     workspaces: RefCell<Option<Vec<WorkspaceRow>>>,
     apps: AppIdResolver,
+    placements: RefCell<HashMap<u64, Placement>>,
     lock_command: Option<String>,
 }
 
@@ -128,6 +210,7 @@ impl NiriBackend {
         NiriBackend {
             workspaces: RefCell::new(None),
             apps: AppIdResolver::new(),
+            placements: RefCell::new(HashMap::new()),
             lock_command,
         }
     }
@@ -288,6 +371,17 @@ impl Backend for NiriBackend {
             .map(|row| (row.niri_id, row.index))
             .collect();
 
+        *self.placements.borrow_mut() = raw
+            .iter()
+            .map(|w| {
+                let placement = Placement {
+                    workspace_id: w.workspace_id,
+                    column: w.column(),
+                };
+                (w.id, placement)
+            })
+            .collect();
+
         raw.into_iter()
             .map(|w| {
                 let resolved = w.app_id.as_deref().and_then(|id| self.apps.resolve(id));
@@ -394,6 +488,32 @@ impl Backend for NiriBackend {
         power::gather_power_commands()
     }
 
+    /// One "Summon window" row per other window that [`summon_plan`] can
+    /// bring to the right of the target window, in the same MRU order as the window
+    /// rows. LoFi's own window is skipped for the same reason it is skipped as
+    /// a target.
+    fn gather_summon_commands(&self, windows: &[Window]) -> Vec<SummonWindow> {
+        let Some(target) = self.target_window(windows) else {
+            return Vec::new();
+        };
+        let placements = self.placements.borrow();
+        let Some(&target_placement) = placements.get(&target.id) else {
+            return Vec::new();
+        };
+
+        windows
+            .iter()
+            .filter(|w| w.id != target.id)
+            .filter(|w| w.app_desktop_id.as_deref() != Some(LOFI_DESKTOP_ID))
+            .filter(|w| {
+                placements
+                    .get(&w.id)
+                    .is_some_and(|&p| summon_plan(target_placement, p).is_some())
+            })
+            .map(|w| SummonWindow::new(w.clone(), target.id))
+            .collect()
+    }
+
     fn focus_window(&self, id: u64) {
         self.dispatch("focus_window", Action::FocusWindow { id });
     }
@@ -485,6 +605,49 @@ impl Backend for NiriBackend {
 
     fn run_power_command(&self, kind: PowerCommandKind) {
         power::activate(kind, self.lock_command.as_deref());
+    }
+
+    /// Bring `summon.window` to the right of the target and focus it: move it
+    /// to the target's workspace if needed, focus it, then move its column
+    /// into place.
+    ///
+    /// The move keeps `focus: false` and the focus is a separate step, because
+    /// `MoveColumnToIndex` acts on the focused column and Niri only lets the
+    /// focus follow a move when the moved window was already focused — which,
+    /// with LoFi's overlay up, it is not. Focusing it last also leaves the
+    /// user on the window they just summoned, the way "Move to workspace"
+    /// leaves them with the window they just moved.
+    fn run_summon_command(&self, summon: &SummonWindow) {
+        let id = summon.window.id;
+        let plan = {
+            let placements = self.placements.borrow();
+            match (
+                placements.get(&summon.target_window_id),
+                placements.get(&id),
+            ) {
+                (Some(&target), Some(&summoned)) => summon_plan(target, summoned),
+                _ => None,
+            }
+        };
+        let Some(plan) = plan else {
+            eprintln!("lofi: niri cannot summon window {id}; ignoring");
+            return;
+        };
+
+        if let Some(workspace_id) = plan.workspace_id {
+            self.dispatch(
+                "move_window_to_workspace",
+                Action::MoveWindowToWorkspace {
+                    window_id: id,
+                    reference: WorkspaceReference::Id(workspace_id),
+                    focus: false,
+                },
+            );
+        }
+        self.dispatch("focus_window", Action::FocusWindow { id });
+        if let Some(index) = plan.column_index {
+            self.dispatch("move_column_to_index", Action::MoveColumnToIndex { index });
+        }
     }
 
     /// True: an ordinary toplevel would be tiled into the scrolling layout,
@@ -608,6 +771,114 @@ mod tests {
             workspace_label(&workspace(9, 1, None, None), true),
             "Workspace 1",
             "a workspace with no output can't be disambiguated by one"
+        );
+    }
+
+    fn tiled(workspace_id: u64, column: usize) -> Placement {
+        Placement {
+            workspace_id: Some(workspace_id),
+            column: Some(column),
+        }
+    }
+
+    fn floating(workspace_id: u64) -> Placement {
+        Placement {
+            workspace_id: Some(workspace_id),
+            column: None,
+        }
+    }
+
+    #[test]
+    fn summon_from_another_workspace_moves_then_lands_right_of_the_target() {
+        // The worked example: `A* B` on workspace 1, `C` on workspace 2.
+        // C comes over into column 2, right of A, pushing B on: `A C* B`.
+        assert_eq!(
+            summon_plan(tiled(1, 1), tiled(2, 1)),
+            Some(SummonPlan {
+                workspace_id: Some(1),
+                column_index: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn summon_from_the_right_on_the_same_workspace_lands_right_of_the_target() {
+        // `A* B C` → `A C* B`.
+        assert_eq!(
+            summon_plan(tiled(1, 1), tiled(1, 3)),
+            Some(SummonPlan {
+                workspace_id: None,
+                column_index: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn summon_from_the_left_on_the_same_workspace_takes_the_targets_index() {
+        // `C A* B` → `A C* B`: removing C shifts A from 2 to 1, so C must go
+        // to 2 — A's old index — not 3, where it would land right of B.
+        assert_eq!(
+            summon_plan(tiled(1, 2), tiled(1, 1)),
+            Some(SummonPlan {
+                workspace_id: None,
+                column_index: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn summon_is_not_offered_when_there_is_nothing_to_rearrange() {
+        assert_eq!(
+            summon_plan(tiled(1, 2), tiled(1, 3)),
+            None,
+            "a window already directly right of the target is already there"
+        );
+        assert_eq!(
+            summon_plan(tiled(1, 2), tiled(1, 2)),
+            None,
+            "a window in the target's own column has no slot to move to"
+        );
+        assert_eq!(
+            summon_plan(tiled(1, 2), floating(1)),
+            None,
+            "a floating window on the target's workspace has no column to move"
+        );
+        assert_eq!(
+            summon_plan(floating(1), tiled(1, 2)),
+            None,
+            "a floating target has no column to sit beside"
+        );
+        assert_eq!(
+            summon_plan(
+                Placement {
+                    workspace_id: None,
+                    column: None,
+                },
+                tiled(1, 2)
+            ),
+            None,
+            "a target on no workspace has nowhere to summon to"
+        );
+    }
+
+    #[test]
+    fn summon_of_a_floating_window_from_elsewhere_only_moves_it() {
+        assert_eq!(
+            summon_plan(tiled(1, 2), floating(2)),
+            Some(SummonPlan {
+                workspace_id: Some(1),
+                column_index: None,
+            }),
+            "a floating window stays floating across workspaces, so there is \
+             no column to place"
+        );
+        assert_eq!(
+            summon_plan(floating(1), tiled(2, 1)),
+            Some(SummonPlan {
+                workspace_id: Some(1),
+                column_index: None,
+            }),
+            "with a floating target, the window still comes over"
         );
     }
 

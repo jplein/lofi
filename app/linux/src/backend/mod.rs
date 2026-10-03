@@ -31,7 +31,9 @@ pub mod niri;
 use std::env;
 use std::rc::Rc;
 
-use lofi_core::{Command, PowerCommand, PowerCommandKind, Window, Workspace, WorkspaceCommand};
+use lofi_core::{
+    Command, PowerCommand, PowerCommandKind, SummonWindow, Window, Workspace, WorkspaceCommand,
+};
 
 use crate::config::Config;
 
@@ -161,6 +163,11 @@ pub trait Backend {
     /// Power commands this desktop can actually perform.
     fn gather_power_commands(&self) -> Vec<PowerCommand>;
 
+    /// "Summon window" rows: one per other window that can be brought to the
+    /// right of the target window. Empty on desktops without a column layout
+    /// to summon into (GNOME).
+    fn gather_summon_commands(&self, windows: &[Window]) -> Vec<SummonWindow>;
+
     /// Raise the window with `id`, switching workspace if needed.
     fn focus_window(&self, id: u64);
 
@@ -178,6 +185,10 @@ pub trait Backend {
 
     /// Perform a power command.
     fn run_power_command(&self, kind: PowerCommandKind);
+
+    /// Bring `summon.window` into the column directly right of
+    /// `summon.target_window_id`, and focus it.
+    fn run_summon_command(&self, summon: &SummonWindow);
 
     /// Whether the launcher window should be presented as a `wlr-layer-shell`
     /// overlay surface rather than an ordinary toplevel. True on Niri, where

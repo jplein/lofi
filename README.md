@@ -22,6 +22,7 @@ What it can do:
     - Switch focus to an open window (Linux only)
     - Switch to another workspace (Linux only)
     - Move a window to another workspace (Linux only)
+    - Summon a window to the right of the current window (Niri only)
     - Operations on the most recently focused window:
         - Resize / retile
         - Toggle maximize
@@ -37,6 +38,11 @@ macOS get position-and-size commands (`Left half`, `Center third`, `Minimize`,
 `Maximize column`, `Expand column`, `Toggle floating`, `Close window`, …).
 `Toggle maximize` and `Toggle fullscreen` exist everywhere. See
 [app/linux/README.md](app/linux/README.md#window-commands-under-niri).
+
+Niri also gets one `Summon window: <title>` row per other open window: it
+brings that window into the column directly right of the current window and
+focuses it. See
+[app/linux/README.md](app/linux/README.md#summon-window-under-niri).
 
 ## System requirements: Linux
 

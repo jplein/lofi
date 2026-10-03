@@ -107,6 +107,14 @@ pub enum Action {
     /// The two can only diverge when the active workspace is empty — in which
     /// case there is no column and the action is a harmless no-op.
     ExpandColumnToAvailableWidth {},
+    /// Move the *focused* column to a 1-based position on its workspace.
+    ///
+    /// The second exception to the by-id rule, and the only Niri action that
+    /// places a column at a chosen position. "Summon window" makes it safe by
+    /// dispatching `FocusWindow` on the summoned window first, so "focused"
+    /// is the window LoFi just named rather than whatever was focused when the
+    /// launcher opened. See `super::NiriBackend::run_summon_command`.
+    MoveColumnToIndex { index: usize },
     /// Close the window.
     CloseWindow { id: u64 },
     /// Exit the compositor — Niri's "log out".
@@ -174,9 +182,30 @@ pub struct NiriWindow {
     /// `None` for a window that has never been focused, which sorts last.
     #[serde(default)]
     pub focus_timestamp: Option<NiriDuration>,
+    /// Where the window sits in its workspace's layout. `None` from a Niri
+    /// that predates the field.
+    #[serde(default)]
+    pub layout: Option<NiriWindowLayout>,
+}
+
+/// The part of a window's layout LoFi reads.
+#[derive(Debug, Deserialize)]
+pub struct NiriWindowLayout {
+    /// `(column, tile)`, both 1-based. `None` for a floating window.
+    #[serde(default)]
+    pub pos_in_scrolling_layout: Option<(usize, usize)>,
 }
 
 impl NiriWindow {
+    /// 1-based column index in the scrolling layout, or `None` for a floating
+    /// window (or one whose layout Niri didn't report).
+    pub fn column(&self) -> Option<usize> {
+        self.layout
+            .as_ref()?
+            .pos_in_scrolling_layout
+            .map(|(column, _tile)| column)
+    }
+
     /// Descending-MRU sort key: most recently focused first.
     ///
     /// `is_focused` is folded in ahead of the timestamp because Niri commits a
@@ -421,6 +450,10 @@ mod tests {
                 r#"{"Action":{"ExpandColumnToAvailableWidth":{}}}"#,
             ),
             (
+                Request::Action(Action::MoveColumnToIndex { index: 3 }),
+                r#"{"Action":{"MoveColumnToIndex":{"index":3}}}"#,
+            ),
+            (
                 Request::Action(Action::CloseWindow { id: 3 }),
                 r#"{"Action":{"CloseWindow":{"id":3}}}"#,
             ),
@@ -458,6 +491,16 @@ mod tests {
         assert_eq!(windows[0].app_id.as_deref(), Some("com.mitchellh.ghostty"));
         assert_eq!(windows[0].workspace_id, Some(1));
         assert_eq!(windows[0].sort_key(), (false, 769, 594468267));
+        assert_eq!(windows[0].column(), Some(1));
+
+        // A floating window reports a layout with no scrolling position.
+        let raw = r#"{"Ok":{"Windows":[{"id":5,"title":"pip","app_id":"mpv","workspace_id":1,"is_focused":false,"is_floating":true,"layout":{"pos_in_scrolling_layout":null,"tile_size":[640.0,360.0],"window_size":[640,360],"tile_pos_in_workspace_view":[10.0,10.0],"window_offset_in_tile":[0.0,0.0]},"focus_timestamp":null}]}}"#;
+        let reply: Reply<Response> =
+            serde_json::from_str(raw).expect("a floating window should deserialize");
+        let Reply::Ok(Response::Windows(windows)) = reply else {
+            panic!("expected Ok(Windows), got {reply:?}");
+        };
+        assert_eq!(windows[0].column(), None, "a floating window has no column");
 
         let raw = r#"{"Ok":{"Workspaces":[{"id":2,"idx":2,"name":null,"output":"DP-3","is_urgent":false,"is_active":false,"is_focused":false,"active_window_id":null}]}}"#;
         let reply: Reply<Response> =
@@ -508,6 +551,7 @@ mod tests {
                 workspace_id: None,
                 is_focused,
                 focus_timestamp: Some(NiriDuration { secs, nanos }),
+                layout: None,
             }
         }
 
@@ -542,6 +586,7 @@ mod tests {
             workspace_id: None,
             is_focused: false,
             focus_timestamp: None,
+            layout: None,
         };
         let mut windows = [never, window(1, false, 1, 0)];
         windows.sort_by_key(|w| std::cmp::Reverse(w.sort_key()));

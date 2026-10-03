@@ -43,6 +43,12 @@ fn haystack(entry: &Entry) -> String {
         Entry::Command(c) => c.kind.display_name().to_string(),
         Entry::PowerCommand(c) => c.kind.display_name().to_string(),
         Entry::WorkspaceCommand(c) => c.name.clone(),
+        // Same shape as the summoned window's own row, so typing its app
+        // name finds the summon row too.
+        Entry::SummonWindow(s) => match &s.window.app_name {
+            Some(app) => format!("{} {}", s.name, app),
+            None => s.name.clone(),
+        },
     }
 }
 

@@ -54,5 +54,6 @@ pub fn activate(backend: &dyn Backend, entry: &Entry) {
         Entry::Command(cmd) => backend.run_command(cmd),
         Entry::PowerCommand(c) => backend.run_power_command(c.kind),
         Entry::WorkspaceCommand(wc) => backend.run_workspace_command(wc),
+        Entry::SummonWindow(s) => backend.run_summon_command(s),
     }
 }

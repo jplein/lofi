@@ -463,6 +463,46 @@ impl WorkspaceCommand {
     }
 }
 
+/// Prefix of every `SummonWindow` label. Shared so the label format lives in
+/// one place and tests can assert against it.
+pub const SUMMON_WINDOW_PREFIX: &str = "Summon window: ";
+
+/// A launcher entry that brings `window` into the column directly right of
+/// the target window (the previously-focused user window captured at gather
+/// time — the same target as `Command`), and focuses it.
+///
+/// Niri-only: it only makes sense under a scrolling tiler, where "right of
+/// the current window" names a position in the column order. GNOME and macOS never
+/// construct it.
+///
+/// Distinct from `Window` (which *goes to* a window) because the action is the
+/// opposite — the window comes to you — and from `Command` because the set is
+/// dynamic: one row per other open window, so the label carries a title and
+/// can't be a `&'static str` on a closed enum. The whole summoned `Window` is
+/// carried, not just its id, so the row can show the app's icon and match on
+/// the app name exactly like that window's own row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummonWindow {
+    /// The window to bring over.
+    pub window: Window,
+    /// Id of the window it lands beside, captured at gather time.
+    pub target_window_id: u64,
+    /// `"Summon window: <title>"`. Stored rather than computed because
+    /// `Entry::name` returns `&str`.
+    pub name: String,
+}
+
+impl SummonWindow {
+    pub fn new(window: Window, target_window_id: u64) -> Self {
+        let name = format!("{SUMMON_WINDOW_PREFIX}{}", window.title);
+        SummonWindow {
+            window,
+            target_window_id,
+            name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     Application,
@@ -471,6 +511,7 @@ pub enum EntryKind {
     Command,
     PowerCommand,
     WorkspaceCommand,
+    SummonWindow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +522,7 @@ pub enum Entry {
     Command(Command),
     PowerCommand(PowerCommand),
     WorkspaceCommand(WorkspaceCommand),
+    SummonWindow(SummonWindow),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -492,6 +534,10 @@ pub enum EntryRef {
     Command(String),
     PowerCommand(String),
     WorkspaceCommand(String),
+    /// Keyed on the *summoned* window's id, so MRU remembers "bring that
+    /// window here" independently of which window it displaced. Like
+    /// `Window(u64)`, the id is only meaningful within one desktop session.
+    SummonWindow(u64),
 }
 
 /// Icon name used for every `Entry::Workspace`. Hardcoded because workspaces
@@ -509,6 +555,7 @@ impl Entry {
             Entry::Command(c) => c.kind.display_name(),
             Entry::PowerCommand(c) => c.kind.display_name(),
             Entry::WorkspaceCommand(c) => c.name.as_str(),
+            Entry::SummonWindow(s) => s.name.as_str(),
         }
     }
 
@@ -520,6 +567,7 @@ impl Entry {
             Entry::Command(c) => Some(c.kind.icon_name()),
             Entry::PowerCommand(c) => Some(c.kind.icon_name()),
             Entry::WorkspaceCommand(c) => Some(c.kind.icon_name()),
+            Entry::SummonWindow(s) => s.window.icon.as_deref(),
         }
     }
 
@@ -531,6 +579,7 @@ impl Entry {
             Entry::Command(_) => EntryKind::Command,
             Entry::PowerCommand(_) => EntryKind::PowerCommand,
             Entry::WorkspaceCommand(_) => EntryKind::WorkspaceCommand,
+            Entry::SummonWindow(_) => EntryKind::SummonWindow,
         }
     }
 
@@ -542,6 +591,7 @@ impl Entry {
             Entry::Command(c) => EntryRef::Command(c.kind.as_id().to_string()),
             Entry::PowerCommand(c) => EntryRef::PowerCommand(c.kind.as_id().to_string()),
             Entry::WorkspaceCommand(c) => EntryRef::WorkspaceCommand(c.as_id()),
+            Entry::SummonWindow(s) => EntryRef::SummonWindow(s.window.id),
         }
     }
 }
@@ -1672,5 +1722,59 @@ mod tests {
         ));
         assert_eq!(next.name(), "Move to next workspace");
         assert_eq!(next.icon(), Some("go-next-symbolic"));
+    }
+
+    #[test]
+    fn entry_summon_window_methods_return_summoned_window_data() {
+        let summoned = make_window(7, "Inbox", Some("Thunderbird"), Some("thunderbird"));
+        let entry = Entry::SummonWindow(SummonWindow::new(summoned, 3));
+
+        assert_eq!(
+            entry.name(),
+            "Summon window: Inbox",
+            "the label is the prefix followed by the summoned window's title"
+        );
+        assert_eq!(
+            entry.icon(),
+            Some("thunderbird"),
+            "the icon is the summoned window's app icon, like its Window row"
+        );
+        assert_eq!(entry.kind(), EntryKind::SummonWindow);
+
+        let no_icon = Entry::SummonWindow(SummonWindow::new(make_window(8, "x", None, None), 3));
+        assert_eq!(
+            no_icon.icon(),
+            None,
+            "a summoned window with no icon yields no icon"
+        );
+    }
+
+    #[test]
+    fn entry_summon_window_reference_keys_on_summoned_window() {
+        let entry = Entry::SummonWindow(SummonWindow::new(make_window(7, "Inbox", None, None), 3));
+
+        assert_eq!(
+            entry.reference(),
+            EntryRef::SummonWindow(7),
+            "the MRU key is the summoned window's id, not the target's"
+        );
+
+        // Must not collide with the summoned window's own Window row.
+        let window = Entry::Window(make_window(7, "Inbox", None, None));
+        let entries = vec![window.clone(), entry.clone()];
+        assert_eq!(
+            resolve(&entries, &EntryRef::SummonWindow(7)),
+            Some(&entry),
+            "EntryRef::SummonWindow must resolve to the summon row"
+        );
+        assert_eq!(
+            resolve(&entries, &EntryRef::Window(7)),
+            Some(&window),
+            "EntryRef::Window must still resolve to the window row"
+        );
+
+        let serialized =
+            serde_json::to_string(&EntryRef::SummonWindow(7)).expect("EntryRef should serialize");
+        assert_eq!(serialized, r#"{"type":"summon_window","id":7}"#);
     }
 }
