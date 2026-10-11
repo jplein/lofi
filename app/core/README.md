@@ -261,9 +261,9 @@ The empty-query passthrough falls out of the same code path rather than being sp
 
 The practical consequence while typing: MRU-known rows are query-independent in *recency* terms but can still shuffle between the two prefix sub-buckets as the query changes (a row drops below the others the moment your query stops being a word-prefix of it); never-used rows can reorder as the scores shift. The selected row stays predictable for the apps you use most.
 
-### `commands::compute_geometry`
+### `commands::compute_geometry` and `compute_geometry_with_gaps`
 
-Signature:
+Signatures:
 
 ```rust
 pub fn compute_geometry(
@@ -271,9 +271,27 @@ pub fn compute_geometry(
     work_area: &WorkArea,
     current_frame: (i32, i32, i32, i32),
 ) -> Option<(i32, i32, i32, i32)>
+
+pub fn compute_geometry_with_gaps(
+    kind: CommandKind,
+    work_area: &WorkArea,
+    current_frame: (i32, i32, i32, i32),
+    gaps: u32,
+) -> Option<(i32, i32, i32, i32)>
 ```
 
-Pure geometry math for the window-action commands — no D-Bus, no GTK, no I/O. Re-exported at the crate root (`lofi_core::compute_geometry`).
+Pure geometry math for the window-action commands — no D-Bus, no GTK, no I/O. Both re-exported at the crate root. `compute_geometry` is `compute_geometry_with_gaps` with `gaps = 0`, kept as the Linux crate's entry point so adding gaps for macOS did not have to touch a crate that cannot be built on a Mac; GNOME could adopt gaps by calling the gapped form.
+
+`gaps` is the user's gap preference in logical pixels (the macOS `config.toml` key; see `config::Config`). The rules exist to make every gap on screen the *same* width, whether between a window and the work-area edge or between two windows:
+
+- A window gets the full gap on every work-area edge it would otherwise touch. Full-height commands get it top and bottom; left-anchored ones on the left; right-anchored ones on the right.
+- The seam between a left-anchored and a right-anchored window gets half the gap from each side — `gaps / 2` from the left window, the remainder from the right one, so an odd gap still sums exactly. That is what makes `Left third` + `Right two-thirds`, or any complementary pair, sit exactly one gap apart.
+- `Center third` is inset by that same half gap on each side, because its neighbours are `Left third` and `Right third` and the three should tile evenly. `Center half` and `Center two-thirds` have no neighbouring command that fits beside them, so they keep their full fraction of the width and get the gap top and bottom only.
+- `Center` (recentre, keep size) and `Standard size` touch no edge and ignore the gap.
+
+Every arm is written so `gaps = 0` reproduces the pre-gap formula byte for byte (a test sweeps every kind over two work areas to pin it): the gap terms are added on top of the existing anchoring, so turning the feature on cannot move an ungapped window by a pixel. A gap so large it would leave a window with no width or height falls back to the ungapped rectangle — a window that still appears beats one that vanishes, and a preference that absurd is a typo. The gap is clamped to a quarter of `i32::MAX` first so the arithmetic cannot overflow on the way to that check.
+
+`ToggleMaximize` still returns `None` with a gap: it is a state toggle on every platform, and the macOS frontend — whose maximize happens to be a resize — insets the work area it fills by the gap itself (`CommandTarget.gappedWorkArea`; see `app/macos/README.md`).
 
 - Returns `Some((x, y, w, h))` for the eleven geometry kinds (`Center`, `CenterThird`, `CenterHalf`, `CenterTwoThirds`, `LeftThird`, `LeftHalf`, `LeftTwoThirds`, `RightThird`, `RightHalf`, `RightTwoThirds`, `StandardSize`) — the rectangle the platform layer then feeds to the extension's `MoveResizeWindow`.
 - Returns `None` for the three state-toggle kinds (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`). The platform layer dispatches those to dedicated D-Bus methods (`MinimizeWindow`, `ToggleMaximizeWindow`, `ToggleFullscreenWindow`) instead of `MoveResizeWindow`, so there's no rectangle to compute.
@@ -322,7 +340,7 @@ Why it lives here rather than in `app/macos`: the file is read by the Swift proc
 
 Why it is **not** the Linux file's struct: the Linux file (`app/linux/src/config.rs`) carries a lock command and GTK-typed border/corner/shadow values for the `wlr-layer-shell` surface, none of which means anything on macOS, and `gaps` means nothing on Linux yet. A union struct would have every key documented as "ignored on the other platform" and would stop `deny_unknown_fields` from catching a Linux key pasted into the macOS file. If a key ever becomes genuinely shared, the shared part moves here and both files embed it.
 
-`gaps` is `u32` so a negative value is a parse error rather than a window pushed off its screen, and an integer so a fractional value is reported rather than truncated — the geometry it will feed (`compute_geometry`) is integer arithmetic. It is read and carried through to the macOS command target today but not yet applied by the geometry commands.
+`gaps` is `u32` so a negative value is a parse error rather than a window pushed off its screen, and an integer so a fractional value is reported rather than truncated — the geometry it feeds (`compute_geometry_with_gaps`) is integer arithmetic. The macOS frontend captures it on its command target at gather time and passes it to `lofi_entries_get_command_geometry` at activation; the placement rules live on `compute_geometry_with_gaps` below.
 
 ### `mru::MruStore`
 
@@ -432,7 +450,7 @@ The three symbols added in the macOS commands slice (the fourteen window-action 
 
 - `lofi_entries_push_command(list, kind_id, target_window_id, wa_x, wa_y, wa_w, wa_h, frame_x, frame_y, frame_w, frame_h) -> bool` — push an `Entry::Command`, mirroring the `Command` struct field-for-field: `kind_id` selects the `CommandKind` (validated via `CommandKind::from_id`), `target_window_id` is the window the command acts on at activation, the `wa_*` quadruple is the target window's monitor work area, and the `frame_*` quadruple is the target window's current frame at gather time. Returns `false` on a null list, a null `kind_id`, invalid UTF-8, or an **unknown id** (`from_id` returns `None`) — in the unknown-id case nothing is pushed, so the list length is unchanged, surfacing a Swift typo or a stale id as a `false` rather than a silently-broken row. The eight geometry integers are stored verbatim in whatever coordinate space the caller hands them in (on macOS: top-left global; see `app/macos/README.md`) — the FFI does no flipping. Same cache-clear-and-refilter (`EntryList::push`) as `push_application` / `push_window`.
 - `lofi_entries_get_command_id(list, idx) -> *const c_char` — return the `CommandKind::as_id()` snake_case string (`"center"`, `"center_half"`, …) for a Command at the filtered index, null for every other variant (or null list / out-of-bounds index). Unlike every other string accessor the returned pointer is a **process-lifetime `&'static CStr`** — one per kind, built from `c"..."` literals selected by an internal `command_id_cstr` helper — so it is **never invalidated by a mutation**. There is no cache slot or `RefCell` behind it. The bytes are byte-for-byte equal to `CommandKind::as_id` (`app/core/src/lib.rs`), guarded against drift by the `command_id_matches_as_id_for_all_kinds` FFI test; the match is exhaustive (no `_` arm) so adding a `CommandKind` is a compile error until both maps are extended. Swift still copies the pointer into a `String` for uniformity with the other accessors.
-- `lofi_entries_get_command_geometry(list, idx, out_x, out_y, out_w, out_h) -> bool` — for a Command at the filtered index, call `compute_geometry(kind, &work_area, current_frame)` (the single source of geometry truth shared with GNOME, so Swift never duplicates the half / two-thirds math), write the four out-params, and return `true`. This returns `true` only for the **eleven geometry kinds** (`Center`, `CenterThird`, `CenterHalf`, `CenterTwoThirds`, `LeftThird`, `LeftHalf`, `LeftTwoThirds`, `RightThird`, `RightHalf`, `RightTwoThirds`, `StandardSize`). It returns `false` and leaves **all four out-params untouched** (a documented contract — the null out-pointers are guarded first, so if we cannot write all four we write none) for the **three state-toggle kinds** (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`, where `compute_geometry` returns `None`), for non-Command entries, for an out-of-bounds index, for a null list, or when any out-pointer is null. Swift dispatches the state-toggle kinds by `lofi_entries_get_command_id` instead. Like `get_window_id`, the result crosses the FFI by value (through caller-owned out-params), so this accessor is exempt from the borrow contract.
+- `lofi_entries_get_command_geometry(list, idx, gaps, out_x, out_y, out_w, out_h) -> bool` — for a Command at the filtered index, call `compute_geometry_with_gaps(kind, &work_area, current_frame, gaps)` (the single source of geometry truth shared with GNOME, so Swift never duplicates the half / two-thirds math or the gap rules), write the four out-params, and return `true`. `gaps` is the user's preference from the macOS `config.toml`, a query-time parameter rather than a field on the pushed `Command`: it is the platform's preference, not a property of the target window, and leaving `Command` alone kept the change out of the Linux crate. This returns `true` only for the **eleven geometry kinds** (`Center`, `CenterThird`, `CenterHalf`, `CenterTwoThirds`, `LeftThird`, `LeftHalf`, `LeftTwoThirds`, `RightThird`, `RightHalf`, `RightTwoThirds`, `StandardSize`). It returns `false` and leaves **all four out-params untouched** (a documented contract — the null out-pointers are guarded first, so if we cannot write all four we write none) for the **three state-toggle kinds** (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`, where `compute_geometry` returns `None`), for non-Command entries, for an out-of-bounds index, for a null list, or when any out-pointer is null. Swift dispatches the state-toggle kinds by `lofi_entries_get_command_id` instead. Like `get_window_id`, the result crosses the FFI by value (through caller-owned out-params), so this accessor is exempt from the borrow contract.
 
 `lofi_entries_set_query(list, query)` recomputes the filter. A null or empty `query` is a passthrough (every entry in rank order); a non-null UTF-8 `query` is whitespace-tokenized and intersected against each entry's per-variant haystack. `recompute_filter` delegates entirely to `ranking::rank` — the same single ranking implementation the Linux frontend calls — so filtering, the two-tier MRU/score order, the in-MRU prefix sub-ordering, and the empty-query passthrough all live in core, not in the FFI layer. It differs from bare `matcher::search` (pure descending-score order) by overlaying that MRU + prefix policy; see the `ranking::rank` section above for the exact algorithm. After `set_query` returns, `lofi_entries_len` and every `get_*` accessor read through the filter — Swift's table view sees a contiguous, post-filter list and doesn't need to know which underlying indices survived.
 

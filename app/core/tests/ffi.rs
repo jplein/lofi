@@ -113,6 +113,7 @@ unsafe extern "C" {
     //                                              uintptr_t idx);
     //     bool        lofi_entries_get_command_geometry(const struct EntryList *list,
     //                                                    uintptr_t idx,
+    //                                                    uint32_t gaps,
     //                                                    int32_t *out_x,
     //                                                    int32_t *out_y,
     //                                                    int32_t *out_w,
@@ -145,6 +146,7 @@ unsafe extern "C" {
     fn lofi_entries_get_command_geometry(
         list: *const EntryList,
         idx: usize,
+        gaps: u32,
         out_x: *mut i32,
         out_y: *mut i32,
         out_w: *mut i32,
@@ -2010,7 +2012,7 @@ fn command_geometry_at(list: *const EntryList, idx: usize) -> Option<(i32, i32, 
     // SAFETY: the four out-pointers reference live stack locals that outlive
     // the call; the FFI either writes all four (true) or none (false).
     let ok =
-        unsafe { lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h) };
+        unsafe { lofi_entries_get_command_geometry(list, idx, 0, &mut x, &mut y, &mut w, &mut h) };
     if ok { Some((x, y, w, h)) } else { None }
 }
 
@@ -2076,6 +2078,26 @@ fn push_command_round_trips_geometry_kind() {
             "get_bundle_id must be null for a Command (not an Application variant)"
         );
 
+        lofi_entries_free(list);
+    }
+}
+
+#[test]
+fn command_geometry_applies_gaps() {
+    // The gap is a query-time parameter: the same pushed command yields the
+    // edge-to-edge rect for 0 and the gapped rect for 8 (full gap left / top /
+    // bottom, half a gap at the seam — see `compute_geometry_with_gaps`).
+    // SAFETY: standard FFI lifecycle; out-params are local `i32`s.
+    unsafe {
+        let list = lofi_entries_new();
+        assert!(push_command_kind(list, "left_half", 1, WA, FRAME));
+        assert_eq!(command_geometry_at(list, 0), Some((100, 50, 900, 1000)));
+
+        let (mut x, mut y, mut w, mut h) = (0, 0, 0, 0);
+        assert!(lofi_entries_get_command_geometry(
+            list, 0, 8, &mut x, &mut y, &mut w, &mut h
+        ));
+        assert_eq!((x, y, w, h), (108, 58, 888, 984));
         lofi_entries_free(list);
     }
 }
@@ -2197,7 +2219,8 @@ fn command_geometry_leaves_out_params_untouched_on_false() {
             let mut h = GEOMETRY_SENTINEL;
             // SAFETY: out-pointers reference live stack locals; this is the
             // false path under test, so no write should occur.
-            let ok = lofi_entries_get_command_geometry(list, idx, &mut x, &mut y, &mut w, &mut h);
+            let ok =
+                lofi_entries_get_command_geometry(list, idx, 0, &mut x, &mut y, &mut w, &mut h);
             assert!(!ok, "get_command_geometry should return false for {case}");
             assert_eq!(x, GEOMETRY_SENTINEL, "out_x must be untouched for {case}");
             assert_eq!(y, GEOMETRY_SENTINEL, "out_y must be untouched for {case}");

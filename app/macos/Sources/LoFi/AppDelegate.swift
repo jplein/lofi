@@ -440,7 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // equals the push order) for the standard_size command's computed
         // rect. Used as the toggle-maximize fallback.
         for row in 0..<entries.count where entries.commandId(at: row) == "standard_size" {
-            if let geo = entries.commandGeometry(at: row) {
+            if let geo = entries.commandGeometry(at: row, gaps: target.gaps) {
                 target.standardRect = CGRect(
                     x: CGFloat(geo.x),
                     y: CGFloat(geo.y),

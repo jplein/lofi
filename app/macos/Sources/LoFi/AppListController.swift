@@ -585,18 +585,21 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// target — both impossible in practice once a command row exists, but
     /// the launcher quits regardless via `launchRow`.
     ///
-    /// Geometry kinds (`entries.commandGeometry(at:)` returns a rect) call
-    /// `WindowControl.move` with the precomputed top-left-global rect from
-    /// Rust's `compute_geometry`. State-toggle kinds (nil geometry)
-    /// dispatch by id: minimize / toggle fullscreen / toggle maximize /
-    /// next display / previous display.
+    /// Geometry kinds (`entries.commandGeometry(at:gaps:)` returns a rect)
+    /// call `WindowControl.move` with the precomputed top-left-global rect
+    /// from Rust's `compute_geometry_with_gaps`, the target's `gaps`
+    /// applied. State-toggle kinds (nil geometry) dispatch by id: minimize
+    /// / toggle fullscreen / toggle maximize / next display / previous
+    /// display. Toggle maximize is the one state kind the gap reaches: it
+    /// fills `target.gappedWorkArea` (all four edges inset) rather than the
+    /// raw work area.
     private func runCommand(_ row: Int) {
         guard let commandId = entries.commandId(at: row),
             let target = commandTarget
         else {
             return
         }
-        if let geo = entries.commandGeometry(at: row) {
+        if let geo = entries.commandGeometry(at: row, gaps: target.gaps) {
             _ = WindowControl.move(
                 pid: target.pid,
                 title: target.title,
@@ -626,7 +629,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
                 pid: target.pid,
                 title: target.title,
                 windowId: target.windowId,
-                workArea: target.workArea,
+                workArea: target.gappedWorkArea,
                 fallbackRect: target.standardRect,
                 store: savedFrameStore
             )

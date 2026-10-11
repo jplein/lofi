@@ -299,6 +299,12 @@ enum WindowControl {
     /// the next press re-maximizes it (overwriting the saved frame) — the
     /// intuitive result.
     ///
+    /// `workArea` is whatever the caller wants "maximized" to mean. The
+    /// command dispatch passes `CommandTarget.gappedWorkArea` — the work
+    /// area inset by the user's `gaps` on all four edges — so with a gap
+    /// configured a maximized window floats one gap in from every edge,
+    /// and the fill test compares against that same inset rect.
+    ///
     /// All rects are top-left global. Returns `false` if the window can't
     /// be found or the AX reads/sets fail.
     static func toggleMaximize(

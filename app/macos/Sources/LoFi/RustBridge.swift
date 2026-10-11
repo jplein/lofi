@@ -375,13 +375,21 @@ final class EntryList {
 
     /// Read the computed geometry for the command at the filtered `idx`,
     /// as `(x, y, w, h)` in the coordinate space the command was pushed in
-    /// (top-left global on macOS). Returns the tuple only for *geometry*
+    /// (top-left global on macOS), with the user's `gaps` preference
+    /// (points, from `config.toml`) applied by Rust's
+    /// `compute_geometry_with_gaps`. Returns the tuple only for *geometry*
     /// command kinds; returns `nil` for state-toggle kinds (minimize /
     /// toggle_maximize / toggle_fullscreen), non-Command entries,
     /// out-of-bounds indices, or a null list. A `nil` here means "dispatch
     /// by `commandId(at:)` instead" — the state-toggle commands have no
     /// rectangle.
-    func commandGeometry(at idx: Int) -> (x: Int32, y: Int32, w: Int32, h: Int32)? {
+    ///
+    /// `gaps` is a parameter rather than something pushed with the command
+    /// because it is the *user's* preference, not a property of the target
+    /// window; `CommandTarget` carries it next to the work area and the
+    /// caller passes both. Clamped into `UInt32` so a nonsense value can't
+    /// trap; the Rust side degrades an absurd gap to no gap.
+    func commandGeometry(at idx: Int, gaps: Int) -> (x: Int32, y: Int32, w: Int32, h: Int32)? {
         var x: Int32 = 0
         var y: Int32 = 0
         var w: Int32 = 0
@@ -389,6 +397,7 @@ final class EntryList {
         let ok = lofi_entries_get_command_geometry(
             handle,
             UInt(idx),
+            UInt32(clamping: gaps),
             &x,
             &y,
             &w,

@@ -5,7 +5,7 @@ pub mod ffi;
 pub mod matcher;
 pub mod mru;
 mod ranking;
-pub use commands::{build_workspace_commands, compute_geometry};
+pub use commands::{build_workspace_commands, compute_geometry, compute_geometry_with_gaps};
 pub use config::Config;
 #[cfg(feature = "ffi")]
 pub use ffi::*;

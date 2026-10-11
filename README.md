@@ -331,11 +331,23 @@ own documentation:
 gaps = 0
 ```
 
-`gaps` is the space, in points, that the window-action commands will leave
-between a placed window and the edges of the work area. It is read and carried
-through to the commands today, but **not yet applied** — every command still
-tiles edge to edge regardless of the value. Negative and fractional values are
-rejected.
+`gaps` is the space, in points, that the window-action commands leave between
+a placed window and the edges of the work area, and between two windows placed
+side by side. The rule is that every gap on screen is the same width:
+
+- A window gets the full gap on every work-area edge it would otherwise touch.
+  `Toggle maximize` gets it on all four edges; `Left half` on the top, bottom,
+  and left; `Center two-thirds` on the top and bottom only.
+- Where a left window meets a right window, each gives up half the gap, so
+  `Left third` beside `Right two-thirds` (or any left/right pair that adds up)
+  sits exactly one gap apart — the same distance as from the edges.
+  `Center third` is inset by the same half gap on each side so that
+  `Left third | Center third | Right third` tile evenly.
+- `Center` and `Standard size` don't touch any edge and ignore the gap.
+  `Toggle fullscreen` and the display-move commands are untouched.
+
+Negative and fractional values are rejected. A gap so large it would leave a
+window with no width or height is treated as no gap for that command.
 
 The file is separate from the Linux one because the two share no keys: the
 Linux file is about a lock command and the window chrome the launcher has to

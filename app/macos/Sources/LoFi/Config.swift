@@ -35,10 +35,11 @@ import LoFiCore
 /// the file does not say (or for no file at all).
 struct Config {
     /// Space to leave between a window placed by a window-action command
-    /// and the work-area edges, in points. `0` tiles edge to edge.
-    ///
-    /// Read and carried through to `WindowCommands.CommandTarget`; the
-    /// geometry commands do not honour it yet.
+    /// and the work-area edges, and between two side-by-side windows, in
+    /// points. `0` tiles edge to edge. Carried on
+    /// `WindowCommands.CommandTarget` and applied by Rust's
+    /// `compute_geometry_with_gaps` (and, for maximize, by
+    /// `CommandTarget.gappedWorkArea`).
     let gaps: Int
 
     /// What an absent file means. Kept in step with

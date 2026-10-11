@@ -67,13 +67,13 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     /// Space to leave between a window placed by a window-action command and
-    /// the edges of the work area (and between windows placed side by side),
+    /// the edges of the work area, and between windows placed side by side,
     /// in points. `0` — the default — tiles windows edge to edge, which is what
-    /// the commands have always done.
+    /// the commands have always done. The placement rules live on
+    /// `crate::compute_geometry_with_gaps`.
     ///
-    /// Read and carried through to the command target today; the geometry
-    /// commands do not yet honour it. Unsigned so that a negative value is a
-    /// parse error rather than a window pushed off its screen.
+    /// Unsigned so that a negative value is a parse error rather than a window
+    /// pushed off its screen.
     #[serde(default)]
     pub gaps: u32,
 }

@@ -54,7 +54,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::compute_geometry;
+use crate::compute_geometry_with_gaps;
 use crate::mru::MruStore;
 use crate::{
     Application, Command, CommandKind, Entry, EntryKind, EntryRef, PowerCommand, PowerCommandKind,
@@ -1005,9 +1005,18 @@ pub unsafe extern "C" fn lofi_entries_get_command_id(
 }
 
 /// Compute the target geometry for the command-at-`idx` and write it to the
-/// four out-params. The geometry is `compute_geometry(kind, &work_area,
-/// current_frame)` — the single source of geometry truth shared with the GNOME
-/// frontend — so Swift never duplicates the half / two-thirds arithmetic.
+/// four out-params. The geometry is `compute_geometry_with_gaps(kind,
+/// &work_area, current_frame, gaps)` — the single source of geometry truth
+/// shared with the GNOME frontend — so Swift never duplicates the half /
+/// two-thirds arithmetic, nor the gap rules.
+///
+/// `gaps` is the user's gap preference from `config.toml` in the caller's
+/// coordinate units (`0` for edge-to-edge). It is a parameter here rather
+/// than a field on the pushed `Command` because the preference belongs to the
+/// platform that reads the config file, not to the target window: the Swift
+/// side captures it next to the work area at gather time and hands both in.
+/// Keeping `Command` unchanged also kept this slice out of the Linux crate,
+/// which cannot be built on a Mac.
 ///
 /// Returns `true` and writes all four out-params only for an `Entry::Command`
 /// whose kind is a *geometry* kind (`Center`, `CenterHalf`, `CenterTwoThirds`,
@@ -1032,6 +1041,7 @@ pub unsafe extern "C" fn lofi_entries_get_command_id(
 pub unsafe extern "C" fn lofi_entries_get_command_geometry(
     list: *const EntryList,
     idx: usize,
+    gaps: u32,
     out_x: *mut i32,
     out_y: *mut i32,
     out_w: *mut i32,
@@ -1051,7 +1061,9 @@ pub unsafe extern "C" fn lofi_entries_get_command_geometry(
         return false;
     };
     let geometry = match entry {
-        Entry::Command(c) => compute_geometry(c.kind, &c.work_area, c.current_frame),
+        Entry::Command(c) => {
+            compute_geometry_with_gaps(c.kind, &c.work_area, c.current_frame, gaps)
+        }
         Entry::Application(_)
         | Entry::Window(_)
         | Entry::Workspace(_)

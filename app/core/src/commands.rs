@@ -4,6 +4,26 @@
 
 use crate::{CommandKind, WorkArea, Workspace, WorkspaceCommand, WorkspaceCommandKind};
 
+/// Compute the target geometry for a window-action command, with no gaps.
+///
+/// Equivalent to [`compute_geometry_with_gaps`] with `gaps = 0`; kept as the
+/// Linux crate's entry point so adding gaps for macOS did not have to touch a
+/// crate that cannot be built on a Mac. GNOME could adopt gaps by calling the
+/// gapped form directly.
+pub fn compute_geometry(
+    kind: CommandKind,
+    work_area: &WorkArea,
+    current_frame: (i32, i32, i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    compute_geometry_with_gaps(kind, work_area, current_frame, 0)
+}
+
+/// Largest gap the arithmetic below will honour, in logical pixels. The gap
+/// is doubled and added to screen coordinates, so it is clamped far below
+/// `i32::MAX` to keep every intermediate in range; any gap this large has
+/// already eaten the window and falls back to no gap (see below).
+const MAX_GAP: u32 = i32::MAX as u32 / 4;
+
 /// Compute the target geometry for a window-action command.
 ///
 /// The work area is the monitor rectangle minus panel/dock struts; every
@@ -12,16 +32,76 @@ use crate::{CommandKind, WorkArea, Workspace, WorkspaceCommand, WorkspaceCommand
 /// only `CommandKind::Center` reads it (it keeps the window's current size
 /// and recenters), the other geometry commands ignore it.
 ///
+/// `gaps` is the user's gap preference in logical pixels (`0` tiles edge to
+/// edge and reproduces [`compute_geometry`] exactly). The rules, which exist
+/// to make every gap on screen the *same* width whether it is between a
+/// window and the work-area edge or between two windows:
+///
+/// - A window gets the full gap on every work-area edge it would otherwise
+///   touch. Full-height commands get it top and bottom; left-anchored ones
+///   get it on the left; right-anchored ones on the right.
+/// - The seam between a left-anchored and a right-anchored window gets half
+///   the gap from each side (`gaps / 2` from the left window, the remainder
+///   from the right one, so an odd gap still sums exactly), which is what
+///   makes `Left third` + `Right two-thirds` — or any complementary pair —
+///   sit exactly one gap apart, the same distance as from the edges.
+/// - `Center third` is inset by the same half gap on each side, because its
+///   neighbours are `Left third` and `Right third` and the three should tile
+///   with uniform gaps. `Center half` and `Center two-thirds` have no
+///   neighbouring command that would fit beside them, so they keep their
+///   full fraction of the width and get gaps top and bottom only.
+/// - `Center` (recentre, keep size) and `Standard size` do not touch any
+///   edge and ignore the gap altogether.
+///
+/// A gap so large that it would leave a window with no width or height
+/// (`gaps = 600` on a 1000-pixel-tall work area) falls back to the ungapped
+/// rectangle: a window that still appears beats one that vanishes, and a
+/// preference that absurd is a typo, not an intent.
+///
 /// Returns `None` for every kind that isn't a rectangle: the state-toggle
 /// commands (`Minimize`, `ToggleMaximize`, `ToggleFullscreen`), the
 /// move-to-display commands, and the scrolling-tiler commands. The platform
 /// layer dispatches all of those directly instead — see the match arms below
-/// for why each one has no rectangle to compute.
-pub fn compute_geometry(
+/// for why each one has no rectangle to compute. (The macOS maximize applies
+/// the gap to all four edges itself, by insetting the work area it fills; see
+/// `app/macos/Sources/LoFi/WindowCommands.swift`.)
+pub fn compute_geometry_with_gaps(
     kind: CommandKind,
     work_area: &WorkArea,
     current_frame: (i32, i32, i32, i32),
+    gaps: u32,
 ) -> Option<(i32, i32, i32, i32)> {
+    // In range by construction: MAX_GAP is a quarter of i32::MAX.
+    let gap = i32::try_from(gaps.min(MAX_GAP)).unwrap_or(i32::MAX / 4);
+    let rect = gapped_geometry(kind, work_area, current_frame, gap)?;
+    if gap > 0 && (rect.2 <= 0 || rect.3 <= 0) {
+        // The gap ate the whole window: degrade to no gap rather than hand
+        // the platform a rectangle it cannot show.
+        return gapped_geometry(kind, work_area, current_frame, 0);
+    }
+    Some(rect)
+}
+
+/// The match behind [`compute_geometry_with_gaps`], with the gap already
+/// clamped to a safe `i32`. Every arm is written so that `gap == 0` reproduces
+/// the pre-gap formula byte for byte — the right-aligned anchoring and the
+/// `(width - w) / 2` centring are unchanged, the gap terms are simply added
+/// — so turning the feature on cannot move an ungapped window by a pixel.
+fn gapped_geometry(
+    kind: CommandKind,
+    work_area: &WorkArea,
+    current_frame: (i32, i32, i32, i32),
+    gap: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    // The seam between a left and a right window is split so the two halves
+    // always sum to exactly one gap, odd values included: the left window
+    // gives up `near`, the right window `far`.
+    let near = gap / 2;
+    let far = gap - near;
+    // Every full-height command shares the same vertical inset.
+    let top = work_area.y + gap;
+    let full_height = work_area.height - 2 * gap;
+
     match kind {
         CommandKind::Center => {
             let (_, _, w, h) = current_frame;
@@ -32,74 +112,66 @@ pub fn compute_geometry(
                 h,
             ))
         }
+        // Inset by half a gap on each side so it tiles with Left third and
+        // Right third, which give up the other half of each seam.
         CommandKind::CenterThird => {
-            let w = work_area.width / 3;
-            Some((
-                work_area.x + (work_area.width - w) / 2,
-                work_area.y,
-                w,
-                work_area.height,
-            ))
+            let w = work_area.width / 3 - gap;
+            Some((work_area.x + (work_area.width - w) / 2, top, w, full_height))
         }
+        // Center half and Center two-thirds touch no vertical edge and have
+        // no neighbouring command that fits beside them, so only the
+        // vertical gap applies.
         CommandKind::CenterHalf => {
             let w = work_area.width / 2;
-            Some((
-                work_area.x + work_area.width / 4,
-                work_area.y,
-                w,
-                work_area.height,
-            ))
+            Some((work_area.x + work_area.width / 4, top, w, full_height))
         }
         CommandKind::CenterTwoThirds => {
             let w = work_area.width * 2 / 3;
-            Some((
-                work_area.x + (work_area.width - w) / 2,
-                work_area.y,
-                w,
-                work_area.height,
-            ))
+            Some((work_area.x + (work_area.width - w) / 2, top, w, full_height))
         }
+        // Left-anchored: full gap on the left edge, `near` at the seam.
         CommandKind::LeftThird => Some((
-            work_area.x,
-            work_area.y,
-            work_area.width / 3,
-            work_area.height,
+            work_area.x + gap,
+            top,
+            work_area.width / 3 - gap - near,
+            full_height,
         )),
         CommandKind::LeftHalf => Some((
-            work_area.x,
-            work_area.y,
-            work_area.width / 2,
-            work_area.height,
+            work_area.x + gap,
+            top,
+            work_area.width / 2 - gap - near,
+            full_height,
         )),
         CommandKind::LeftTwoThirds => Some((
-            work_area.x,
-            work_area.y,
-            work_area.width * 2 / 3,
-            work_area.height,
+            work_area.x + gap,
+            top,
+            work_area.width * 2 / 3 - gap - near,
+            full_height,
         )),
         // Right-aligned variants anchor by `x + width - w` (not `x + w`) so
         // the window stays flush against the work area's right edge even when
         // integer division leaves `w` a pixel short of an exact fraction.
+        // With a gap: `far` at the seam, the full gap on the right edge.
         CommandKind::RightThird => {
             let w = work_area.width / 3;
             Some((
-                work_area.x + work_area.width - w,
-                work_area.y,
-                w,
-                work_area.height,
+                work_area.x + work_area.width - w + far,
+                top,
+                w - far - gap,
+                full_height,
             ))
         }
         CommandKind::RightHalf => {
             let w = work_area.width / 2;
-            Some((work_area.x + w, work_area.y, w, work_area.height))
+            Some((work_area.x + w + far, top, w - far - gap, full_height))
         }
         CommandKind::RightTwoThirds => {
             let w = work_area.width * 2 / 3;
             Some((
-                work_area.x + work_area.width - w,
-                work_area.y,
-                w,
-                work_area.height,
+                work_area.x + work_area.width - w + far,
+                top,
+                w - far - gap,
+                full_height,
             ))
         }
         CommandKind::StandardSize => {
@@ -215,7 +287,7 @@ pub fn build_workspace_commands(
 mod tests {
     use crate::{
         CommandKind, WorkArea, Workspace, WorkspaceCommandKind, commands::build_workspace_commands,
-        commands::compute_geometry,
+        commands::compute_geometry, commands::compute_geometry_with_gaps,
     };
 
     /// Fixed work area used by every test in this module. Non-zero `x`/`y`
@@ -443,6 +515,196 @@ mod tests {
                 None,
                 "{kind:?} is platform-dispatched under a scrolling tiler and must return None"
             );
+        }
+    }
+
+    /// Every geometry kind, for the gap tests that sweep the whole set.
+    const GEOMETRY_KINDS: [CommandKind; 11] = [
+        CommandKind::Center,
+        CommandKind::CenterThird,
+        CommandKind::CenterHalf,
+        CommandKind::CenterTwoThirds,
+        CommandKind::LeftThird,
+        CommandKind::LeftHalf,
+        CommandKind::LeftTwoThirds,
+        CommandKind::RightThird,
+        CommandKind::RightHalf,
+        CommandKind::RightTwoThirds,
+        CommandKind::StandardSize,
+    ];
+
+    /// Right edge (exclusive) of a `(x, y, w, h)` rectangle.
+    fn right_edge(rect: (i32, i32, i32, i32)) -> i32 {
+        rect.0 + rect.2
+    }
+
+    #[test]
+    fn zero_gap_is_byte_identical_to_the_ungapped_geometry() {
+        // The gap terms are additive on top of the original formulas, so a
+        // default configuration must not move any window by a pixel. Swept
+        // over an awkward work area too, where integer division rounds.
+        let odd = WorkArea {
+            x: 7,
+            y: 3,
+            width: 1801,
+            height: 1003,
+        };
+        for wa in [WA, odd] {
+            for kind in GEOMETRY_KINDS {
+                assert_eq!(
+                    compute_geometry_with_gaps(kind, &wa, FRAME, 0),
+                    compute_geometry(kind, &wa, FRAME),
+                    "{kind:?} with gaps = 0 must equal the ungapped geometry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn left_half_gap_is_full_on_three_edges_and_half_at_the_seam() {
+        // x = 100 + 8, y = 50 + 8, w = 900 - 8 - 4, h = 1000 - 16.
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::LeftHalf, &WA, ZERO_FRAME, 8),
+            Some((108, 58, 888, 984))
+        );
+    }
+
+    #[test]
+    fn right_half_gap_is_full_on_three_edges_and_half_at_the_seam() {
+        // x = 100 + 900 + 4, w = 900 - 4 - 8; the right edge lands at
+        // 1004 + 888 = 1892 = 1900 - 8, one gap in from the work area.
+        let rect = compute_geometry_with_gaps(CommandKind::RightHalf, &WA, ZERO_FRAME, 8);
+        assert_eq!(rect, Some((1004, 58, 888, 984)));
+        assert_eq!(right_edge(rect.unwrap()), WA.x + WA.width - 8);
+    }
+
+    #[test]
+    fn complementary_left_and_right_windows_sit_exactly_one_gap_apart() {
+        // The whole point of the half-gap seam: any left fraction next to the
+        // right fraction that completes it leaves exactly `gaps` between the
+        // two windows, the same distance each keeps from the edges.
+        for (left, right) in [
+            (CommandKind::LeftHalf, CommandKind::RightHalf),
+            (CommandKind::LeftThird, CommandKind::RightTwoThirds),
+            (CommandKind::LeftTwoThirds, CommandKind::RightThird),
+        ] {
+            for gaps in [1u32, 2, 7, 8, 9, 24] {
+                let l = compute_geometry_with_gaps(left, &WA, ZERO_FRAME, gaps).unwrap();
+                let r = compute_geometry_with_gaps(right, &WA, ZERO_FRAME, gaps).unwrap();
+                assert_eq!(
+                    r.0 - right_edge(l),
+                    gaps as i32,
+                    "{left:?} + {right:?} with gaps = {gaps} should leave one gap between them"
+                );
+                assert_eq!(
+                    l.0,
+                    WA.x + gaps as i32,
+                    "{left:?} keeps a full gap on the left"
+                );
+                assert_eq!(
+                    right_edge(r),
+                    WA.x + WA.width - gaps as i32,
+                    "{right:?} keeps a full gap on the right"
+                );
+                for rect in [l, r] {
+                    assert_eq!(rect.1, WA.y + gaps as i32, "full gap on top");
+                    assert_eq!(
+                        rect.1 + rect.3,
+                        WA.y + WA.height - gaps as i32,
+                        "full gap on the bottom"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_odd_gap_still_sums_exactly_at_the_seam() {
+        // 9 splits as 4 (left window) + 5 (right window). The left half ends
+        // at 100 + 9 + 887 = 996; the right half starts at 100 + 900 + 5 =
+        // 1005; 1005 - 996 = 9.
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::LeftHalf, &WA, ZERO_FRAME, 9),
+            Some((109, 59, 887, 982))
+        );
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::RightHalf, &WA, ZERO_FRAME, 9),
+            Some((1005, 59, 886, 982))
+        );
+    }
+
+    #[test]
+    fn thirds_tile_with_uniform_gaps() {
+        // Left third | Center third | Right third, gaps = 8: both seams are
+        // exactly 8 wide, so the center third gives up half a gap each side.
+        let l = compute_geometry_with_gaps(CommandKind::LeftThird, &WA, ZERO_FRAME, 8).unwrap();
+        let c = compute_geometry_with_gaps(CommandKind::CenterThird, &WA, ZERO_FRAME, 8).unwrap();
+        let r = compute_geometry_with_gaps(CommandKind::RightThird, &WA, ZERO_FRAME, 8).unwrap();
+        assert_eq!(l, (108, 58, 588, 984));
+        assert_eq!(c, (704, 58, 592, 984));
+        assert_eq!(r, (1304, 58, 588, 984));
+        assert_eq!(c.0 - right_edge(l), 8, "left | center seam");
+        assert_eq!(r.0 - right_edge(c), 8, "center | right seam");
+    }
+
+    #[test]
+    fn center_half_and_two_thirds_get_vertical_gaps_only() {
+        // Neither touches a vertical edge and neither has a neighbouring
+        // command that would fit beside it, so the width is the plain
+        // fraction and only y / height move.
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::CenterHalf, &WA, ZERO_FRAME, 8),
+            Some((550, 58, 900, 984))
+        );
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::CenterTwoThirds, &WA, ZERO_FRAME, 8),
+            Some((400, 58, 1200, 984))
+        );
+    }
+
+    #[test]
+    fn center_and_standard_size_ignore_the_gap() {
+        // Neither touches an edge: Center keeps the window's own size and
+        // Standard size is two-thirds floating in the middle.
+        for kind in [CommandKind::Center, CommandKind::StandardSize] {
+            assert_eq!(
+                compute_geometry_with_gaps(kind, &WA, FRAME, 8),
+                compute_geometry(kind, &WA, FRAME),
+                "{kind:?} should not change with a gap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gap_that_would_eat_the_window_falls_back_to_no_gap() {
+        // 600 on a 1000-tall work area leaves a negative height; a window
+        // that still appears beats one that vanishes.
+        assert_eq!(
+            compute_geometry_with_gaps(CommandKind::LeftHalf, &WA, ZERO_FRAME, 600),
+            compute_geometry(CommandKind::LeftHalf, &WA, ZERO_FRAME)
+        );
+        // And the extremes must not overflow or panic.
+        for kind in GEOMETRY_KINDS {
+            assert_eq!(
+                compute_geometry_with_gaps(kind, &WA, FRAME, u32::MAX),
+                compute_geometry(kind, &WA, FRAME),
+                "{kind:?} with an absurd gap should degrade to the ungapped geometry"
+            );
+        }
+    }
+
+    #[test]
+    fn non_geometry_kinds_stay_none_with_a_gap() {
+        for kind in [
+            CommandKind::Minimize,
+            CommandKind::ToggleMaximize,
+            CommandKind::ToggleFullscreen,
+            CommandKind::NextDisplay,
+            CommandKind::PreviousDisplay,
+            CommandKind::WidthHalf,
+            CommandKind::Close,
+        ] {
+            assert_eq!(compute_geometry_with_gaps(kind, &WA, FRAME, 8), None);
         }
     }
 

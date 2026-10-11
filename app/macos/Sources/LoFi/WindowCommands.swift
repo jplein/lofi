@@ -12,9 +12,9 @@
 //     reads it, to recenter without resizing).
 //   - `workArea` — the window's screen's visible frame, used as the
 //     bounding box by every geometry command via `compute_geometry`.
-//   - `gaps` — the user's configured gap (`Config.gaps`), captured here so
-//     the geometry commands have it next to the work area they will inset
-//     by it. Not applied yet.
+//   - `gaps` — the user's configured gap (`Config.gaps`), captured next to
+//     the work area it insets. The geometry commands hand it to Rust's
+//     `compute_geometry_with_gaps`; toggle maximize fills `gappedWorkArea`.
 //
 // WHY "frontmost non-LoFi window" (GNOME parity)
 // ----------------------------------------------
@@ -64,12 +64,30 @@ enum WindowCommands {
         let workArea: CGRect
         let currentFrame: CGRect
         /// Space to leave between the placed window and the work-area edges,
-        /// in points, from `config.toml` (`0` by default). Carried here, next
-        /// to the `workArea` it will inset, but **not yet honoured** by the
-        /// geometry commands — wiring the preference through is the first
-        /// half; applying it is the next slice.
+        /// in points, from `config.toml` (`0` by default). Captured at gather
+        /// time like everything else here, so a config edit between summon
+        /// and activation can't give one command a different gap from the
+        /// rows beside it. The geometry commands pass it to Rust
+        /// (`EntryList.commandGeometry(at:gaps:)`), where the per-kind rules
+        /// live; `gappedWorkArea` is the one gap computation done in Swift.
         let gaps: Int
         var standardRect: CGRect
+
+        /// `workArea` inset by `gaps` on all four edges — what *maximize*
+        /// fills, and what it compares the current frame against to decide
+        /// whether the window is already maximized. Computed here rather
+        /// than in Rust because `compute_geometry` has no rectangle for
+        /// `ToggleMaximize` (it is a state toggle on every platform; the
+        /// macOS implementation happens to be a resize) and a four-edge
+        /// inset is not arithmetic worth an FFI round-trip. With `gaps == 0`
+        /// this is `workArea` itself, so the default is unchanged.
+        var gappedWorkArea: CGRect {
+            let inset = CGFloat(gaps)
+            // `insetBy` returns `.null` when the inset would invert the rect;
+            // mirror Rust's rule and fall back to the ungapped area instead.
+            let gapped = workArea.insetBy(dx: inset, dy: inset)
+            return gapped.isNull || gapped.isEmpty ? workArea : gapped
+        }
     }
 
     /// Pick the command target (frontmost non-LoFi window) and capture its
