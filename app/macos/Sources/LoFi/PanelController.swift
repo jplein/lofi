@@ -135,9 +135,10 @@ final class PanelController {
     }
 
     /// Hide the panel without terminating the process. Paired with
-    /// `NSApp.hide` in `AppDelegate.dismissPanel` for the Esc /
-    /// post-activation flow; `hidesOnDeactivate = true` covers the
-    /// auto-hide case when LoFi loses key to another app.
+    /// `NSApp.hide` in `AppDelegate.dismissPanel` for the Esc / command
+    /// flow (`DismissMode.hideApp`); after an app or window activation
+    /// (`.handoff`) this is the only step, and `hidesOnDeactivate = true`
+    /// covers the moment LoFi actually loses key to the target.
     func hide() {
         panel.orderOut(nil)
     }

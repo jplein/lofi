@@ -1,4 +1,7 @@
 [toolchain]
-channel = "1.95.0"
+# Floor is 1.98: older toolchains produce proc-macro dylibs that macOS 27
+# cannot load (see app/README.md "Rust toolchain version"). Must match the
+# Rust version rules_rust defaults to in MODULE.bazel.
+channel = "1.98.0"
 components = ["rustfmt", "clippy", "rust-analyzer"]
 profile = "minimal"

@@ -109,6 +109,34 @@ private let kSelectionCornerRadius: CGFloat = 8
 // unselected row.
 private let kSelectedSecondaryAlpha: CGFloat = 0.75
 
+/// How the panel should step out of the way once the user is done with
+/// it. The two modes exist because of an activation race, visible as
+/// "I picked Safari but the app I came from stayed in front, with Safari
+/// second in the Cmd-Tab order":
+///
+/// `NSApp.hide(nil)` on the *active* app makes macOS activate the
+/// next-most-recent app — the one the user was in before summoning
+/// LoFi. Both `NSWorkspace.openApplication` and
+/// `NSRunningApplication.activate()` activate their target
+/// asynchronously via the window server. Hiding right after either one
+/// therefore queues two competing activations, and whichever lands last
+/// wins. On a loaded machine the target's activation often lands first,
+/// so the hide-induced activation of the previous app overwrites it.
+///
+/// - `handoff`: another app is about to become active. Only hide the
+///   panel (`orderOut`) and let the target's activation deactivate LoFi;
+///   `hidesOnDeactivate = true` would hide the panel anyway, the explicit
+///   `orderOut` just removes it a frame earlier. No `NSApp.hide`, so
+///   there is nothing to race against.
+/// - `hideApp`: no other app is taking over (Esc, window-action and
+///   power commands, a failed launch). Hide the panel AND `NSApp.hide`
+///   so macOS returns focus to the previous app and LoFi doesn't linger
+///   as an "active app with no windows."
+enum DismissMode {
+    case handoff
+    case hideApp
+}
+
 final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     NSTextFieldDelegate
 {
@@ -151,7 +179,12 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     /// and steps LoFi back to background. In the pre-hotkey era this
     /// was `NSApp.terminate(nil)`; now LoFi stays running between
     /// summons.
-    private let onDismiss: () -> Void
+    ///
+    /// The `DismissMode` says whether LoFi should hide itself
+    /// (`.hideApp`) or leave activation to another app it just
+    /// handed off to (`.handoff`). See `DismissMode` for why the two
+    /// must differ.
+    private let onDismiss: (DismissMode) -> Void
     private let tableView: NSTableView
     private let scrollView: NSScrollView
 
@@ -176,7 +209,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         windowAux: [UInt64: (pid: pid_t, title: String, appName: String)],
         commandTarget: WindowCommands.CommandTarget?,
         savedFrameStore: SavedFrameStore,
-        onDismiss: @escaping () -> Void
+        onDismiss: @escaping (DismissMode) -> Void
     ) {
         self.entries = entries
         self.mruStore = mruStore
@@ -398,7 +431,7 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             launchRow(tableView.selectedRow)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            onDismiss()
+            onDismiss(.hideApp)
             return true
         default:
             return false
@@ -477,6 +510,13 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     ///     state-toggle kinds dispatch by command id.
     ///   - every other category (currently only `"Application"`) opens the
     ///     `.app` bundle via LaunchServices.
+    ///
+    /// Dismissal differs by branch. Window and Application rows hand
+    /// activation to another app, so they dismiss with `.handoff` —
+    /// the target's activation deactivates LoFi and `hidesOnDeactivate`
+    /// drops the panel. Command and Power rows leave no new foreground
+    /// app, so they dismiss with `.hideApp` and let `NSApp.hide`
+    /// return focus to the app the user came from. See `DismissMode`.
     private func launchRow(_ row: Int) {
         guard row >= 0, row < entries.count else { return }
         if let store = mruStore {
@@ -485,19 +525,23 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         let category = entries.category(at: row)
         if category == "Window" {
             let id = entries.windowId(at: row)
+            var raised = false
             if let aux = windowAux[id] {
-                _ = WindowActivation.raise(
+                raised = WindowActivation.raise(
                     pid: aux.pid,
                     windowId: CGWindowID(id),
                     title: aux.title
                 )
             }
+            onDismiss(raised ? .handoff : .hideApp)
         } else if category == "Command" {
             runCommand(row)
+            onDismiss(.hideApp)
         } else if category == "Power" {
             if let id = entries.powerCommandId(at: row) {
                 _ = PowerCommands.activate(id: id)
             }
+            onDismiss(.hideApp)
         } else {
             // `entries.icon(at:)` returns the bundle path on macOS —
             // see the `DiscoveredApp.bundlePath` comment in
@@ -515,14 +559,25 @@ final class AppListController: NSObject, NSTableViewDataSource, NSTableViewDeleg
             // apps on your Mac" on the first launch after each rebuild (the
             // rebuild changes the cdhash that keys the one-shot TCC
             // notification). `openApplication` uses launch semantics and
-            // writes nothing to the target bundle. Fire-and-forget: the launch
-            // is async; we dismiss immediately, as before.
+            // writes nothing to the target bundle.
+            //
+            // The launch is async and Launch Services activates the
+            // target for us (`OpenConfiguration.activates` defaults to
+            // true). We hide the panel right away but deliberately do
+            // NOT `NSApp.hide` here — see `DismissMode.handoff`. The
+            // completion handler only matters on failure: if the launch
+            // errors, nothing is going to take activation from LoFi, so
+            // we fall back to the full hide to get out of the way.
+            let onDismiss = self.onDismiss
+            onDismiss(.handoff)
             NSWorkspace.shared.openApplication(
                 at: URL(fileURLWithPath: path),
                 configuration: NSWorkspace.OpenConfiguration()
-            )
+            ) { _, error in
+                guard error != nil else { return }
+                DispatchQueue.main.async { onDismiss(.hideApp) }
+            }
         }
-        onDismiss()
     }
 
     /// Run the window-action command at `row` against `commandTarget`.

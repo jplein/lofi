@@ -115,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             windowAux: windowAux,
             commandTarget: nil,
             savedFrameStore: savedFrameStore,
-            onDismiss: { [weak self] in self?.dismissPanel() }
+            onDismiss: { [weak self] mode in self?.dismissPanel(mode) }
         )
         self.listController = listController
         let controller = PanelController(
@@ -164,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// currently interacting with LoFi."
     private func toggleOrSummon() {
         if NSApp.isActive {
-            dismissPanel()
+            dismissPanel(.hideApp)
         } else {
             summonPanel()
         }
@@ -290,9 +290,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// then mostly redundant, but `NSApp.hide` cleans up the
     /// "inactive but technically frontmost" state cmd-tab would
     /// otherwise show).
-    private func dismissPanel() {
+    ///
+    /// `NSApp.hide` runs only for `.hideApp`. When the user picked an
+    /// entry that activates another app (`.handoff`), hiding LoFi would
+    /// make macOS activate the *previous* app in a race with the
+    /// target's own activation — the "Safari ends up second in the
+    /// Cmd-Tab order" bug. See `DismissMode` in `AppListController.swift`.
+    private func dismissPanel(_ mode: DismissMode) {
         panelController?.hide()
-        NSApp.hide(nil)
+        if mode == .hideApp {
+            NSApp.hide(nil)
+        }
     }
 
     /// Window-action command ids in display order. Mirrors

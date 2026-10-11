@@ -48,3 +48,12 @@ That single invocation is the gate; there is no separate Rust-only or Swift-only
 Only `core` builds under Bazel; the `linux` crate is Linux-only (gtk4 / libadwaita / gtk4-layer-shell) and has no Bazel target, so it is covered by the Cargo path above.
 
 `app/macos/check.sh --fix` is a companion to the Bazel gate, not a separate check: it runs `swift-format format --in-place` to *rewrite* the sources, which the Bazel `sh_test` (sandboxed, read-only) cannot do. Bare `./check.sh` is no longer a lint entry point.
+
+## Rust toolchain version
+
+Two places pin the Rust version and they must agree:
+
+- `rust-toolchain.toml` at the repo root — read by rustup-style tooling, by the Nix flake (`rust-bin.fromRustupToolchainFile`), and therefore by the whole Linux/Cargo path.
+- rules_rust's **default** toolchain version on the macOS/Bazel path. `MODULE.bazel` does not call `rust.toolchain(versions = ...)`, so Bazel builds with whatever `DEFAULT_RUST_VERSION` the pinned `rules_rust` release ships (0.74.0 → Rust 1.98.0). Bumping Rust on macOS therefore means bumping `rules_rust`, not editing a version string.
+
+**The floor is Rust 1.98.** Rust 1.95 through 1.97 cannot build this repo on macOS 27 with Xcode 27: Cargo's release profile (and rules_rust's `opt` exec configuration, which is what builds proc-macro crates "for tool") strips debuginfo with rustc's bundled LLVM `rust-objcopy`, and that objcopy wrote the Mach-O `__LINKEDIT` string pool at a 4-byte-aligned offset when Xcode 27's linker emitted an odd-length indirect symbol table. macOS 27's dyld rejects such a dylib ("mis-aligned LINKEDIT string pool"), so rustc cannot `dlopen` any stripped proc-macro — `thiserror_impl`, `serde_derive`, … — and every build dies with `error[E0463]: can't find crate for \`thiserror_impl\``. The misleading part is the message: the dylib exists on disk, rustc just could not load it. Rust 1.98 ships the fixed objcopy. The alternative workaround (`strip = "none"` / `strip_level` on the exec toolchain) was rejected because it only papers over the symptom on one platform; moving the pin fixes it everywhere and keeps Nix and Bazel on the same compiler.
