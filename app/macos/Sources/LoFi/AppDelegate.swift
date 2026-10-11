@@ -92,6 +92,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var promptedForPermission = false
     // Live for the process lifetime; deinit unregisters via Carbon.
     private var hotkey: GlobalHotkey?
+    // Bumped on every summon and every dismiss. A `.handoff` dismiss
+    // schedules a delayed "is LoFi still active?" check that must only
+    // act if nothing else happened in between — a re-summon inside the
+    // grace period makes LoFi legitimately active again, and the stale
+    // check must not tear that fresh panel down. Comparing generations
+    // is cheaper and clearer than tracking/cancelling work items.
+    private var dismissGeneration = 0
+    // How long a handed-off target gets to activate before we conclude
+    // nobody is taking the foreground from us and hide anyway. A running
+    // app activates in milliseconds; a cold launch has usually at least
+    // registered with the window server inside a second. Long enough
+    // that the race this exists to avoid (gotcha 34) has fully settled.
+    private static let handoffGracePeriod: TimeInterval = 1.0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installHiddenMenu()
@@ -273,6 +286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         listController?.setCommandTarget(commandTarget)
         listController?.reset()
 
+        // Invalidate any pending handoff check from the previous dismiss
+        // (see `dismissPanel`): we're about to be active on purpose.
+        dismissGeneration += 1
+
         // `LSUIElement=YES` keeps LoFi out of the Dock; `activate`
         // is what brings it forward each summon. We always ignore
         // other apps here — the one case that must not cover the
@@ -291,15 +308,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "inactive but technically frontmost" state cmd-tab would
     /// otherwise show).
     ///
-    /// `NSApp.hide` runs only for `.hideApp`. When the user picked an
-    /// entry that activates another app (`.handoff`), hiding LoFi would
-    /// make macOS activate the *previous* app in a race with the
-    /// target's own activation — the "Safari ends up second in the
-    /// Cmd-Tab order" bug. See `DismissMode` in `AppListController.swift`.
+    /// `NSApp.hide` runs immediately only for `.hideApp`. When the user
+    /// picked an entry that activates another app (`.handoff`), hiding
+    /// LoFi right away would make macOS activate the *previous* app in a
+    /// race with the target's own activation — the "Safari ends up second
+    /// in the Cmd-Tab order" bug. See `DismissMode` in
+    /// `AppListController.swift`.
+    ///
+    /// `.handoff` instead schedules a check `handoffGracePeriod` later:
+    /// if LoFi is *still* the active app by then, the target never took
+    /// the foreground (background-only agent app, launch that failed
+    /// silently, user cancelled a launch prompt) and we hide after all.
+    /// Without this, LoFi would linger as an active app with no windows —
+    /// swallowing keystrokes, and making the next Option+Space read as a
+    /// toggle-off instead of a summon. By the time the check fires any
+    /// activation that was going to land has landed, so hiding then
+    /// cannot re-create the race. `dismissGeneration` guards against a
+    /// stale check acting after a re-summon.
     private func dismissPanel(_ mode: DismissMode) {
         panelController?.hide()
-        if mode == .hideApp {
+        dismissGeneration += 1
+        switch mode {
+        case .hideApp:
             NSApp.hide(nil)
+        case .handoff:
+            let generation = dismissGeneration
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.handoffGracePeriod
+            ) { [weak self] in
+                guard let self, self.dismissGeneration == generation,
+                    NSApp.isActive
+                else { return }
+                NSApp.hide(nil)
+            }
         }
     }
 
