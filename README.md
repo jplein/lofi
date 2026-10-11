@@ -61,7 +61,7 @@ The two differ in what they need *installed*, and only GNOME needs anything:
 - **Niri** requires nothing installed. The compositor's own IPC socket is the
   whole interface, and the launcher presents itself as a layer-shell overlay.
 
-Niri users may want [a config file](#configuration) all the same. A layer
+Niri users may want [a config file](#configuration-linux) all the same. A layer
 surface gets no decorations from either side, so the launcher comes up as a
 plain rounded rectangle until you tell it what your border and shadow look
 like.
@@ -164,10 +164,11 @@ dconf.settings = {
 };
 ```
 
-## Configuration
+## Configuration: Linux
 
 LoFi reads `~/.config/lofi/config.toml` (or `$XDG_CONFIG_HOME/lofi/config.toml`).
-The file is optional and so is every key in it.
+The file is optional and so is every key in it. The macOS launcher has [its own
+file](#configuration-macos) with its own keys.
 
 ```toml
 lock-command = "swaylock -f -c 000000"
@@ -313,3 +314,36 @@ the file itself, at activation.
 bazelisk run //app/macos:install
 open ~/Applications/LoFi.app
 ```
+
+## Configuration: macOS
+
+LoFi reads `~/Library/Preferences/LoFi/config.toml`. Every key in it is
+optional. If the file does not exist, LoFi writes it on the first summon, with
+every key at its default and a comment saying what it does, so the file is its
+own documentation:
+
+```toml
+# LoFi configuration. Every key is optional; a missing key is its default.
+# Edits take effect on the next summon, no relaunch needed.
+
+# Space to leave between a window placed by a window-action command and the
+# edges of the work area, in points. 0 tiles windows edge to edge.
+gaps = 0
+```
+
+`gaps` is the space, in points, that the window-action commands will leave
+between a placed window and the edges of the work area. It is read and carried
+through to the commands today, but **not yet applied** — every command still
+tiles edge to edge regardless of the value. Negative and fractional values are
+rejected.
+
+The file is separate from the Linux one because the two share no keys: the
+Linux file is about a lock command and the window chrome the launcher has to
+draw for itself on Niri, neither of which exists on macOS. A key from the
+wrong file is reported as unknown rather than silently ignored.
+
+LoFi re-reads the file on every summon, so an edit takes effect the next time
+you press Option+Space — no relaunch. A malformed file is logged to stderr and
+treated as the defaults, so a typo costs you the preference, not the launcher.
+An existing file is never overwritten, however broken; delete it to get the
+template back.

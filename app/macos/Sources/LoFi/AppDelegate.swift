@@ -71,6 +71,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // long-running process; UserDefaults is the on-disk backing
     // store so it also survives a quit/relaunch.
     private let savedFrameStore = SavedFrameStore()
+    // The user's `~/Library/Preferences/LoFi/config.toml`, re-read by
+    // every `summonPanel` so an edit takes effect on the next summon
+    // rather than the next relaunch (see `Config.swift`). Starts at the
+    // defaults so nothing reads an unset value before the first summon.
+    private var config = Config.defaults
     // Globally-frontmost non-LoFi window, captured fresh by every
     // `summonPanel`. `nil` between summons / when there's no target.
     // Pushed into the list controller before the panel is shown.
@@ -227,6 +232,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Reset state from the previous summon.
         entries.clear()
         commandTarget = nil
+
+        // Pick up any edit to the config file since the last summon. The
+        // whole file is optional; a missing one is the defaults, silently.
+        config = Config.load()
 
         // Bundle ids of currently-running processes, used to stamp
         // `isRunning` on app rows. `runningApplications` returns every
@@ -406,7 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fallback. The scan is BY ID (not a fixed index) and happens before
     /// any filter so it's robust to ordering.
     private func pushCommands() {
-        guard var target = WindowCommands.gatherTarget() else { return }
+        guard var target = WindowCommands.gatherTarget(gaps: config.gaps) else { return }
 
         var ids = Self.commandIdsAlwaysAvailable
         if NSScreen.screens.count >= 2 {

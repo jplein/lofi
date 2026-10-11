@@ -12,6 +12,9 @@
 //     reads it, to recenter without resizing).
 //   - `workArea` — the window's screen's visible frame, used as the
 //     bounding box by every geometry command via `compute_geometry`.
+//   - `gaps` — the user's configured gap (`Config.gaps`), captured here so
+//     the geometry commands have it next to the work area they will inset
+//     by it. Not applied yet.
 //
 // WHY "frontmost non-LoFi window" (GNOME parity)
 // ----------------------------------------------
@@ -60,6 +63,12 @@ enum WindowCommands {
         let title: String
         let workArea: CGRect
         let currentFrame: CGRect
+        /// Space to leave between the placed window and the work-area edges,
+        /// in points, from `config.toml` (`0` by default). Carried here, next
+        /// to the `workArea` it will inset, but **not yet honoured** by the
+        /// geometry commands — wiring the preference through is the first
+        /// half; applying it is the next slice.
+        let gaps: Int
         var standardRect: CGRect
     }
 
@@ -72,7 +81,7 @@ enum WindowCommands {
     /// `standardRect` is initialized to `.zero` here as a placeholder;
     /// `AppDelegate` overwrites it post-push with the computed StandardSize
     /// rect (see `CommandTarget.standardRect`).
-    static func gatherTarget() -> CommandTarget? {
+    static func gatherTarget(gaps: Int) -> CommandTarget? {
         // `WindowDiscovery.frontmostNonLoFi` reads
         // `NSWorkspace.frontmostApplication`'s AX focused window. Called
         // before `NSApp.activate(...)` in `summonPanel`, so the foreground
@@ -89,6 +98,7 @@ enum WindowCommands {
             title: target.title,
             workArea: workArea,
             currentFrame: target.bounds,
+            gaps: gaps,
             standardRect: .zero
         )
     }

@@ -25,6 +25,7 @@ _LOFI_CORE_DEPS = [
     "@crates//:serde_json",
     "@crates//:fuzzy-matcher",
     "@crates//:rusqlite",
+    "@crates//:toml",
 ]
 
 _LOFI_CORE_SRCS = glob(["src/**/*.rs"])
@@ -120,7 +121,8 @@ cc_library(
 # invisible to Bazel — and so escape the clippy gate below, which only lints
 # what it builds. The crate features and `srcs` are inherited via `crate=`;
 # `tempfile` is the only dev-dependency the inline tests reach for
-# (`mru.rs::tests` uses `tempfile::tempdir()`) so it's the only extra dep.
+# (`mru.rs::tests` and `config.rs::tests` use `tempfile::tempdir()`) so it's
+# the only extra dep.
 rust_test(
     name = "lofi_core_lib_test",
     crate = ":lofi_core_rlib",

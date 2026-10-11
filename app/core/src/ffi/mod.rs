@@ -7,8 +7,10 @@
 //! The submodules each carry one logical chunk of the FFI; this `mod.rs`
 //! re-exports them so the symbols all land in `lofi_core::ffi`.
 
+pub mod config;
 pub mod entries;
 pub mod mru;
 
+pub use config::*;
 pub use entries::*;
 pub use mru::*;

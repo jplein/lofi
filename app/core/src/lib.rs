@@ -1,10 +1,12 @@
 pub mod commands;
+pub mod config;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod matcher;
 pub mod mru;
 mod ranking;
 pub use commands::{build_workspace_commands, compute_geometry};
+pub use config::Config;
 #[cfg(feature = "ffi")]
 pub use ffi::*;
 pub use matcher::search;

@@ -150,6 +150,15 @@ unsafe extern "C" {
         out_w: *mut i32,
         out_h: *mut i32,
     ) -> bool;
+
+    // Configuration FFI surface (added in the macOS config slice). Mirrors
+    // the C signature cbindgen emits for `lofi_core::ffi::config`:
+    //
+    //     typedef struct LofiConfig { uint32_t gaps; } LofiConfig;
+    //     struct LofiConfig lofi_config_load(const char *path);
+    //
+    // Returned by value: no handle, nothing to free.
+    fn lofi_config_load(path: *const c_char) -> LofiConfig;
 }
 
 /// Opaque type matching the Rust-side `MruStore` newtype the FFI hands out
@@ -159,6 +168,15 @@ unsafe extern "C" {
 #[repr(C)]
 struct MruStore {
     _private: [u8; 0],
+}
+
+/// By-value mirror of the Rust-side `#[repr(C)] LofiConfig`. Declared here
+/// rather than imported so the test checks the layout a C caller sees — one
+/// `uint32_t` — and not just that the Rust type exists.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LofiConfig {
+    gaps: u32,
 }
 
 /// Test helper: open a fresh `MruStore` backed by a SQLite file inside a
@@ -225,6 +243,51 @@ fn mru_open_invalid_path_returns_null() {
         );
         // Belt and braces: freeing null must be a safe no-op.
         lofi_mru_free(store);
+    }
+}
+
+#[test]
+fn config_load_missing_file_is_the_defaults_and_creates_the_file() {
+    // An absent file yields the defaults, by value, no error — and leaves the
+    // commented template behind (parent directory included) so the user can
+    // find the schema on disk.
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("LoFi").join("config.toml");
+    let cstr = CString::new(path.to_str().expect("UTF-8 path")).expect("path has no NUL");
+    // SAFETY: `cstr` lives across the call; nothing is retained.
+    let config = unsafe { lofi_config_load(cstr.as_ptr()) };
+    assert_eq!(config, LofiConfig { gaps: 0 });
+    let written = std::fs::read_to_string(&path).expect("the default file should now exist");
+    assert!(
+        written.contains("gaps = 0"),
+        "the template should spell out the default, got: {written}"
+    );
+}
+
+#[test]
+fn config_load_reads_gaps() {
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "gaps = 8\n").expect("fixture should be writable");
+    let cstr = CString::new(path.to_str().expect("UTF-8 path")).expect("path has no NUL");
+    // SAFETY: `cstr` lives across the call; nothing is retained.
+    let config = unsafe { lofi_config_load(cstr.as_ptr()) };
+    assert_eq!(config.gaps, 8);
+}
+
+#[test]
+fn config_load_malformed_file_and_null_path_are_the_defaults() {
+    // Both degraded paths must land on the defaults rather than panic: the
+    // Swift side never has to handle "no configuration" as a distinct state.
+    let dir = tempfile::tempdir().expect("tempdir should succeed");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "gaps = -1\n").expect("fixture should be writable");
+    let cstr = CString::new(path.to_str().expect("UTF-8 path")).expect("path has no NUL");
+    // SAFETY: `cstr` lives across the call; null is explicitly permitted by
+    // the contract.
+    unsafe {
+        assert_eq!(lofi_config_load(cstr.as_ptr()), LofiConfig { gaps: 0 });
+        assert_eq!(lofi_config_load(ptr::null()), LofiConfig { gaps: 0 });
     }
 }
 
