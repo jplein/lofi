@@ -303,7 +303,7 @@ the file itself, at activation.
 
 ## System requirements: macOS
 
-- macOS 27 with Xcode 27 is the verified build configuration (as of October 2026; it was previously macOS 26 Tahoe with Xcode 26). The app's deployment target is still macOS 15.0.
+- macOS 27 with Xcode 27
 - Nix + direnv (provides Bazel and the Rust toolchain via the flake)
 - Rust 1.98 or newer. The pin lives in `rust-toolchain.toml` and must stay at or above 1.98 — see [app/README.md](app/README.md#rust-toolchain-version) for the macOS 27 proc-macro bug that forces the floor.
 

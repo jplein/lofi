@@ -19,9 +19,8 @@
 //   The Alt+Space hotkey resummons via `AppDelegate.summonPanel`, so
 //   the user can always get the panel back.
 // - Clear window background + `hasShadow` + a rounded
-//   `NSGlassEffectView` (Tahoe Liquid Glass; `NSVisualEffectView`
-//   fallback below macOS 26 — see `makeBackground`) give the panel
-//   Spotlight's look: rounded corners, a drop shadow, and a translucent
+//   `NSGlassEffectView` (Liquid Glass — see `makeBackground`) give the
+//   panel Spotlight's look: rounded corners, a drop shadow, and a translucent
 //   glass surface. The window itself MUST be non-opaque with a clear
 //   background, or its square corners show through behind the rounded
 //   content and the shadow traces the square, not the rounded shape.
@@ -143,46 +142,34 @@ final class PanelController {
         panel.orderOut(nil)
     }
 
-    /// Builds the rounded, translucent background the search field and
-    /// list sit on. On macOS 26 (Tahoe) this is a true Liquid Glass
-    /// surface via `NSGlassEffectView`; the deployment target is 15.0, so
-    /// older systems fall back to a vibrant `NSVisualEffectView` with a
-    /// layer-clipped corner radius. Returns the `container` to install as
-    /// the panel's `contentView` and the inner `host` to add content to
-    /// (for glass that's its `contentView`; for vibrancy a pinned
-    /// subview). `host` is pinned to `container`'s edges so it fills the
-    /// rounded area regardless of which backend produced it.
+    /// Builds the rounded, translucent Liquid Glass background the search
+    /// field and list sit on, via `NSGlassEffectView`. The deployment
+    /// target is macOS 27 (`minimum_os_version` in `BUILD.bazel`), so the
+    /// glass view is always available and there is no vibrancy fallback —
+    /// an earlier `NSVisualEffectView` branch for pre-26 systems was
+    /// removed when the floor was raised, because code that can never run
+    /// is a maintenance trap, not a safety net. Returns the `container` to
+    /// install as the panel's `contentView` and the inner `host` (the
+    /// glass's `contentView`) to add content to. `host` is pinned to
+    /// `container`'s edges so it fills the rounded area.
     private static func makeBackground() -> (container: NSView, host: NSView) {
         let host = NSView()
 
-        let container: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = kCornerRadius
-            glass.contentView = host
-            // `NSGlassEffectView.cornerRadius` rounds the visible glass
-            // surface, but the view's layer alpha mask is still rectangular
-            // — so the window's `hasShadow` silhouette (and any inherent
-            // edge stroke the Liquid Glass effect draws at its bounds)
-            // traces the square panel rect, leaving a sharp 90° outline
-            // cutting across the rounded corners. Layer-clipping the view
-            // to the same radius makes the rendered alpha mask round too,
-            // so the shadow hugs the rounded shape like the README claims.
-            glass.wantsLayer = true
-            glass.layer?.cornerRadius = kCornerRadius
-            glass.layer?.masksToBounds = true
-            container = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = .hudWindow
-            effect.blendingMode = .behindWindow
-            effect.state = .active
-            effect.wantsLayer = true
-            effect.layer?.cornerRadius = kCornerRadius
-            effect.layer?.masksToBounds = true
-            effect.addSubview(host)
-            container = effect
-        }
+        let glass = NSGlassEffectView()
+        glass.cornerRadius = kCornerRadius
+        glass.contentView = host
+        // `NSGlassEffectView.cornerRadius` rounds the visible glass
+        // surface, but the view's layer alpha mask is still rectangular
+        // — so the window's `hasShadow` silhouette (and any inherent
+        // edge stroke the Liquid Glass effect draws at its bounds)
+        // traces the square panel rect, leaving a sharp 90° outline
+        // cutting across the rounded corners. Layer-clipping the view
+        // to the same radius makes the rendered alpha mask round too,
+        // so the shadow hugs the rounded shape like the README claims.
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = kCornerRadius
+        glass.layer?.masksToBounds = true
+        let container: NSView = glass
 
         host.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([

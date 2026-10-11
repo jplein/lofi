@@ -30,7 +30,11 @@ macos_application(
     bundle_name = "LoFi",
     infoplists = ["Resources/Info.plist"],
     entitlements = "Resources/LoFi.entitlements",
-    minimum_os_version = "15.0",
+    # macOS 27 is the only OS LoFi is used or tested on, and there is no
+    # setup for verifying anything older, so the floor matches reality
+    # rather than claiming support we cannot check. Raising it also lets
+    # the panel use Liquid Glass unconditionally (no pre-26 fallback).
+    minimum_os_version = "27.0",
     # Public so rules_xcodeproj's generated package can depend on this
     # for project generation.
     visibility = ["//visibility:public"],
