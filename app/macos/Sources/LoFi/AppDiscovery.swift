@@ -1,5 +1,6 @@
-// Enumerates installed `.app` bundles under the three applications
-// roots a macOS user expects to find launchable apps in. Mirrors the
+// Enumerates installed `.app` bundles under the applications roots a
+// macOS user expects to find launchable apps in, plus a few
+// individually-listed system apps (Finder) that live elsewhere. Mirrors the
 // GNOME side's "platform discovers, Rust holds" data-flow: the Swift
 // layer produces a sorted, deduped list and pushes it into the Rust
 // core (see `AppDelegate`).
@@ -25,8 +26,9 @@ struct DiscoveredApp {
 }
 
 enum AppDiscovery {
-    /// Walk `/System/Applications`, `/Applications`, and `~/Applications`
-    /// for `.app` bundles and return them deduped by bundle id
+    /// Walk `/System/Applications`, `/Applications`, the Safari Cryptex,
+    /// and `~/Applications` for `.app` bundles, add Finder from
+    /// `/System/Library/CoreServices`, and return them deduped by bundle id
     /// (first-wins) and sorted by lowercased name. Synchronous: the
     /// panel is shown after this returns, so the first paint is fully
     /// populated.
@@ -59,35 +61,42 @@ enum AppDiscovery {
             fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
         ]
 
+        // Single bundles that live outside every root above. Finder sits in
+        // `/System/Library/CoreServices`, which we can't scan as a root: it
+        // is full of internal helper apps (loginwindow, Dock, Siri agents,
+        // installers, …) that the user never wants to launch.
+        let extraBundles: [URL] = [
+            URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")
+        ]
+
         var seen: Set<String> = []
         var out: [DiscoveredApp] = []
 
-        for root in roots {
-            for url in collectAppBundles(under: root) {
-                guard let bundle = Bundle(url: url) else { continue }
-                guard let bundleId = bundle.bundleIdentifier else { continue }
-                if seen.contains(bundleId) { continue }
+        let candidates = roots.flatMap { collectAppBundles(under: $0) } + extraBundles
+        for url in candidates {
+            guard let bundle = Bundle(url: url) else { continue }
+            guard let bundleId = bundle.bundleIdentifier else { continue }
+            if seen.contains(bundleId) { continue }
 
-                // `??` only catches nil, not empty strings. Some apps set
-                // `CFBundleDisplayName` to "" rather than omitting the key,
-                // which would otherwise leak an empty row to the UI.
-                func nonEmpty(_ s: String?) -> String? {
-                    guard let s = s, !s.isEmpty else { return nil }
-                    return s
-                }
-                let name =
-                    nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                    ?? nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                    ?? url.deletingPathExtension().lastPathComponent
-
-                seen.insert(bundleId)
-                out.append(
-                    DiscoveredApp(
-                        name: name,
-                        bundleId: bundleId,
-                        bundlePath: url.path
-                    ))
+            // `??` only catches nil, not empty strings. Some apps set
+            // `CFBundleDisplayName` to "" rather than omitting the key,
+            // which would otherwise leak an empty row to the UI.
+            func nonEmpty(_ s: String?) -> String? {
+                guard let s = s, !s.isEmpty else { return nil }
+                return s
             }
+            let name =
+                nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? nonEmpty(bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? url.deletingPathExtension().lastPathComponent
+
+            seen.insert(bundleId)
+            out.append(
+                DiscoveredApp(
+                    name: name,
+                    bundleId: bundleId,
+                    bundlePath: url.path
+                ))
         }
 
         out.sort { $0.name.lowercased() < $1.name.lowercased() }
